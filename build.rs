@@ -9,9 +9,14 @@ fn main() {
 
     println!("cargo:rerun-if-changed=runtime");
     // build the runtime too (rust lib at ./runtime)
+    let mut args = vec!["build", "--release"];
+
+    #[cfg(windows)]
+    args.extend(["--target", "x86_64-pc-windows-gnu"]);
+
     std::process::Command::new("cargo")
         .current_dir("runtime")
-        .args(["build", "--release"])
+        .args(args)
         .status()
         .unwrap();
 }

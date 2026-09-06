@@ -28,15 +28,28 @@ pub fn compile(
 
     use std::process::Command;
 
-    let status = Command::new("cc")
-        .args([
-            &object_path.to_string_lossy(),
-            "-L./runtime/target/release",
-            "-lruntime",
-            "-o",
-            &output_path.to_string_lossy(),
-        ])
-        .status()?;
+    let mut args = vec![
+        object_path.to_string_lossy().into_owned(),
+        if cfg!(not(windows)) {
+            "-L./runtime/target/release".into()
+        } else {
+            "-L./runtime/target/x86_64-pc-windows-gnu/release".into()
+        },
+        "-lruntime".into(),
+    ];
+
+    #[cfg(windows)]
+    args.extend([
+        "-lws2_32".into(),
+        "-luserenv".into(),
+        "-ladvapi32".into(),
+        "-lntdll".into(),
+        "-lgcc".into(),
+    ]);
+
+    args.extend(["-o".into(), output_path.to_string_lossy().into_owned()]);
+
+    let status = Command::new("cc").args(args).status()?;
 
     if !status.success() {
         panic!("linking failed");
