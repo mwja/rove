@@ -1,3 +1,5 @@
+use std::fmt::Display;
+
 pub struct NodeId(usize);
 
 impl NodeId {
@@ -22,6 +24,14 @@ pub struct AstStmt {
 pub enum AstStmtKind {
     Expr(AstExpr),
     Print(AstPrintStmt),
+    Decl(AstDecl),
+    Assign(AstAssignStmt),
+}
+
+pub struct AstAssignStmt {
+    pub node_id: NodeId,
+    pub name: AstIdent,
+    pub expr: Box<AstExpr>,
 }
 
 pub struct AstExpr {
@@ -34,9 +44,35 @@ pub struct AstPrintStmt {
     pub expr: Box<AstExpr>,
 }
 
+pub struct AstDecl {
+    pub node_id: NodeId,
+    pub kind: AstDeclKind,
+}
+
+pub enum AstDeclKind {
+    Let(AstLetDecl),
+}
+
+pub struct AstLetDecl {
+    pub node_id: NodeId,
+    pub name: AstIdent,
+    pub expr: Box<AstExpr>,
+}
+
+pub struct AstIdent {
+    pub text: String,
+}
+
+impl Display for AstIdent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.text)
+    }
+}
+
 pub enum AstExprKind {
     Binary(AstBinaryExpr),
     Literal(AstLiteral),
+    Ident(AstIdent),
 }
 
 pub struct AstBinaryExpr {

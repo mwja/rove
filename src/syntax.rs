@@ -12,12 +12,40 @@ mod grammar {
     }
     pub enum Stmt {
         Expr(Spanned<Expr>, #[rust_sitter::leaf(text = ";")] ()),
+        Decl(Spanned<Decl>, #[rust_sitter::leaf(text = ";")] ()),
         Print(Spanned<PrintStmt>, #[rust_sitter::leaf(text = ";")] ()),
+        Assign(Spanned<AssignStmt>, #[rust_sitter::leaf(text = ";")] ()),
+    }
+
+    pub struct AssignStmt {
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = "=")]
+        _e: (),
+        pub expr: Box<Spanned<Expr>>,
+    }
+
+    pub enum Decl {
+        Let(Spanned<LetDecl>),
+    }
+
+    pub struct LetDecl {
+        #[rust_sitter::leaf(text = "let")]
+        _l: (),
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = "=")]
+        _e: (),
+        pub expr: Box<Spanned<Expr>>,
+    }
+
+    pub struct Ident {
+        #[rust_sitter::leaf(pattern = r"[a-zA-Z_][a-zA-Z0-9_]*", transform = |text: &str| text.to_string())]
+        pub text: String,
     }
 
     pub enum Expr {
         Binary(Spanned<BinaryExpr>),
         Literal(Spanned<Literal>),
+        Ident(Spanned<Ident>),
     }
 
     pub struct PrintStmt {
@@ -134,6 +162,39 @@ impl ProgramLowerer {
         match stmt {
             grammar::Stmt::Expr(expr, _) => ast::AstStmtKind::Expr(self.lower_expr(expr)),
             grammar::Stmt::Print(print, _) => ast::AstStmtKind::Print(self.lower_print_stmt(print)),
+            grammar::Stmt::Decl(decl, _) => ast::AstStmtKind::Decl(self.lower_decl(decl)),
+            grammar::Stmt::Assign(assign, _) => {
+                ast::AstStmtKind::Assign(self.lower_assign_stmt(assign))
+            }
+        }
+    }
+
+    fn lower_assign_stmt(&mut self, assign: Spanned<grammar::AssignStmt>) -> ast::AstAssignStmt {
+        ast::AstAssignStmt {
+            node_id: self.next_id(),
+            name: self.lower_ident(assign.value.name),
+            expr: Box::new(self.lower_expr(*assign.value.expr)),
+        }
+    }
+
+    fn lower_decl(&mut self, decl: Spanned<grammar::Decl>) -> ast::AstDecl {
+        ast::AstDecl {
+            node_id: self.next_id(),
+            kind: self.lower_decl_kind(decl.value),
+        }
+    }
+
+    fn lower_decl_kind(&mut self, decl: grammar::Decl) -> ast::AstDeclKind {
+        match decl {
+            grammar::Decl::Let(let_decl) => ast::AstDeclKind::Let(self.lower_let_decl(let_decl)),
+        }
+    }
+
+    fn lower_let_decl(&mut self, let_decl: Spanned<grammar::LetDecl>) -> ast::AstLetDecl {
+        ast::AstLetDecl {
+            node_id: self.next_id(),
+            name: self.lower_ident(let_decl.value.name),
+            expr: Box::new(self.lower_expr(*let_decl.value.expr)),
         }
     }
 
@@ -150,6 +211,13 @@ impl ProgramLowerer {
             grammar::Expr::Literal(literal) => {
                 ast::AstExprKind::Literal(self.lower_literal(literal))
             }
+            grammar::Expr::Ident(ident) => ast::AstExprKind::Ident(self.lower_ident(ident)),
+        }
+    }
+
+    fn lower_ident(&mut self, ident: Spanned<grammar::Ident>) -> ast::AstIdent {
+        ast::AstIdent {
+            text: ident.value.text,
         }
     }
 

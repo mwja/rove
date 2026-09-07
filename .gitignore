@@ -1,1 +1,6 @@
 /target
+
+# to filter out .rv.o (object files, always exposed for now) and no ending (bin)
+examples/*
+!examples/*.rv
+!examples/*.rs
