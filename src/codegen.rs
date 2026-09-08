@@ -3,23 +3,34 @@
 //! Currently just takes Ast as everything is a i64, will eventually
 //! take a ctxt with sidetables from a type pass.
 
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use cranelift::{
     codegen::{
-        Context,
-        entity::EntityRef,
-        ir::{AbiParam, Block, FuncRef, InstBuilder, SourceLoc, Type, Value, types},
+        ir::{AbiParam, FuncRef, InstBuilder, SourceLoc, Type, Value, types},
         settings::{self, Configurable},
     },
     frontend::{FunctionBuilder, FunctionBuilderContext, Variable},
-    module::{DataDescription, DataId, FuncId, Linkage, Module, default_libcall_names},
+    module::{FuncId, Linkage, Module, default_libcall_names},
     object::{ObjectBuilder, ObjectModule},
 };
 
 use crate::ast;
 
-pub fn generate_object(ast: ast::AstProgram) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+#[derive(Default)]
+pub struct CodegenOptions {
+    /// Emit the raw CLIF to the given path.
+    pub emit_clif_to: Option<PathBuf>,
+    /// Emit the cranelift optimized CLIF to the given path.
+    pub emit_opt_clif_to: Option<PathBuf>,
+}
+
+pub fn generate_object(
+    ast: ast::AstProgram,
+    options: Option<CodegenOptions>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let options = options.unwrap_or_default();
+
     let isa_builder = cranelift::native::builder().unwrap();
     let mut flag_builder = settings::builder();
     flag_builder.set("is_pic", "true")?;
@@ -56,6 +67,7 @@ pub fn generate_object(ast: ast::AstProgram) -> Result<Vec<u8>, Box<dyn std::err
     let block = fbuilder.create_block();
     fbuilder.append_block_params_for_function_params(block);
     fbuilder.switch_to_block(block);
+    fbuilder.seal_block(block);
 
     let codegen = CraneliftCodegen {
         module: &mut module,
@@ -65,10 +77,17 @@ pub fn generate_object(ast: ast::AstProgram) -> Result<Vec<u8>, Box<dyn std::err
         cached_functions: HashMap::new(),
     };
     codegen.lower(ast);
-    fbuilder.seal_block(block);
     fbuilder.finalize(module.target_config());
 
+    if let Some(path) = &options.emit_clif_to {
+        std::fs::write(path, ctx.func.display().to_string()).unwrap();
+    }
+
     module.define_function(main_id, &mut ctx)?;
+
+    if let Some(path) = &options.emit_opt_clif_to {
+        std::fs::write(path, ctx.func.display().to_string()).unwrap();
+    }
 
     let product = module.finish();
     let bytes = product
@@ -115,7 +134,63 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstStmtKind::Print(print) => self.lower_print(print),
             ast::AstStmtKind::Decl(decl) => self.lower_decl(decl),
             ast::AstStmtKind::Assign(assign) => self.lower_assign(assign),
+            ast::AstStmtKind::Block(block) => self.lower_block_stmt(block),
+            ast::AstStmtKind::If(if_) => self.lower_if_stmt(if_),
         };
+    }
+
+    /// Full disclosure: blocks do not have their own closures for now. This
+    /// is a known limitation that will be fixed once a HIR/Typeck may be added.
+    fn lower_block_stmt(&mut self, block: ast::AstBlockStmt) {
+        self.builder
+            .set_srcloc(SourceLoc::new(block.node_id.index() as u32));
+        for stmt in block.stmts {
+            self.lower_stmt(stmt);
+        }
+    }
+
+    fn lower_if_stmt(&mut self, if_stmt: ast::AstIfStmt) {
+        self.builder
+            .set_srcloc(SourceLoc::new(if_stmt.node_id.index() as u32));
+        let then_block = self.builder.create_block();
+        let else_block = if let Some(_) = if_stmt.else_ {
+            Some(self.builder.create_block())
+        } else {
+            None
+        };
+        let merge_block = self.builder.create_block();
+        let cond = self.lower_expr(*if_stmt.cond);
+        self.builder.ins().brif(
+            cond,
+            then_block,
+            // we don't pass block args yet,though that could be useful for
+            // closures, panics/errors, if statements as values, etc.
+            &[],
+            else_block.unwrap_or(merge_block),
+            &[],
+        );
+
+        self.builder.switch_to_block(then_block);
+        self.builder.seal_block(then_block);
+        self.lower_block_stmt(*if_stmt.then);
+        self.builder.ins().jump(merge_block, &[]);
+
+        if let Some(else_) = if_stmt.else_ {
+            self.builder.switch_to_block(else_block.unwrap());
+            self.builder.seal_block(else_block.unwrap());
+            match else_ {
+                ast::AstElseBranch::Block(block_stmt) => {
+                    self.lower_block_stmt(block_stmt);
+                }
+                ast::AstElseBranch::If(if_stmt) => {
+                    self.lower_if_stmt(*if_stmt);
+                }
+            }
+            self.builder.ins().jump(merge_block, &[]);
+        }
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
     }
 
     fn lower_assign(&mut self, assign: ast::AstAssignStmt) {

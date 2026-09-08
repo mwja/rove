@@ -15,6 +15,37 @@ mod grammar {
         Decl(Spanned<Decl>, #[rust_sitter::leaf(text = ";")] ()),
         Print(Spanned<PrintStmt>, #[rust_sitter::leaf(text = ";")] ()),
         Assign(Spanned<AssignStmt>, #[rust_sitter::leaf(text = ";")] ()),
+        Block(Spanned<BlockStmt>, #[rust_sitter::leaf(text = ";")] ()),
+        If(Spanned<IfStmt>),
+    }
+
+    pub struct IfStmt {
+        #[rust_sitter::leaf(text = "if")]
+        pub _if: (),
+        pub cond: Box<Spanned<Expr>>,
+        pub then: Spanned<BlockStmt>,
+        pub else_: Option<ElsePath>,
+    }
+
+    pub struct ElsePath {
+        #[rust_sitter::leaf(text = "else")]
+        pub _else: (),
+        pub branch: ElseBranch,
+    }
+
+    // `else` is followed by either a block, or directly another `if`
+    // (so `else if ... { }` chains still work without extra braces).
+    pub enum ElseBranch {
+        Block(Spanned<BlockStmt>),
+        ElseIf(Box<Spanned<IfStmt>>),
+    }
+
+    pub struct BlockStmt {
+        #[rust_sitter::leaf(text = "{")]
+        pub _b: (),
+        pub stmts: Vec<Spanned<Stmt>>,
+        #[rust_sitter::leaf(text = "}")]
+        pub _e: (),
     }
 
     pub struct AssignStmt {
@@ -165,6 +196,43 @@ impl ProgramLowerer {
             grammar::Stmt::Decl(decl, _) => ast::AstStmtKind::Decl(self.lower_decl(decl)),
             grammar::Stmt::Assign(assign, _) => {
                 ast::AstStmtKind::Assign(self.lower_assign_stmt(assign))
+            }
+            grammar::Stmt::Block(block, _) => ast::AstStmtKind::Block(self.lower_block_stmt(block)),
+            grammar::Stmt::If(if_stmt) => ast::AstStmtKind::If(self.lower_if_stmt(if_stmt)),
+        }
+    }
+
+    fn lower_block_stmt(&mut self, block: Spanned<grammar::BlockStmt>) -> ast::AstBlockStmt {
+        ast::AstBlockStmt {
+            node_id: self.next_id(),
+            stmts: block
+                .value
+                .stmts
+                .into_iter()
+                .map(|stmt| self.lower_stmt(stmt))
+                .collect(),
+        }
+    }
+
+    fn lower_if_stmt(&mut self, if_stmt: Spanned<grammar::IfStmt>) -> ast::AstIfStmt {
+        ast::AstIfStmt {
+            node_id: self.next_id(),
+            cond: Box::new(self.lower_expr(*if_stmt.value.cond)),
+            then: Box::new(self.lower_block_stmt(if_stmt.value.then)),
+            else_: if_stmt
+                .value
+                .else_
+                .map(|e| self.lower_else_branch(e.branch)),
+        }
+    }
+
+    fn lower_else_branch(&mut self, branch: grammar::ElseBranch) -> ast::AstElseBranch {
+        match branch {
+            grammar::ElseBranch::Block(block) => {
+                ast::AstElseBranch::Block(self.lower_block_stmt(block))
+            }
+            grammar::ElseBranch::ElseIf(if_stmt) => {
+                ast::AstElseBranch::If(Box::new(self.lower_if_stmt(*if_stmt)))
             }
         }
     }

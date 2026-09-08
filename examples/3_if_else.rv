@@ -1,0 +1,28 @@
+let a = 0;
+let b = 2;
+let c = a + b - 3;
+
+// No comparison operators yet, just non-zero checks
+if c {
+    // -1
+    print c;
+} else {
+    print 0;
+}
+
+
+// a is 0, never occurs
+if a {
+    print 999999;
+}
+
+if a {
+    print 0;
+} else if b {
+    print 1;
+    if c {
+        print 2;
+    }
+} else {
+    print 3;
+}

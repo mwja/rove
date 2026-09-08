@@ -26,6 +26,25 @@ pub enum AstStmtKind {
     Print(AstPrintStmt),
     Decl(AstDecl),
     Assign(AstAssignStmt),
+    Block(AstBlockStmt),
+    If(AstIfStmt),
+}
+
+pub struct AstBlockStmt {
+    pub node_id: NodeId,
+    pub stmts: Vec<AstStmt>,
+}
+
+pub struct AstIfStmt {
+    pub node_id: NodeId,
+    pub cond: Box<AstExpr>,
+    pub then: Box<AstBlockStmt>,
+    pub else_: Option<AstElseBranch>,
+}
+
+pub enum AstElseBranch {
+    Block(AstBlockStmt),
+    If(Box<AstIfStmt>),
 }
 
 pub struct AstAssignStmt {

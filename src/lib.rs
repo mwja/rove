@@ -14,7 +14,27 @@ pub fn compile(
     let raw = syntax::parse(&String::from_utf8(input)?);
 
     let ast = syntax::lower_to_ast(raw);
-    let bytes = codegen::generate_object(ast)?;
+    let bytes = codegen::generate_object(
+        ast,
+        Some(codegen::CodegenOptions {
+            emit_clif_to: {
+                let mut path = input_path.clone();
+                path.set_file_name(format!(
+                    "__{}.clif",
+                    input_path.file_name().unwrap().to_string_lossy()
+                ));
+                Some(path)
+            },
+            emit_opt_clif_to: {
+                let mut path = input_path.clone();
+                path.set_file_name(format!(
+                    "__{}.opt.clif",
+                    input_path.file_name().unwrap().to_string_lossy()
+                ));
+                Some(path)
+            },
+        }),
+    )?;
 
     // Generate a ugly named .o file just for compilation.
     let mut object_path = input_path.clone();

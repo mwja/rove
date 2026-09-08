@@ -13,10 +13,9 @@ project - hence the 'aimless' aspect of it.
 Also because it makes me think of romp and raft (both words for groups of otters
 and my first failed attempt at a language was called Otter).
 
-
 ## Use
 
-Rove is a very young language. It currently lacks everything but basic 64 bit 
+Rove is a very young language. It currently lacks everything but basic 64 bit
 integer arithmetic (not even division), print statements (with a rust generated
 runtime), and declaration/assignment.
 
@@ -26,16 +25,27 @@ to weeks trying to build an entire language and ended up with nothing to show
 for it.
 
 ## Examples
+
 To run any of the examples, you can do
+
 ```sh
 # Uses the .rs wrapper to compile and run the example
 cargo run --example 2_set_values_1_2 && ./examples/2_set_values_1_2
 ```
 
 You can also run any test directly on the Rove file
+
 ```sh
-cargo run -- ./examples/2_set_values_1_2.rv && ./examples/2_set_values_1_2 
+cargo run -- ./examples/2_set_values_1_2.rv && ./examples/2_set_values_1_2
 ```
+
+For now, it generates a few artifacts, namely
+
+- `file.rv.o` - The object file
+- `file.rv.clif` - The (unoptimized) Cranelift representation
+- `file.rv.opt.clif` - The (optimized) Cranelift representation
+
+This is for debugging and will likely be toned down as development moves on.
 
 ## Windows
 
