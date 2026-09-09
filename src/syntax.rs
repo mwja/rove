@@ -77,6 +77,11 @@ mod grammar {
         Binary(Spanned<BinaryExpr>),
         Literal(Spanned<Literal>),
         Ident(Spanned<Ident>),
+        Wrapped(
+            #[rust_sitter::leaf(text = "(")] (),
+            Box<Spanned<Expr>>,
+            #[rust_sitter::leaf(text = ")")] (),
+        ),
     }
 
     pub struct PrintStmt {
@@ -302,6 +307,8 @@ impl ProgramLowerer {
                 ast::AstExprKind::Literal(self.lower_literal(literal))
             }
             grammar::Expr::Ident(ident) => ast::AstExprKind::Ident(self.lower_ident(ident)),
+            // we discard a node id here, but that's okay
+            grammar::Expr::Wrapped(_, expr, _) => self.lower_expr(*expr).kind,
         }
     }
 
