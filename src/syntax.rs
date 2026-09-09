@@ -86,19 +86,41 @@ mod grammar {
     }
 
     pub enum BinaryExpr {
-        #[rust_sitter::prec_left(1)]
+        #[rust_sitter::prec_left(2)]
         Product {
             left: Box<Spanned<Expr>>,
             op: Spanned<ProductOp>,
             right: Box<Spanned<Expr>>,
         },
 
-        #[rust_sitter::prec_left(0)]
+        #[rust_sitter::prec_left(1)]
         Sum {
             left: Box<Spanned<Expr>>,
             op: Spanned<SumOp>,
             right: Box<Spanned<Expr>>,
         },
+
+        #[rust_sitter::prec_left(0)]
+        Comparison {
+            left: Box<Spanned<Expr>>,
+            op: Spanned<ComparisonOp>,
+            right: Box<Spanned<Expr>>,
+        },
+    }
+
+    pub enum ComparisonOp {
+        #[rust_sitter::leaf(text = "==")]
+        Eq,
+        #[rust_sitter::leaf(text = "!=")]
+        Ne,
+        #[rust_sitter::leaf(text = "<")]
+        Lt,
+        #[rust_sitter::leaf(text = ">")]
+        Gt,
+        #[rust_sitter::leaf(text = "<=")]
+        Le,
+        #[rust_sitter::leaf(text = ">=")]
+        Ge,
     }
 
     pub enum Literal {
@@ -307,6 +329,19 @@ impl ProgramLowerer {
                 operator: match op.value {
                     grammar::SumOp::Add => ast::AstBinaryOperator::Add,
                     grammar::SumOp::Sub => ast::AstBinaryOperator::Sub,
+                },
+            },
+            grammar::BinaryExpr::Comparison { left, op, right } => ast::AstBinaryExpr {
+                node_id: self.next_id(),
+                left: Box::new(self.lower_expr(*left)),
+                right: Box::new(self.lower_expr(*right)),
+                operator: match op.value {
+                    grammar::ComparisonOp::Eq => ast::AstBinaryOperator::Eq,
+                    grammar::ComparisonOp::Ne => ast::AstBinaryOperator::Ne,
+                    grammar::ComparisonOp::Lt => ast::AstBinaryOperator::Lt,
+                    grammar::ComparisonOp::Gt => ast::AstBinaryOperator::Gt,
+                    grammar::ComparisonOp::Le => ast::AstBinaryOperator::Le,
+                    grammar::ComparisonOp::Ge => ast::AstBinaryOperator::Ge,
                 },
             },
         }

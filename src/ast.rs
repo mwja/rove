@@ -106,6 +106,12 @@ pub enum AstBinaryOperator {
     Sub,
     Mul,
     Div,
+    Eq,
+    Ne,
+    Lt,
+    Gt,
+    Le,
+    Ge,
 }
 
 pub struct AstLiteral {

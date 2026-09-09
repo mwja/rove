@@ -7,7 +7,7 @@ use std::{collections::HashMap, path::PathBuf};
 
 use cranelift::{
     codegen::{
-        ir::{AbiParam, FuncRef, InstBuilder, SourceLoc, Type, Value, types},
+        ir::{AbiParam, FuncRef, InstBuilder, SourceLoc, Type, Value, condcodes::IntCC, types},
         settings::{self, Configurable},
     },
     frontend::{FunctionBuilder, FunctionBuilderContext, Variable},
@@ -249,6 +249,27 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstBinaryOperator::Sub => self.builder.ins().isub(x, y),
             ast::AstBinaryOperator::Mul => self.builder.ins().imul(x, y),
             ast::AstBinaryOperator::Div => todo!("floats are not yet supported"),
+            ast::AstBinaryOperator::Eq
+            | ast::AstBinaryOperator::Ne
+            | ast::AstBinaryOperator::Gt
+            | ast::AstBinaryOperator::Lt
+            | ast::AstBinaryOperator::Ge
+            | ast::AstBinaryOperator::Le => {
+                let res = self.builder.ins().icmp(
+                    match bin_expr.operator {
+                        ast::AstBinaryOperator::Eq => IntCC::Equal,
+                        ast::AstBinaryOperator::Ne => IntCC::NotEqual,
+                        ast::AstBinaryOperator::Gt => IntCC::SignedGreaterThan,
+                        ast::AstBinaryOperator::Lt => IntCC::SignedLessThan,
+                        ast::AstBinaryOperator::Ge => IntCC::SignedGreaterThanOrEqual,
+                        ast::AstBinaryOperator::Le => IntCC::SignedLessThanOrEqual,
+                        _ => unreachable!(),
+                    },
+                    x,
+                    y,
+                );
+                self.builder.ins().sextend(Type::int(64).unwrap(), res)
+            }
         }
     }
 
