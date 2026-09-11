@@ -1,8 +1,9 @@
 use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
 
-use crate::{arena::Store, ast::NodeId};
+use crate::{arena::Store, ast::NodeId, ty::typeck::BodyInfo};
 
 pub mod debug;
+pub mod res;
 pub mod typeck;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -51,7 +52,7 @@ impl Display for TyKind {
 /// Stores information on the types of nodes.
 pub struct TyCtxt {
     arena: RefCell<Store<TyKind>>,
-    node_to_ty: HashMap<NodeId, Rc<TyKind>>,
+    pub body: BodyInfo,
 }
 
 impl TyCtxt {
@@ -79,7 +80,7 @@ impl TyCtxt {
     pub fn new() -> Self {
         Self {
             arena: RefCell::new(Store::new()),
-            node_to_ty: HashMap::new(),
+            body: BodyInfo::default(),
         }
     }
 
@@ -87,16 +88,5 @@ impl TyCtxt {
         Ty {
             kind: self.intern(kind),
         }
-    }
-
-    pub fn node_ty(&self, node_id: NodeId) -> Option<Ty> {
-        match self.node_to_ty.get(&node_id).cloned() {
-            Some(kind) => Some(Ty { kind }),
-            None => None,
-        }
-    }
-
-    pub fn set_node_ty(&mut self, node_id: NodeId, ty: impl Into<Rc<TyKind>>) {
-        self.node_to_ty.insert(node_id, ty.into());
     }
 }

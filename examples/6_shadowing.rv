@@ -1,0 +1,24 @@
+let a = 1;
+// should output 1
+print a;
+{
+  let a = 2;
+  // should output 2
+  print a;
+
+  {
+    let a = 3;
+    // should output 3
+    print a;
+    a = 4;
+    // should output 4
+    print a;
+    let b = 2;
+  }
+
+  // should output 2
+  print a;
+}
+
+// should output 1
+print a;

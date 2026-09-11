@@ -21,7 +21,11 @@ use cranelift::{
 
 use crate::{
     ast,
-    ty::{Ty, TyCtxt, TyKind},
+    ty::{
+        Ty, TyCtxt, TyKind,
+        res::{LocalId, Res},
+        typeck::BodyInfo,
+    },
 };
 
 #[derive(Default)]
@@ -87,14 +91,15 @@ pub fn generate_object(
     fbuilder.switch_to_block(block);
     fbuilder.seal_block(block);
 
+    // for now we just focus on one body
     let codegen = CraneliftCodegen {
         module: &mut module,
         builder: &mut fbuilder,
         printf_u64_id,
         printf_f64_id,
-        variables: HashMap::new(),
+        locals: HashMap::new(),
         cached_functions: HashMap::new(),
-        tcx,
+        body: &tcx.body,
     };
     codegen.lower(ast);
     fbuilder.finalize(module.target_config());
@@ -122,14 +127,25 @@ struct CraneliftCodegen<'a, 'o> {
     builder: &'o mut FunctionBuilder<'a>,
     printf_u64_id: FuncId,
     printf_f64_id: FuncId,
-    variables: HashMap<String, Variable>,
+    locals: HashMap<LocalId, Variable>,
     cached_functions: HashMap<FuncId, FuncRef>,
-    tcx: &'o mut TyCtxt,
+    body: &'o BodyInfo,
 }
 
 impl<'a, 'o> CraneliftCodegen<'a, 'o> {
-    fn lookup(&self, ident: &str) -> Option<Variable> {
-        self.variables.get(ident).copied()
+    // Likely to change...
+    fn lookup(&self, res: &Res) -> Option<Variable> {
+        match res {
+            Res::Local(local_id) => self.locals.get(local_id).copied(),
+            _ => None,
+        }
+    }
+
+    fn insert(&mut self, res: Res, var: Variable) {
+        match res {
+            Res::Local(local_id) => self.locals.insert(local_id, var),
+            _ => None,
+        };
     }
 
     fn get_or_cache_function(&mut self, func_id: FuncId) -> FuncRef {
@@ -147,8 +163,6 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
 impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_stmt(&mut self, stmt: ast::AstStmt) {
-        self.builder
-            .set_srcloc(SourceLoc::new(stmt.node_id.index() as u32));
         match stmt.kind {
             ast::AstStmtKind::Expr(expr) => {
                 self.lower_expr(expr);
@@ -218,14 +232,14 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_assign(&mut self, assign: ast::AstAssignStmt) {
         self.builder
             .set_srcloc(SourceLoc::new(assign.node_id.index() as u32));
-        let target = self.lookup(&assign.name.text).unwrap();
+        let target = self
+            .lookup(&self.body.node_res(assign.node_id).unwrap())
+            .unwrap();
         let value = self.lower_expr(*assign.expr);
         self.builder.def_var(target, value);
     }
 
     fn lower_decl(&mut self, decl: ast::AstDecl) {
-        self.builder
-            .set_srcloc(SourceLoc::new(decl.node_id.index() as u32));
         match decl.kind {
             ast::AstDeclKind::Let(let_decl) => self.lower_let(let_decl),
         }
@@ -233,19 +247,23 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
     fn lower_let(&mut self, let_decl: ast::AstLetDecl) {
         self.builder
-            .set_srcloc(SourceLoc::new(let_decl.node_id.index() as u32));
+            .set_srcloc(SourceLoc::new(let_decl.name.node_id.index() as u32));
 
-        let ty = self.tcx.node_ty(let_decl.expr.node_id).unwrap();
+        let Res::Local(local_id) = self.body.node_res(let_decl.name.node_id).unwrap() else {
+            unreachable!();
+        };
+        let ty = self.body.local_ty(local_id).unwrap();
         let value = self.lower_expr(*let_decl.expr);
         // for now we only have i64s... so no need to check
         let variable = self.builder.declare_var(self.scalar_type(ty).unwrap());
         self.builder.def_var(variable, value);
-        self.variables.insert(let_decl.name.text.clone(), variable);
+
+        self.insert(self.body.node_res(let_decl.name.node_id).unwrap(), variable);
     }
 
     fn lower_expr(&mut self, expr: ast::AstExpr) -> Value {
         self.builder
-            .set_srcloc(SourceLoc::new(expr.node_id.index() as u32));
+            .set_srcloc(SourceLoc::new(expr.node_id().index() as u32));
         match expr.kind {
             ast::AstExprKind::Literal(_) => self.lower_lit(expr),
             ast::AstExprKind::Binary(_) => self.lower_bin_expr(expr),
@@ -255,8 +273,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
     fn lower_ident(&mut self, ident: ast::AstIdent) -> Value {
         self.builder.use_var(
-            self.lookup(&ident.text)
-                .expect(&format!("unable to find local variable: {ident}")),
+            self.lookup(&self.body.node_res(ident.node_id).unwrap())
+                .expect(&format!("unable to find local variable: {}", ident.text)),
         )
     }
 
@@ -264,12 +282,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let ast::AstExprKind::Binary(bin_expr) = expr.kind else {
             unreachable!()
         };
+        let x_ty = self.body.node_ty(bin_expr.left.node_id()).unwrap();
         let x = self.lower_expr(*bin_expr.left);
         let y = self.lower_expr(*bin_expr.right);
-        self.builder
-            .set_srcloc(SourceLoc::new(expr.node_id.index() as u32));
 
-        let res_ty = self.tcx.node_ty(expr.node_id).unwrap();
+        let res_ty = self.body.node_ty(bin_expr.node_id).unwrap();
         match bin_expr.operator {
             // later on we will typecheck this beforehand, as x could be a string.
             ast::AstBinaryOperator::Add => match res_ty.kind() {
@@ -299,7 +316,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             | ast::AstBinaryOperator::Lt
             | ast::AstBinaryOperator::Ge
             | ast::AstBinaryOperator::Le => {
-                let res = match res_ty.kind() {
+                // use left hand side type, cmp always returns i8 that we extend after.
+                let res = match x_ty.kind() {
                     TyKind::Int => self.builder.ins().icmp(
                         match bin_expr.operator {
                             ast::AstBinaryOperator::Eq => IntCC::Equal,
@@ -328,7 +346,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     ),
                     TyKind::Void => unreachable!(),
                 };
-                self.builder.ins().sextend(Type::int(64).unwrap(), res)
+
+                self.builder.ins().sextend(types::I64, res)
             }
         }
     }
@@ -337,7 +356,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let ast::AstExprKind::Literal(lit) = expr.kind else {
             unreachable!()
         };
-        let ty = self.scalar_type_for(expr.node_id).unwrap();
+        let ty = self.scalar_type_for(lit.node_id).unwrap();
         match lit.value {
             ast::AstLiteralKind::Int(v) => self.builder.ins().iconst(ty, v),
             ast::AstLiteralKind::Float(v) => self.builder.ins().f64const(v),
@@ -347,7 +366,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_print(&mut self, print: ast::AstPrintStmt) {
         self.builder
             .set_srcloc(SourceLoc::new(print.node_id.index() as u32));
-        let x_ty = self.tcx.node_ty(print.expr.node_id).unwrap();
+        let x_ty = self.body.node_ty(print.expr.node_id()).unwrap();
         let x = self.lower_expr(*print.expr);
         let printf_ref = self.get_or_cache_function(match x_ty.kind() {
             TyKind::Int => self.printf_u64_id,
@@ -378,7 +397,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn scalar_type_for(&self, node_id: ast::NodeId) -> Option<Type> {
-        self.tcx
+        self.body
             .node_ty(node_id)
             .and_then(|ty| self.scalar_type(ty))
     }

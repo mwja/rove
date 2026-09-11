@@ -1,10 +1,4 @@
-use std::{
-    collections::HashMap,
-    ops,
-    path::{Path, PathBuf},
-    range::Range,
-    rc::Rc,
-};
+use std::{collections::HashMap, ops, path::Path};
 
 use ariadne::{Cache, Label, Report};
 
@@ -177,7 +171,7 @@ impl Cache<&str> for AriadneCache {
             .ok_or_else(|| format!("File not found: {id}"))
     }
 
-    fn display<'a>(&self, id: &'a &str) -> Option<Box<dyn std::fmt::Display + 'a>> {
+    fn display<'a>(&self, id: &'a &str) -> std::option::Option<impl std::fmt::Display + 'a> {
         Some(Box::new(*id))
     }
 }

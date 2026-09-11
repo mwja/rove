@@ -9,3 +9,7 @@ if a {}
 
 // outputs 2.0
 print (1 + 2) / 3 + 1.0;
+
+if 1.0 == 1.0 {
+  print 1;
+}

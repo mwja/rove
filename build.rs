@@ -9,6 +9,8 @@ fn main() {
 
     println!("cargo:rerun-if-changed=runtime");
     // build the runtime too (rust lib at ./runtime)
+
+    #[allow(unused_mut)] // windows config
     let mut args = vec!["build", "--release"];
 
     #[cfg(windows)]

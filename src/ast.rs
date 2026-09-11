@@ -1,17 +1,6 @@
 use std::fmt::Display;
 
-#[derive(Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct NodeId(usize);
-
-impl NodeId {
-    pub fn new(index: usize) -> Self {
-        Self(index)
-    }
-
-    pub fn index(&self) -> usize {
-        self.0
-    }
-}
+indexable_id!(pub NodeId);
 
 pub struct AstProgram {
     pub statements: Vec<AstStmt>,
@@ -30,8 +19,6 @@ impl Display for AstProgram {
 }
 
 pub struct AstStmt {
-    // Not used for typing.
-    pub node_id: NodeId,
     pub kind: AstStmtKind,
 }
 
@@ -127,8 +114,19 @@ impl Display for AstAssignStmt {
 }
 
 pub struct AstExpr {
-    pub node_id: NodeId,
     pub kind: AstExprKind,
+}
+
+impl AstExpr {
+    /// Convenience method to get the node id of this expression regardless
+    /// of what type of expression it is.
+    pub fn node_id(&self) -> NodeId {
+        match &self.kind {
+            AstExprKind::Literal(lit) => lit.node_id,
+            AstExprKind::Binary(bin_expr) => bin_expr.node_id,
+            AstExprKind::Ident(ident) => ident.node_id,
+        }
+    }
 }
 
 impl Display for AstExpr {
@@ -149,7 +147,6 @@ impl Display for AstPrintStmt {
 }
 
 pub struct AstDecl {
-    pub node_id: NodeId,
     pub kind: AstDeclKind,
 }
 
@@ -172,7 +169,6 @@ impl Display for AstDeclKind {
 }
 
 pub struct AstLetDecl {
-    pub node_id: NodeId,
     pub name: AstIdent,
     pub expr: Box<AstExpr>,
 }
@@ -184,6 +180,7 @@ impl Display for AstLetDecl {
 }
 
 pub struct AstIdent {
+    pub node_id: NodeId,
     pub text: String,
 }
 
@@ -210,6 +207,7 @@ impl Display for AstExprKind {
 }
 
 pub struct AstBinaryExpr {
+    pub node_id: NodeId,
     pub left: Box<AstExpr>,
     pub right: Box<AstExpr>,
     pub operator: AstBinaryOperator,
@@ -254,6 +252,7 @@ impl Display for AstBinaryOperator {
 }
 
 pub struct AstLiteral {
+    pub node_id: NodeId,
     pub value: AstLiteralKind,
 }
 

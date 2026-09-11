@@ -15,7 +15,7 @@ mod grammar {
         Decl(Spanned<Decl>, #[rust_sitter::leaf(text = ";")] ()),
         Print(Spanned<PrintStmt>, #[rust_sitter::leaf(text = ";")] ()),
         Assign(Spanned<AssignStmt>, #[rust_sitter::leaf(text = ";")] ()),
-        Block(Spanned<BlockStmt>, #[rust_sitter::leaf(text = ";")] ()),
+        Block(Spanned<BlockStmt>),
         If(Spanned<IfStmt>),
     }
 
@@ -193,16 +193,11 @@ pub fn lower_to_ast(program: grammar::Program) -> ast::AstProgram {
 struct ProgramLowerer {
     next_node_id: usize,
 }
+impl_next_id!(ProgramLowerer::next_node_id -> NodeId);
 
 impl ProgramLowerer {
     fn new() -> Self {
         Self { next_node_id: 0 }
-    }
-
-    fn next_id(&mut self) -> NodeId {
-        let id = self.next_node_id;
-        self.next_node_id += 1;
-        NodeId::new(id)
     }
 
     pub fn lower(mut self, program: grammar::Program) -> ast::AstProgram {
@@ -218,7 +213,6 @@ impl ProgramLowerer {
 
     fn lower_stmt(&mut self, stmt: Spanned<grammar::Stmt>) -> ast::AstStmt {
         ast::AstStmt {
-            node_id: self.next_id(),
             kind: self.lower_stmt_kind(stmt.value),
         }
     }
@@ -231,7 +225,7 @@ impl ProgramLowerer {
             grammar::Stmt::Assign(assign, _) => {
                 ast::AstStmtKind::Assign(self.lower_assign_stmt(assign))
             }
-            grammar::Stmt::Block(block, _) => ast::AstStmtKind::Block(self.lower_block_stmt(block)),
+            grammar::Stmt::Block(block) => ast::AstStmtKind::Block(self.lower_block_stmt(block)),
             grammar::Stmt::If(if_stmt) => ast::AstStmtKind::If(self.lower_if_stmt(if_stmt)),
         }
     }
@@ -281,7 +275,6 @@ impl ProgramLowerer {
 
     fn lower_decl(&mut self, decl: Spanned<grammar::Decl>) -> ast::AstDecl {
         ast::AstDecl {
-            node_id: self.next_id(),
             kind: self.lower_decl_kind(decl.value),
         }
     }
@@ -294,7 +287,6 @@ impl ProgramLowerer {
 
     fn lower_let_decl(&mut self, let_decl: Spanned<grammar::LetDecl>) -> ast::AstLetDecl {
         ast::AstLetDecl {
-            node_id: self.next_id(),
             name: self.lower_ident(let_decl.value.name),
             expr: Box::new(self.lower_expr(*let_decl.value.expr)),
         }
@@ -302,7 +294,6 @@ impl ProgramLowerer {
 
     fn lower_expr(&mut self, expr: Spanned<grammar::Expr>) -> ast::AstExpr {
         ast::AstExpr {
-            node_id: self.next_id(),
             kind: self.lower_expr_kind(expr.value),
         }
     }
@@ -321,6 +312,7 @@ impl ProgramLowerer {
 
     fn lower_ident(&mut self, ident: Spanned<grammar::Ident>) -> ast::AstIdent {
         ast::AstIdent {
+            node_id: self.next_id(),
             text: ident.value.text,
         }
     }
@@ -328,6 +320,7 @@ impl ProgramLowerer {
     fn lower_binary(&mut self, binary: Spanned<grammar::BinaryExpr>) -> ast::AstBinaryExpr {
         match binary.value {
             grammar::BinaryExpr::Product { left, op, right } => ast::AstBinaryExpr {
+                node_id: self.next_id(),
                 left: Box::new(self.lower_expr(*left)),
                 right: Box::new(self.lower_expr(*right)),
                 operator: match op.value {
@@ -336,6 +329,7 @@ impl ProgramLowerer {
                 },
             },
             grammar::BinaryExpr::Sum { left, op, right } => ast::AstBinaryExpr {
+                node_id: self.next_id(),
                 left: Box::new(self.lower_expr(*left)),
                 right: Box::new(self.lower_expr(*right)),
                 operator: match op.value {
@@ -344,6 +338,7 @@ impl ProgramLowerer {
                 },
             },
             grammar::BinaryExpr::Comparison { left, op, right } => ast::AstBinaryExpr {
+                node_id: self.next_id(),
                 left: Box::new(self.lower_expr(*left)),
                 right: Box::new(self.lower_expr(*right)),
                 operator: match op.value {
@@ -360,6 +355,7 @@ impl ProgramLowerer {
 
     fn lower_literal(&mut self, literal: Spanned<grammar::Literal>) -> ast::AstLiteral {
         ast::AstLiteral {
+            node_id: self.next_id(),
             value: self.lower_literal_kind(literal.value),
         }
     }

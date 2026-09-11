@@ -2,6 +2,9 @@ use std::{fs::File, path::PathBuf};
 
 use crate::ty::TyCtxt;
 
+#[macro_use]
+mod id;
+
 mod arena;
 mod ast;
 mod codegen;
@@ -20,7 +23,7 @@ pub fn compile(
     let ast = syntax::lower_to_ast(raw);
 
     let mut ty_ctxt = TyCtxt::new();
-    ty::typeck::typeck_ast(&mut ty_ctxt, &ast)?;
+    ty_ctxt.body = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)?;
 
     let mut typed_output = File::create({
         let mut path = input_path.clone();
@@ -30,7 +33,7 @@ pub fn compile(
         ));
         path
     })?;
-    ty::debug::display_debug(&mut typed_output, &mut ty_ctxt, &ast)?;
+    ty::debug::display_debug(&mut typed_output, &ty_ctxt.body, &ast)?;
     std::fs::write(
         {
             let mut path = input_path.clone();
@@ -124,10 +127,13 @@ pub fn compile(
 #[macro_export]
 macro_rules! compileq {
     ($path:expr) => {{
-        let path = PathBuf::from($path);
+        let path = ::std::path::PathBuf::from($path);
         $crate::compileq!(path.clone(), path.with_extension(""))
     }};
     ($path:expr, $output:expr) => {
-        $crate::compile(PathBuf::from($path), PathBuf::from($output));
+        $crate::compile(
+            ::std::path::PathBuf::from($path),
+            ::std::path::PathBuf::from($output),
+        );
     };
 }
