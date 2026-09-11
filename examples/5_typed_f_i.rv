@@ -1,0 +1,11 @@
+let a = 0 + 1;
+let b = 1.;
+
+print a;
+print b;
+
+// should succeed
+if a {}
+
+// outputs 2.0
+print (1 + 2) / 3 + 1.0;

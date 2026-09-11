@@ -1,9 +1,13 @@
-use std::path::PathBuf;
+use std::{fs::File, path::PathBuf};
 
+use crate::ty::TyCtxt;
+
+mod arena;
 mod ast;
 mod codegen;
 mod sourcemap;
 mod syntax;
+mod ty;
 
 pub fn compile(
     input_path: PathBuf,
@@ -14,7 +18,33 @@ pub fn compile(
     let raw = syntax::parse(&String::from_utf8(input)?);
 
     let ast = syntax::lower_to_ast(raw);
+
+    let mut ty_ctxt = TyCtxt::new();
+    ty::typeck::typeck_ast(&mut ty_ctxt, &ast)?;
+
+    let mut typed_output = File::create({
+        let mut path = input_path.clone();
+        path.set_file_name(format!(
+            "__{}.typed",
+            input_path.file_name().unwrap().to_string_lossy()
+        ));
+        path
+    })?;
+    ty::debug::display_debug(&mut typed_output, &mut ty_ctxt, &ast)?;
+    std::fs::write(
+        {
+            let mut path = input_path.clone();
+            path.set_file_name(format!(
+                "__{}.ast",
+                input_path.file_name().unwrap().to_string_lossy()
+            ));
+            path
+        },
+        format!("{}", ast),
+    )?;
+
     let bytes = codegen::generate_object(
+        &mut ty_ctxt,
         ast,
         Some(codegen::CodegenOptions {
             emit_clif_to: {

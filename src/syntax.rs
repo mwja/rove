@@ -136,6 +136,13 @@ mod grammar {
             )]
             i64,
         ),
+        Float(
+            #[rust_sitter::leaf(
+              pattern = r"(?:0|[1-9]\d*)?\.[0-9]*",
+              transform = |v| v.parse().unwrap()
+            )]
+            f64,
+        ),
     }
 
     pub enum ProductOp {
@@ -321,7 +328,6 @@ impl ProgramLowerer {
     fn lower_binary(&mut self, binary: Spanned<grammar::BinaryExpr>) -> ast::AstBinaryExpr {
         match binary.value {
             grammar::BinaryExpr::Product { left, op, right } => ast::AstBinaryExpr {
-                node_id: self.next_id(),
                 left: Box::new(self.lower_expr(*left)),
                 right: Box::new(self.lower_expr(*right)),
                 operator: match op.value {
@@ -330,7 +336,6 @@ impl ProgramLowerer {
                 },
             },
             grammar::BinaryExpr::Sum { left, op, right } => ast::AstBinaryExpr {
-                node_id: self.next_id(),
                 left: Box::new(self.lower_expr(*left)),
                 right: Box::new(self.lower_expr(*right)),
                 operator: match op.value {
@@ -339,7 +344,6 @@ impl ProgramLowerer {
                 },
             },
             grammar::BinaryExpr::Comparison { left, op, right } => ast::AstBinaryExpr {
-                node_id: self.next_id(),
                 left: Box::new(self.lower_expr(*left)),
                 right: Box::new(self.lower_expr(*right)),
                 operator: match op.value {
@@ -356,7 +360,6 @@ impl ProgramLowerer {
 
     fn lower_literal(&mut self, literal: Spanned<grammar::Literal>) -> ast::AstLiteral {
         ast::AstLiteral {
-            node_id: self.next_id(),
             value: self.lower_literal_kind(literal.value),
         }
     }
@@ -364,6 +367,7 @@ impl ProgramLowerer {
     fn lower_literal_kind(&mut self, literal: grammar::Literal) -> ast::AstLiteralKind {
         match literal {
             grammar::Literal::Int(value) => ast::AstLiteralKind::Int(value),
+            grammar::Literal::Float(value) => ast::AstLiteralKind::Float(value),
         }
     }
 

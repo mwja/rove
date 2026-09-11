@@ -1,0 +1,23 @@
+error StringConcatError = {
+  StringCantGrow
+}
+
+func add_to_string(s: String, right: String) -> nil!StringConcatError
+  // check before hand if it can grow
+  check StringCantGrow: s.can_grow_to(s.len + right.len)
+  ensure string_grew_correctly: s.len == old(s.len) + right.len
+  // ensure string did not grow even though we failed to add.
+  errensure len_restored: s.len == old(s.len)
+  errensure cap_restored: s.cap == old(s.cap)
+{
+  // but it might fail anyway so we rethrow a diff error
+  try s.grow_to(s.len + right.len) throw StringCantGrow;
+  errdefer s.shrink_to(s.len);
+
+  s += right;
+}
+
+func main() {
+  let s = String::new();
+  try add_to_string(s, "hello");
+}
