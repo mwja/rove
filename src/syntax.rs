@@ -59,6 +59,13 @@ mod grammar {
         Assign(Spanned<AssignStmt>, #[rust_sitter::leaf(text = ";")] ()),
         Block(Spanned<BlockStmt>),
         If(Spanned<IfStmt>),
+        Return(Spanned<ReturnStmt>, #[rust_sitter::leaf(text = ";")] ()),
+    }
+
+    pub struct ReturnStmt {
+        #[rust_sitter::leaf(text = "return")]
+        pub _return: (),
+        pub expr: Option<Spanned<Expr>>,
     }
 
     pub struct IfStmt {
@@ -320,6 +327,18 @@ impl ProgramLowerer {
             }
             grammar::Stmt::Block(block) => ast::AstStmtKind::Block(self.lower_block_stmt(block)),
             grammar::Stmt::If(if_stmt) => ast::AstStmtKind::If(self.lower_if_stmt(if_stmt)),
+            grammar::Stmt::Return(return_stmt, _) => {
+                ast::AstStmtKind::Return(self.lower_return_stmt(return_stmt))
+            }
+        }
+    }
+
+    fn lower_return_stmt(
+        &mut self,
+        return_stmt: Spanned<grammar::ReturnStmt>,
+    ) -> ast::AstReturnStmt {
+        ast::AstReturnStmt {
+            expr: return_stmt.value.expr.map(|expr| self.lower_expr(expr)),
         }
     }
 

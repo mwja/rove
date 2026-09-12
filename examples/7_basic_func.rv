@@ -6,3 +6,11 @@ func greet() { print 42; output(43); }
 func output(digit: int) {
     print digit;
 }
+
+
+func double(value: int) -> int {
+    if value <= 0 {
+        return 0;
+    }
+    return value * 2;
+}

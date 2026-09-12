@@ -28,9 +28,10 @@ impl Display for Ty {
     }
 }
 
-#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+#[derive(Debug, Default, Clone, Hash, PartialEq, Eq)]
 pub enum TyKind {
     /// No meaningful value (most statements carry this type)
+    #[default]
     Void,
     /// An integer type with a 64 bit width (fixed for now)
     Int,
@@ -43,6 +44,16 @@ pub enum TyKind {
 impl From<Ty> for Rc<TyKind> {
     fn from(ty: Ty) -> Self {
         ty.kind
+    }
+}
+
+pub trait AsTy {
+    fn as_ty(&self) -> Ty;
+}
+
+impl AsTy for Rc<TyKind> {
+    fn as_ty(&self) -> Ty {
+        Ty { kind: self.clone() }
     }
 }
 

@@ -119,6 +119,7 @@ pub enum AstStmtKind {
     Assign(AstAssignStmt),
     Block(AstBlockStmt),
     If(AstIfStmt),
+    Return(AstReturnStmt),
 }
 
 impl Display for AstStmtKind {
@@ -130,7 +131,23 @@ impl Display for AstStmtKind {
             AstStmtKind::Assign(assign) => write!(f, "{};", assign),
             AstStmtKind::Block(block) => write!(f, "{};", block),
             AstStmtKind::If(if_stmt) => write!(f, "{}", if_stmt),
+            AstStmtKind::Return(return_stmt) => write!(f, "{};", return_stmt),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct AstReturnStmt {
+    pub expr: Option<AstExpr>,
+}
+
+impl Display for AstReturnStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "return")?;
+        if let Some(expr) = &self.expr {
+            write!(f, " {}", expr)?;
+        }
+        write!(f, ";")
     }
 }
 

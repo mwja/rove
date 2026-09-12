@@ -70,6 +70,14 @@ pub fn compile(
                 ));
                 Some(path)
             },
+            emit_cfg_to: {
+                let mut path = input_path.clone();
+                path.set_file_name(format!(
+                    "__{}.cfg",
+                    input_path.file_name().unwrap().to_string_lossy()
+                ));
+                Some(path)
+            },
         }),
     )?;
 

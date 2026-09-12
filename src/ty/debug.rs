@@ -87,7 +87,19 @@ fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
         }
         ast::AstStmtKind::Block(block) => format!("{};", display_block(body, block)),
         ast::AstStmtKind::If(if_stmt) => display_if(body, if_stmt),
+        ast::AstStmtKind::Return(return_stmt) => display_return(body, return_stmt),
     }
+}
+
+fn display_return(body: &BodyInfo, return_stmt: &ast::AstReturnStmt) -> String {
+    format!(
+        "{}; // return {}",
+        return_stmt,
+        match &return_stmt.expr {
+            Some(expr) => annotate_expr(body, expr),
+            None => "".to_string(),
+        }
+    )
 }
 
 fn display_block(body: &BodyInfo, block: &ast::AstBlockStmt) -> String {

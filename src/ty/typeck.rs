@@ -29,17 +29,32 @@ pub enum TypeError {
     IncorrectArgumentType(usize),
     #[error("cannot print func or void")]
     CannotPrintFuncOrVoid,
+    #[error("expected return value")]
+    ExpectedReturn,
+    #[error("did not expect return value")]
+    DidNotExpectReturn,
 }
 
-#[derive(Default, Debug)]
+#[derive(Debug)]
 pub struct BodyInfo {
     pub node_res: HashMap<ast::NodeId, Res>,
     pub local_tys: Vec<Ty>,
     pub param_tys: Vec<Ty>,
     pub node_tys: HashMap<ast::NodeId, Ty>,
+    pub return_ty: Ty,
 }
 
 impl BodyInfo {
+    pub fn new_with_return_ty(return_ty: Ty) -> Self {
+        Self {
+            node_res: HashMap::new(),
+            local_tys: Vec::new(),
+            param_tys: Vec::new(),
+            node_tys: HashMap::new(),
+            return_ty,
+        }
+    }
+
     pub fn node_ty(&self, node_id: ast::NodeId) -> Option<Ty> {
         self.node_tys.get(&node_id).cloned()
     }
@@ -73,20 +88,19 @@ struct TypeckCtxt<'c> {
     tcx: &'c mut TyCtxt,
     scopes: Vec<HashMap<String, Res>>,
     body: BodyInfo,
-    return_ty: Option<Ty>,
 }
 
 impl_next_id!(TypeckCtxt<'c>.next_id -> LocalId);
 impl_next_id!(TypeckCtxt<'c>.next_param_id -> ParamId, next_param_id);
 impl<'c> TypeckCtxt<'c> {
     pub fn new(tcx: &'c mut TyCtxt) -> Self {
+        let return_ty = tcx.void_ty();
         Self {
             tcx,
             scopes: Vec::new(),
-            body: BodyInfo::default(),
+            body: BodyInfo::new_with_return_ty(return_ty),
             next_id: 0,
             next_param_id: 0,
-            return_ty: None,
         }
     }
 
@@ -101,7 +115,8 @@ impl<'c> TypeckCtxt<'c> {
             tccx.declare_param(param.node_id, &param.name, ty.clone());
         }
 
-        tccx.return_ty = Some(sig.return_ty.clone());
+        // Replace return type.
+        tccx.body.return_ty = sig.return_ty.clone();
         tccx
     }
 
@@ -234,9 +249,36 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), TypeErr
                 return Err(TypeError::CannotPrintFuncOrVoid);
             }
         }
+        AstStmtKind::Return(return_stmt) => typeck_return(tccx, return_stmt)?,
     };
 
     Ok(())
+}
+
+fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Result<(), TypeError> {
+    let return_ty = return_stmt
+        .expr
+        .as_ref()
+        .and_then(|expr| typeck_expr(tccx, &expr).ok());
+
+    match (&return_ty, tccx.body.return_ty.kind()) {
+        // Returns wrong type
+        (Some(ty), expected) if ty.kind() != expected => Err(TypeError::IncompatibleTypes(
+            ty.clone(),
+            tccx.body.return_ty.clone(),
+        )),
+        // Returns but didn't expect return (non-void return in void context)
+        (Some(ty), TyKind::Void) if ty.kind() != &TyKind::Void => {
+            Err(TypeError::DidNotExpectReturn)
+        }
+        // Returns and expects return or no return and expects void
+        // This also covers returning (but returning void from somewhere else)
+        // or not returning at all in void context
+        (Some(_), _) | (None, TyKind::Void) => Ok(()),
+        // Did not return, expected return (see above for None, TyKind::Void)
+        // case handled.
+        (None, _) => Err(TypeError::ExpectedReturn),
+    }
 }
 
 fn typeck_if(tccx: &mut TypeckCtxt, stmt: &ast::AstIfStmt) -> Result<(), TypeError> {

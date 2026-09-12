@@ -5,9 +5,10 @@
 
 use cranelift::{
     codegen::{
+        cfg_printer::CFGPrinter,
         ir::{
-            AbiParam, Block, FuncRef, InstBuilder, SigRef, Signature, SourceLoc, Type,
-            UserExternalName, Value,
+            AbiParam, Block, BlockArg, FuncRef, InstBuilder, SigRef, Signature, SourceLoc,
+            StackSlotData, StackSlotKind, Type, UserExternalName, Value,
             condcodes::{FloatCC, IntCC},
             types,
         },
@@ -20,7 +21,7 @@ use cranelift::{
 use std::{collections::HashMap, io::Write as _, path::PathBuf};
 
 use crate::{
-    ast::{self, AstDef},
+    ast::{self, AstDef, NodeId},
     defs::{self, Def, DefKind, FuncSig},
     ty::{
         Ty, TyCtxt, TyKind,
@@ -89,6 +90,8 @@ pub struct CodegenOptions {
     pub emit_clif_to: Option<PathBuf>,
     /// Emit the cranelift optimized CLIF to the given path.
     pub emit_opt_clif_to: Option<PathBuf>,
+    /// Emit a DOT graph of the control flow graph to the given path.
+    pub emit_cfg_to: Option<PathBuf>,
 }
 
 pub fn generate_object(
@@ -174,6 +177,10 @@ pub fn generate_object(
         Some(path) => Some(std::fs::File::create(path).unwrap()),
         None => None,
     };
+    let mut emit_cfg_file = match &options.emit_cfg_to {
+        Some(path) => Some(std::fs::File::create(path).unwrap()),
+        None => None,
+    };
 
     let mut ctx = module.make_context();
     let defs = ast.defs;
@@ -198,11 +205,18 @@ pub fn generate_object(
         ctx.func.signature = func_sig.remove(&def_id).unwrap();
 
         let mut fbuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+        // disable in release builds of apps.
+        fbuilder.func.stencil.dfg.collect_debug_info();
+
         let block = fbuilder.create_block();
         fbuilder.append_block_params_for_function_params(block);
+
+        let landing_pad = fbuilder.create_block();
+        fbuilder.append_block_param(landing_pad, lower_ty(&mut module, &cx.body.return_ty));
+
+        // go back to main block.
         fbuilder.switch_to_block(block);
         fbuilder.seal_block(block);
-
         let codegen = CraneliftCodegen {
             module: &mut module,
             builder: &mut fbuilder,
@@ -212,10 +226,18 @@ pub fn generate_object(
             cached_functions: HashMap::new(),
             cached_signatures: HashMap::new(),
             entry_block: block,
+            landing_pad,
+            is_main: func_def.is_main,
             cx,
         };
 
         codegen.lower(func_def);
+        fbuilder.seal_block(landing_pad);
+
+        if let Some(file) = &mut emit_cfg_file {
+            writeln!(file, "{}", CFGPrinter::new(fbuilder.func).to_string()).unwrap();
+        }
+
         fbuilder.finalize(module.target_config());
 
         if let Some(file) = &mut emit_clif_file {
@@ -249,6 +271,12 @@ struct CraneliftCodegen<'a, 'o> {
     cached_signatures: HashMap<FuncSig, SigRef>,
     // Used to retrieve parameters from the entry block (hence function)
     entry_block: Block,
+    /// The landing pad is the final block of the whole function, errors may be
+    /// handled here in the future, etc.
+    ///
+    /// The landing pad takes ONE argument for now, the return type
+    landing_pad: Block,
+    is_main: bool,
     cx: CompilerCtxt<'o>,
 }
 
@@ -292,9 +320,68 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.cached_functions.insert(func_id, func_ref);
         func_ref
     }
+
+    fn loc(&mut self, node_id: &NodeId) {
+        self.builder
+            .set_srcloc(SourceLoc::new(node_id.index() as u32));
+    }
 }
 
 impl<'a, 'o> CraneliftCodegen<'a, 'o> {
+    fn lower(mut self, def: ast::AstFunctionDef) {
+        for stmt in def.body.stmts {
+            self.lower_stmt(stmt);
+        }
+
+        // build landing pad
+        if self.is_main {
+            self.build_main_landing_pad();
+        } else {
+            self.build_landing_pad();
+        }
+    }
+
+    fn is_current_block_terminated(&mut self) -> bool {
+        if let Some(current_block) = self.builder.current_block() {
+            if let Some(last_inst) = self.builder.func.layout.last_inst(current_block) {
+                let opcode = self.builder.func.dfg.insts[last_inst].opcode();
+                return opcode.is_terminator();
+            }
+        }
+        false
+    }
+
+    fn prepare_for_landing_pad(&mut self) {
+        // if current block does not jump, jump to landing pad
+        if !self.is_current_block_terminated() {
+            let ret_val = self.build_dummy_return_value();
+            self.builder.ins().jump(
+                self.landing_pad,
+                // really we should never end up here but typeck doesn't yet check
+                // all paths for a return value
+                [&BlockArg::Value(ret_val)],
+            );
+        }
+
+        self.builder.switch_to_block(self.landing_pad);
+    }
+
+    /// The main function has a special landing pad that (for now) always returns 0
+    fn build_main_landing_pad(&mut self) {
+        self.prepare_for_landing_pad();
+
+        let zero = self.builder.ins().iconst(types::I32, 0);
+        self.builder.ins().return_(&[zero]);
+    }
+
+    fn build_landing_pad(&mut self) {
+        self.prepare_for_landing_pad();
+        // Get the value from the block params and return. For now this is all
+        // we do but later we'll check for recoverable errors, etc.
+        let landing_pad_param = self.builder.block_params(self.landing_pad)[0];
+        self.builder.ins().return_(&[landing_pad_param]);
+    }
+
     fn lower_stmt(&mut self, stmt: ast::AstStmt) {
         match stmt.kind {
             ast::AstStmtKind::Expr(expr) => {
@@ -305,20 +392,57 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstStmtKind::Assign(assign) => self.lower_assign(assign),
             ast::AstStmtKind::Block(block) => self.lower_block_stmt(block),
             ast::AstStmtKind::If(if_) => self.lower_if_stmt(if_),
+            ast::AstStmtKind::Return(return_) => self.lower_return_stmt(return_),
         };
     }
 
+    fn build_dummy_return_value(&mut self) -> Value {
+        if self.is_main {
+            return self.builder.ins().iconst(types::I32, 0);
+        }
+        let ty = self.cx.body.return_ty.clone();
+        match ty.kind() {
+            TyKind::Float => self.builder.ins().f64const(0.0),
+            TyKind::Int | TyKind::Void => self.builder.ins().iconst(lower_ty(self.module, &ty), 0),
+            TyKind::Func(_) => {
+                // empty ptr to item on stack slot - dangerous but should be discarded. I haven't quite
+                // figured out how I want to deal with errors within the context of the landing pad.
+                let stack_slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+                    StackSlotKind::ExplicitSlot,
+                    4,
+                    4,
+                ));
+                let dummy_ptr = self.builder.ins().stack_addr(
+                    self.module.target_config().pointer_type(),
+                    stack_slot,
+                    0,
+                );
+
+                dummy_ptr
+            }
+        }
+    }
+
+    fn lower_return_stmt(&mut self, return_: ast::AstReturnStmt) {
+        let v = return_
+            .expr
+            .map(|expr| self.lower_expr(expr))
+            .unwrap_or_else(|| self.build_dummy_return_value());
+
+        let block_arg = BlockArg::Value(v);
+        // jump to landing pad
+        self.builder.ins().jump(self.landing_pad, [&block_arg]);
+    }
+
     fn lower_block_stmt(&mut self, block: ast::AstBlockStmt) {
-        self.builder
-            .set_srcloc(SourceLoc::new(block.node_id.index() as u32));
+        self.loc(&block.node_id);
         for stmt in block.stmts {
             self.lower_stmt(stmt);
         }
     }
 
     fn lower_if_stmt(&mut self, if_stmt: ast::AstIfStmt) {
-        self.builder
-            .set_srcloc(SourceLoc::new(if_stmt.node_id.index() as u32));
+        self.loc(&if_stmt.node_id);
         let then_block = self.builder.create_block();
         let else_block = if let Some(_) = if_stmt.else_ {
             Some(self.builder.create_block())
@@ -340,7 +464,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder.switch_to_block(then_block);
         self.builder.seal_block(then_block);
         self.lower_block_stmt(*if_stmt.then);
-        self.builder.ins().jump(merge_block, &[]);
+        if !self.is_current_block_terminated() {
+            self.builder.ins().jump(merge_block, &[]);
+        }
 
         if let Some(else_) = if_stmt.else_ {
             self.builder.switch_to_block(else_block.unwrap());
@@ -353,7 +479,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     self.lower_if_stmt(*if_stmt);
                 }
             }
-            self.builder.ins().jump(merge_block, &[]);
+            if !self.is_current_block_terminated() {
+                self.builder.ins().jump(merge_block, &[]);
+            }
         }
 
         self.builder.switch_to_block(merge_block);
@@ -361,8 +489,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_assign(&mut self, assign: ast::AstAssignStmt) {
-        self.builder
-            .set_srcloc(SourceLoc::new(assign.node_id.index() as u32));
+        self.loc(&assign.node_id);
         let target = self
             .lookup_local(&self.cx.body.node_res(assign.node_id).unwrap())
             .unwrap();
@@ -377,8 +504,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_let(&mut self, let_decl: ast::AstLetDecl) {
-        self.builder
-            .set_srcloc(SourceLoc::new(let_decl.name.node_id.index() as u32));
+        self.loc(&let_decl.name.node_id);
 
         let Res::Local(local_id) = self.cx.body.node_res(let_decl.name.node_id).unwrap() else {
             unreachable!();
@@ -396,8 +522,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_expr(&mut self, expr: ast::AstExpr) -> Value {
-        self.builder
-            .set_srcloc(SourceLoc::new(expr.node_id().index() as u32));
+        self.loc(&expr.node_id());
+
         match expr.kind {
             ast::AstExprKind::Literal(_) => self.lower_lit(expr),
             ast::AstExprKind::Binary(_) => self.lower_bin_expr(expr),
@@ -539,8 +665,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_print(&mut self, print: ast::AstPrintStmt) {
-        self.builder
-            .set_srcloc(SourceLoc::new(print.node_id.index() as u32));
+        self.loc(&print.node_id);
         let x_ty = self.cx.body.node_ty(print.expr.node_id()).unwrap();
         let x = self.lower_expr(*print.expr);
         let printf_ref = self.get_or_cache_function(match x_ty.kind() {
@@ -550,16 +675,6 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             TyKind::Func(_) => unreachable!(),
         });
         let _call = self.builder.ins().call(printf_ref, &[x]);
-    }
-
-    fn lower(mut self, def: ast::AstFunctionDef) {
-        for stmt in def.body.stmts {
-            self.lower_stmt(stmt);
-        }
-
-        let zero = self.builder.ins().iconst(types::I32, 0);
-
-        self.builder.ins().return_(&[zero]);
     }
 
     /// Type for single slot types. Structs (later) will require layouts and
