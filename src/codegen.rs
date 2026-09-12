@@ -539,19 +539,43 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             TyKind::Func(callee_sig) => callee_sig,
             _ => unreachable!(),
         };
-        let callee = self.lower_expr(*expr.callee);
         let args = expr
             .args
             .into_iter()
             .map(|arg| self.lower_expr(*arg))
             .collect::<Vec<_>>();
 
-        let sig = self.lower_sig_cached(callee_sig.clone());
+        let call_inst = match self.try_expr_function_ident(&expr.callee) {
+            Some(func_id) => {
+                let func_ref = self.get_or_cache_function(func_id);
+                self.builder.ins().call(func_ref, &args)
+            }
+            None => {
+                let callee = self.lower_expr(*expr.callee);
+                let sig = self.lower_sig_cached(callee_sig.clone());
 
-        let call_inst = self.builder.ins().call_indirect(sig, callee, &args);
+                self.builder.ins().call_indirect(sig, callee, &args)
+            }
+        };
+
         let results = self.builder.inst_results(call_inst);
 
         results[0]
+    }
+
+    /// Checks if the given ident is a direct function reference and returns
+    /// the proper cranelift `FuncId` if so.
+    fn try_expr_function_ident(&self, ident: &ast::AstExpr) -> Option<FuncId> {
+        if let ast::AstExprKind::Ident(ident) = &ident.kind {
+            let res = &self.cx.body.node_res(ident.node_id).unwrap();
+            if let Res::Def(def_id) = res {
+                self.cx.def_id_to_function_id(*def_id)
+            } else {
+                None
+            }
+        } else {
+            None
+        }
     }
 
     fn lower_ident(&mut self, ident: ast::AstIdent) -> Value {
