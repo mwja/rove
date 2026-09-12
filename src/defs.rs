@@ -79,6 +79,10 @@ impl<'d> DefCtxt<'d> {
 
     // used in first pass just to declare existence of a def and map it up.
     fn declare(&mut self, node_id: NodeId, name: String) -> DefId {
+        if self.name_to_def_id.contains_key(&name) {
+            // again: will cleanup panics later.
+            panic!("name already declared: {}", name);
+        }
         let def_id = self.next_id();
         self.node_id_to_def_id.insert(node_id, def_id);
         self.name_to_def_id.insert(name, def_id);

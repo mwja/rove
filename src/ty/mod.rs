@@ -47,16 +47,6 @@ impl From<Ty> for Rc<TyKind> {
     }
 }
 
-pub trait AsTy {
-    fn as_ty(&self) -> Ty;
-}
-
-impl AsTy for Rc<TyKind> {
-    fn as_ty(&self) -> Ty {
-        Ty { kind: self.clone() }
-    }
-}
-
 impl Display for TyKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

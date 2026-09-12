@@ -134,6 +134,7 @@ mod grammar {
         Call(Spanned<CallExpr>),
     }
 
+    #[rust_sitter::prec_left(99)]
     pub struct CallExpr {
         pub callee: Box<Spanned<Expr>>,
         #[rust_sitter::leaf(text = "(")]

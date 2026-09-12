@@ -259,7 +259,8 @@ fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Res
     let return_ty = return_stmt
         .expr
         .as_ref()
-        .and_then(|expr| typeck_expr(tccx, &expr).ok());
+        .map(|expr| typeck_expr(tccx, expr))
+        .map_or(Ok(None), |v| v.map(Some))?;
 
     match (&return_ty, tccx.body.return_ty.kind()) {
         // Returns wrong type

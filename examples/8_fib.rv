@@ -1,7 +1,7 @@
 // Main may not yet return a status code, that will come with errors
 func main() {
-  let fib_of_5 = fib(5)
-  print fib_of_5;
+  let fib_of_40 = fib(40);
+  print fib_of_40;
 }
 
 
