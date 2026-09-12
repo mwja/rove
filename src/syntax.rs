@@ -1,6 +1,11 @@
-use rust_sitter::Spanned;
+use std::collections::HashMap;
 
-use crate::ast::{self, NodeId};
+use rust_sitter::{Spanned, errors::ParseError};
+
+use crate::{
+    ast::{self, NodeId},
+    sourcemap::{SourceFileId, SourceMap, Span, SpanRecorder, report::Diagnostic},
+};
 
 #[rust_sitter::grammar("rove")]
 mod grammar {
@@ -244,24 +249,86 @@ mod grammar {
     }
 }
 
-pub fn parse(input: &str) -> grammar::Program {
+pub fn parse(
+    input: &str,
+    source_file_id: SourceFileId,
+) -> Result<grammar::Program, Vec<Diagnostic>> {
     // focus is getting it working. pretty print later.
-    grammar::parse(input).expect("to parse correctly")
+    let res = grammar::parse(input);
+    match res {
+        Ok(program) => Ok(program),
+        Err(err) => {
+            let mut diagnostics = Vec::new();
+            fn transform_diagnostic(
+                err: &ParseError,
+                diag: &mut Vec<Diagnostic>,
+                source_file_id: SourceFileId,
+            ) {
+                match err.reason {
+                    rust_sitter::errors::ParseErrorReason::FailedNode(ref errs) => {
+                        if errs.len() > 0 {
+                            errs.iter()
+                                .for_each(|err| transform_diagnostic(err, diag, source_file_id));
+                        } else {
+                            diag.push(Diagnostic::new("failed to parse").with_label(
+                                "error occured here",
+                                Span::from_span(source_file_id, (err.start, err.end)),
+                            ));
+                        }
+                    }
+                    rust_sitter::errors::ParseErrorReason::MissingToken(ref token) => {
+                        diag.push(Diagnostic::new("failed to parse").with_label(
+                            format!("expected {} here", token),
+                            Span::from_span(source_file_id, (err.start, err.end)),
+                        ));
+                    }
+                    rust_sitter::errors::ParseErrorReason::UnexpectedToken(ref token) => {
+                        diag.push(Diagnostic::new("failed to parse").with_label(
+                            format!("did not expect {} in this location", token),
+                            Span::from_span(source_file_id, (err.start, err.end)),
+                        ));
+                    }
+                };
+            }
+
+            err.iter()
+                .for_each(|err| transform_diagnostic(err, &mut diagnostics, source_file_id));
+
+            Err(diagnostics)
+        }
+    }
 }
 
-pub fn lower_to_ast(program: grammar::Program) -> ast::AstProgram {
-    ProgramLowerer::new().lower(program)
+pub fn lower_to_ast(
+    program: grammar::Program,
+    source_file_id: SourceFileId,
+    node_to_span: &mut SpanRecorder<NodeId>,
+) -> ast::AstProgram {
+    ProgramLowerer::new(source_file_id, node_to_span).lower(program)
 }
 
 // struct to keep track of nodes.
-struct ProgramLowerer {
+struct ProgramLowerer<'a> {
     next_node_id: usize,
+    source_file_id: SourceFileId,
+    node_to_span: &'a mut SpanRecorder<NodeId>,
 }
-impl_next_id!(ProgramLowerer.next_node_id -> NodeId);
+impl_next_id!(ProgramLowerer<'a>.next_node_id -> NodeId);
 
-impl ProgramLowerer {
-    fn new() -> Self {
-        Self { next_node_id: 0 }
+impl<'a> ProgramLowerer<'a> {
+    fn new(source_file_id: SourceFileId, node_to_span: &'a mut SpanRecorder<NodeId>) -> Self {
+        Self {
+            next_node_id: 0,
+            source_file_id,
+            node_to_span,
+        }
+    }
+
+    fn next_id_spanned(&mut self, span: (usize, usize)) -> NodeId {
+        let id = self.next_id();
+        self.node_to_span
+            .record(id, Span::from_span(self.source_file_id, span));
+        id
     }
 
     pub fn lower(mut self, program: grammar::Program) -> ast::AstProgram {
@@ -282,15 +349,19 @@ impl ProgramLowerer {
 
     fn lower_function_def(&mut self, func: Spanned<grammar::FunctionDef>) -> ast::AstFunctionDef {
         ast::AstFunctionDef {
-            node_id: self.next_id(),
+            node_id: self.next_id_spanned(func.span),
             name: func.value.name.text.clone(),
+            return_node_id: func
+                .return_ty
+                .as_ref()
+                .map(|r| self.next_id_spanned(r.ty.span)),
+            return_ty: self.lower_type(func.value.return_ty.and_then(|rty| Some(rty.ty))),
             args: func
                 .value
                 .args
                 .into_iter()
                 .map(|arg| self.lower_arg_def(arg))
                 .collect(),
-            return_ty: self.lower_type(func.value.return_ty.and_then(|rty| Some(rty.ty))),
             body: self.lower_block_stmt(func.value.body),
             is_main: func.value.name.text == "main",
         }
@@ -298,7 +369,7 @@ impl ProgramLowerer {
 
     fn lower_arg_def(&mut self, arg: Spanned<grammar::ArgDef>) -> ast::AstArgDef {
         ast::AstArgDef {
-            node_id: self.next_id(),
+            node_id: self.next_id_spanned(arg.span),
             name: arg.value.name.text.clone(),
             ty: self.lower_type(Some(arg.value.ty)),
         }
@@ -339,13 +410,14 @@ impl ProgramLowerer {
         return_stmt: Spanned<grammar::ReturnStmt>,
     ) -> ast::AstReturnStmt {
         ast::AstReturnStmt {
+            node_id: self.next_id_spanned(return_stmt.span),
             expr: return_stmt.value.expr.map(|expr| self.lower_expr(expr)),
         }
     }
 
     fn lower_block_stmt(&mut self, block: Spanned<grammar::BlockStmt>) -> ast::AstBlockStmt {
         ast::AstBlockStmt {
-            node_id: self.next_id(),
+            node_id: self.next_id_spanned(block.span),
             stmts: block
                 .value
                 .stmts
@@ -357,7 +429,7 @@ impl ProgramLowerer {
 
     fn lower_if_stmt(&mut self, if_stmt: Spanned<grammar::IfStmt>) -> ast::AstIfStmt {
         ast::AstIfStmt {
-            node_id: self.next_id(),
+            node_id: self.next_id_spanned(if_stmt.span),
             cond: Box::new(self.lower_expr(*if_stmt.value.cond)),
             then: Box::new(self.lower_block_stmt(if_stmt.value.then)),
             else_: if_stmt
@@ -380,7 +452,7 @@ impl ProgramLowerer {
 
     fn lower_assign_stmt(&mut self, assign: Spanned<grammar::AssignStmt>) -> ast::AstAssignStmt {
         ast::AstAssignStmt {
-            node_id: self.next_id(),
+            node_id: self.next_id_spanned(assign.span),
             name: self.lower_ident(assign.value.name),
             expr: Box::new(self.lower_expr(*assign.value.expr)),
         }
@@ -420,15 +492,16 @@ impl ProgramLowerer {
             grammar::Expr::Ident(ident) => ast::AstExprKind::Ident(self.lower_ident(ident)),
             // we discard a node id here, but that's okay
             grammar::Expr::Wrapped(_, expr, _) => self.lower_expr(*expr).kind,
-            grammar::Expr::Call(call) => ast::AstExprKind::Call(self.lower_call(call.value)),
+            grammar::Expr::Call(call) => ast::AstExprKind::Call(self.lower_call(call)),
         }
     }
 
-    fn lower_call(&mut self, call: grammar::CallExpr) -> ast::AstCallExpr {
+    fn lower_call(&mut self, call: Spanned<grammar::CallExpr>) -> ast::AstCallExpr {
         ast::AstCallExpr {
-            node_id: self.next_id(),
-            callee: Box::new(self.lower_expr(*call.callee)),
+            node_id: self.next_id_spanned(call.span),
+            callee: Box::new(self.lower_expr(*call.value.callee)),
             args: call
+                .value
                 .args
                 .into_iter()
                 .map(|arg| Box::new(self.lower_expr(*arg)))
@@ -438,7 +511,7 @@ impl ProgramLowerer {
 
     fn lower_ident(&mut self, ident: Spanned<grammar::Ident>) -> ast::AstIdent {
         ast::AstIdent {
-            node_id: self.next_id(),
+            node_id: self.next_id_spanned(ident.span),
             text: ident.value.text,
         }
     }
@@ -446,7 +519,7 @@ impl ProgramLowerer {
     fn lower_binary(&mut self, binary: Spanned<grammar::BinaryExpr>) -> ast::AstBinaryExpr {
         match binary.value {
             grammar::BinaryExpr::Product { left, op, right } => ast::AstBinaryExpr {
-                node_id: self.next_id(),
+                node_id: self.next_id_spanned(binary.span),
                 left: Box::new(self.lower_expr(*left)),
                 right: Box::new(self.lower_expr(*right)),
                 operator: match op.value {
@@ -455,7 +528,7 @@ impl ProgramLowerer {
                 },
             },
             grammar::BinaryExpr::Sum { left, op, right } => ast::AstBinaryExpr {
-                node_id: self.next_id(),
+                node_id: self.next_id_spanned(binary.span),
                 left: Box::new(self.lower_expr(*left)),
                 right: Box::new(self.lower_expr(*right)),
                 operator: match op.value {
@@ -464,7 +537,7 @@ impl ProgramLowerer {
                 },
             },
             grammar::BinaryExpr::Comparison { left, op, right } => ast::AstBinaryExpr {
-                node_id: self.next_id(),
+                node_id: self.next_id_spanned(binary.span),
                 left: Box::new(self.lower_expr(*left)),
                 right: Box::new(self.lower_expr(*right)),
                 operator: match op.value {
@@ -481,7 +554,7 @@ impl ProgramLowerer {
 
     fn lower_literal(&mut self, literal: Spanned<grammar::Literal>) -> ast::AstLiteral {
         ast::AstLiteral {
-            node_id: self.next_id(),
+            node_id: self.next_id_spanned(literal.span),
             value: self.lower_literal_kind(literal.value),
         }
     }
@@ -495,7 +568,7 @@ impl ProgramLowerer {
 
     fn lower_print_stmt(&mut self, stmt: Spanned<grammar::PrintStmt>) -> ast::AstPrintStmt {
         ast::AstPrintStmt {
-            node_id: self.next_id(),
+            node_id: self.next_id_spanned(stmt.span),
             expr: Box::new(self.lower_expr(*stmt.value.expr)),
         }
     }

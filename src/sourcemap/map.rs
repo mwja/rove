@@ -1,17 +1,19 @@
-use std::{collections::HashMap, ops, path::Path, range::Range, rc::Rc};
+use std::{collections::HashMap, hash::Hash, ops, path::Path, range::Range, rc::Rc};
 
 use thiserror::Error;
 
+use crate::sourcemap::report::Diagnostic;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct SourceFileId(pub u32);
+pub struct SourceFileId(pub usize);
 
 /// Stores a span and a file reference. If you need to create this, use
 /// the rust-sitter feature and [SourceMap::load]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Span {
     pub file: SourceFileId,
-    pub start: u32,
-    pub end: u32,
+    pub start: usize,
+    pub end: usize,
 }
 
 impl Into<ops::Range<usize>> for &Span {
@@ -21,7 +23,7 @@ impl Into<ops::Range<usize>> for &Span {
 }
 
 impl Span {
-    pub fn new(file: SourceFileId, start: u32, end: u32) -> Self {
+    pub fn new(file: SourceFileId, start: usize, end: usize) -> Self {
         Self { file, start, end }
     }
 
@@ -38,12 +40,12 @@ impl Span {
         })
     }
 
-    pub fn length(&self) -> u32 {
+    pub fn length(&self) -> usize {
         self.end - self.start
     }
 
-    pub fn from_span(source: SourceFileId, value: (usize, usize)) -> Self {
-        Span::new(source, value.0 as u32, value.1 as u32)
+    pub fn from_span(source: SourceFileId, (start, end): (usize, usize)) -> Self {
+        Span::new(source, start, end)
     }
 }
 
@@ -109,14 +111,14 @@ impl SourceMap {
         self.files
             .iter()
             .enumerate()
-            .map(|(i, file)| (SourceFileId(i as u32), file))
+            .map(|(i, file)| (SourceFileId(i as usize), file))
     }
 
     pub fn add_file(&mut self, path: Box<Path>, source: String) -> SourceFileId {
         if let Some(id) = self.map.get(&path) {
             return *id;
         }
-        let id = SourceFileId(self.files.len() as u32);
+        let id = SourceFileId(self.files.len() as usize);
         let length = source.len();
         self.files.push(SourceFile {
             path: path.clone(),
@@ -229,5 +231,51 @@ impl Span {
         iter.try_fold(first, |acc, span| {
             acc.combine(&span).ok_or(SpanError::DifferentFiles)
         })
+    }
+}
+
+pub struct SpanRecorder<T: Hash + Eq> {
+    map: HashMap<T, Span>,
+}
+
+impl<T: Hash + Eq> SpanRecorder<T> {
+    pub fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+        }
+    }
+
+    pub fn record(&mut self, key: T, span: Span) {
+        self.map.insert(key, span);
+    }
+
+    pub fn get(&self, key: &T) -> Option<&Span> {
+        self.map.get(key)
+    }
+}
+
+pub trait DiagnoseSimple<T: Hash + Eq> {
+    fn diagnose_simple(&self, recorder: &mut SpanRecorder<T>) -> Diagnostic;
+}
+
+impl<T: Hash + Eq, U: DiagnoseSimple<T>> DiagnoseWith<T> for U {
+    fn diagnose_with(&self, recorder: &mut SpanRecorder<T>) -> Vec<Diagnostic> {
+        vec![self.diagnose_simple(recorder)]
+    }
+}
+
+pub trait DiagnoseWith<T: Hash + Eq> {
+    fn diagnose_with(&self, recorder: &mut SpanRecorder<T>) -> Vec<Diagnostic>;
+}
+
+pub trait DiagnoseManyWith<T: Hash + Eq> {
+    fn diagnose_many_with(&self, recorder: &mut SpanRecorder<T>) -> Vec<Diagnostic>;
+}
+
+impl<T: Hash + Eq, U: DiagnoseWith<T>> DiagnoseManyWith<T> for Vec<U> {
+    fn diagnose_many_with(&self, recorder: &mut SpanRecorder<T>) -> Vec<Diagnostic> {
+        self.iter()
+            .flat_map(|item| item.diagnose_with(recorder))
+            .collect()
     }
 }

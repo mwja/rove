@@ -1,38 +1,204 @@
+use std::process::Termination;
+
 use thiserror::Error;
 
 use super::*;
 use crate::{
     ast::{self, AstIdent, AstLetDecl, AstStmtKind},
     defs::{self, FuncSig},
+    sourcemap::{DiagnoseWith, report::Diagnostic},
     ty::res::{LocalId, ParamId, Res},
 };
 
 #[derive(Debug, Error)]
 pub enum TypeError {
     #[error("unable to resolve the type of {0}")]
-    UnresolvableType(String),
+    UnresolvableType(String, NodeId),
     #[error("types {0} and {1} are incompatible")]
-    IncompatibleTypes(Ty, Ty),
+    IncompatibleTypes(Ty, Ty, NodeId, NodeId),
     #[error("condition for if statement must be an int")]
-    IfConditionNotInt,
-    #[error("expression on void (operator of {0})")]
-    ExpressionOnVoid(ast::AstBinaryOperator),
-    #[error("expression on func ({0}) (operator of {1})")]
-    ExpressionOnFunc(Ty, ast::AstBinaryOperator),
+    IfConditionNotInt(NodeId, Ty),
+    #[error("it is not possible to perform operations on void values")]
+    ExpressionOnVoid(ast::AstBinaryOperator, NodeId),
+    #[error("it is not possible to perform operations on functions")]
+    ExpressionOnFunc(Ty, ast::AstBinaryOperator, NodeId),
     #[error("cannot resolve name {0}")]
-    CannotResolve(String),
+    CannotResolve(String, NodeId),
     #[error("cannot call non-function")]
-    CannotCallNonFunction,
+    CannotCallNonFunction(NodeId),
     #[error("incorrect number of arguments")]
-    IncorrectNumberOfArguments,
-    #[error("incorrect argument type at {0}")]
-    IncorrectArgumentType(usize),
+    IncorrectNumberOfArguments(NodeId, usize, NodeId, usize),
+    #[error("incorrect argument type (expected {0} for argument {2}, got {1})")]
+    IncorrectArgumentType(Ty, Ty, usize, NodeId),
     #[error("cannot print func or void")]
-    CannotPrintFuncOrVoid,
+    CannotPrintFuncOrVoid(NodeId),
     #[error("expected return value")]
-    ExpectedReturn,
+    ExpectedReturn(NodeId, NodeId, Ty),
     #[error("did not expect return value")]
-    DidNotExpectReturn,
+    DidNotExpectReturn(NodeId, Ty),
+}
+
+impl TypeError {
+    fn as_code(&self) -> Option<usize> {
+        use TypeError::*;
+        match self {
+            UnresolvableType(..) => Some(1),
+            IncompatibleTypes(..) => Some(2),
+            IfConditionNotInt(..) => Some(3),
+            ExpressionOnVoid(..) => Some(4),
+            ExpressionOnFunc(..) => Some(5),
+            CannotResolve(..) => Some(6),
+            CannotCallNonFunction(..) => Some(7),
+            IncorrectNumberOfArguments(..) => Some(8),
+            IncorrectArgumentType(..) => Some(9),
+            CannotPrintFuncOrVoid(..) => Some(10),
+            ExpectedReturn(..) => Some(11),
+            DidNotExpectReturn(..) => Some(12),
+        }
+    }
+}
+
+impl DiagnoseWith<NodeId> for TypeError {
+    fn diagnose_with(
+        &self,
+        recorder: &mut crate::sourcemap::SpanRecorder<NodeId>,
+    ) -> Vec<Diagnostic> {
+        use TypeError::*;
+        let message = self.to_string();
+        match self {
+            UnresolvableType(_, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "item is here"),
+                ]
+            }
+            IncompatibleTypes(left_ty, right_ty, left_node, right_node) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            left_node,
+                            format!("this value has type {}", left_ty),
+                        )
+                        .with_label_from(
+                            recorder,
+                            right_node,
+                            format!("but this value has type {}", right_ty),
+                        ),
+                ]
+            }
+            IfConditionNotInt(node_id, ty) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("condition of type {} is here", ty),
+                        ),
+                ]
+            }
+            ExpressionOnVoid(op, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("attempted to use {} on this value", op),
+                        ),
+                ]
+            }
+            ExpressionOnFunc(ty, op, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("attempted to use {} on this function ({})", op, ty),
+                        ),
+                ]
+            }
+            CannotResolve(_, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "name is here"),
+                ]
+            }
+            CannotCallNonFunction(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "attempted to call a non-function here",
+                        ),
+                ]
+            }
+            IncorrectNumberOfArguments(callee, args, func_node_id, correct_args) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            callee,
+                            format!("attempted to call here with {} arguments", args),
+                        )
+                        .with_label_from(
+                            recorder,
+                            func_node_id,
+                            format!("function is defined here with {} arguments", correct_args),
+                        ),
+                ]
+            }
+            IncorrectArgumentType(_, passed_ty, _, arg) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            arg,
+                            format!("incorrect argument of type {} passed here", passed_ty),
+                        ),
+                ]
+            }
+            CannotPrintFuncOrVoid(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "attempted to print here"),
+                ]
+            }
+            ExpectedReturn(node_id, ret_node_id, ty) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("expected return value of type {}", ty),
+                        )
+                        .with_label_from(recorder, ret_node_id, "return type defined here"),
+                ]
+            }
+            DidNotExpectReturn(node_id, ty) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("did not expect return value (found value of type {})", ty),
+                        ),
+                ]
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -88,6 +254,27 @@ struct TypeckCtxt<'c> {
     tcx: &'c mut TyCtxt,
     scopes: Vec<HashMap<String, Res>>,
     body: BodyInfo,
+    errors: Vec<TypeError>,
+
+    // Node IDs for diagnostics
+    func_node_id: ast::NodeId,
+    return_node_id: Option<ast::NodeId>,
+}
+
+trait Reported {
+    type Output;
+    fn reported(self, tccx: &mut TypeckCtxt) -> Result<Self::Output, ()>;
+}
+
+impl<T> Reported for Result<T, TypeError> {
+    type Output = T;
+
+    fn reported(self, tccx: &mut TypeckCtxt) -> Result<T, ()> {
+        match self {
+            Ok(t) => Ok(t),
+            Err(e) => Err(tccx.report(e)),
+        }
+    }
 }
 
 impl_next_id!(TypeckCtxt<'c>.next_id -> LocalId);
@@ -101,6 +288,9 @@ impl<'c> TypeckCtxt<'c> {
             body: BodyInfo::new_with_return_ty(return_ty),
             next_id: 0,
             next_param_id: 0,
+            errors: Vec::new(),
+            func_node_id: ast::NodeId::new(0),
+            return_node_id: None,
         }
     }
 
@@ -111,13 +301,21 @@ impl<'c> TypeckCtxt<'c> {
     ) -> Self {
         let mut tccx = Self::new(tcx);
         tccx.open_scope();
+
+        println!("{:?}", def.args);
         for (param, ty) in def.args.iter().zip(sig.param_tys.iter()) {
             tccx.declare_param(param.node_id, &param.name, ty.clone());
         }
 
         // Replace return type.
         tccx.body.return_ty = sig.return_ty.clone();
+        tccx.func_node_id = def.node_id;
+        tccx.return_node_id = def.return_node_id;
         tccx
+    }
+
+    fn report(&mut self, err: TypeError) {
+        self.errors.push(err);
     }
 
     fn declare_local(&mut self, node_id: NodeId, name: &str, ty: Ty) -> LocalId {
@@ -185,8 +383,11 @@ impl<'c> TypeckCtxt<'c> {
         self.scopes.pop();
     }
 
-    pub fn finish(self) -> BodyInfo {
-        self.body
+    pub fn finish(self) -> Result<BodyInfo, Vec<TypeError>> {
+        if !self.errors.is_empty() {
+            return Err(self.errors);
+        }
+        Ok(self.body)
     }
 }
 
@@ -194,8 +395,9 @@ impl<'c> TypeckCtxt<'c> {
 pub fn typeck_ast(
     tcx: &mut TyCtxt,
     program: &ast::AstProgram,
-) -> Result<HashMap<DefId, BodyInfo>, TypeError> {
+) -> Result<HashMap<DefId, BodyInfo>, Vec<TypeError>> {
     let mut results = HashMap::new();
+    let mut errors = Vec::new();
     for ast_def in program.defs.iter() {
         match ast_def {
             ast::AstDef::Function(ast_func_def) => {
@@ -210,46 +412,58 @@ pub fn typeck_ast(
                     } => {
                         let mut tccx = TypeckCtxt::new_with_func_sig(tcx, ast_func_def, &sig);
                         for stmt in ast_func_def.body.stmts.iter() {
-                            typeck_stmt(&mut tccx, stmt)?;
+                            let _ = typeck_stmt(&mut tccx, stmt);
                         }
-                        results.insert(def_id, tccx.finish());
+                        match tccx.finish() {
+                            Ok(res) => {
+                                results.insert(def_id, res);
+                            }
+                            Err(err) => {
+                                errors.extend(err);
+                            }
+                        };
                     }
                 }
             }
         }
     }
 
+    if !errors.is_empty() {
+        return Err(errors);
+    }
+
     Ok(results)
 }
 
-fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), TypeError> {
+fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
     match &stmt.kind {
         AstStmtKind::Expr(expr) => {
-            typeck_expr(tccx, expr)?;
+            typeck_expr(tccx, expr).reported(tccx)?;
         }
         AstStmtKind::Decl(decl) => {
-            typeck_decl(tccx, decl)?;
+            typeck_decl(tccx, decl).reported(tccx)?;
         }
         AstStmtKind::Assign(ass) => {
             let target = tccx
                 .resolve_local(&ass.name.text)
-                .ok_or_else(|| TypeError::CannotResolve(ass.name.text.clone()))?;
+                .ok_or_else(|| TypeError::CannotResolve(ass.name.text.clone(), ass.name.node_id))
+                .reported(tccx)?;
 
             tccx.body.set_node_res(ass.node_id, target);
-            typeck_expr(tccx, &ass.expr)?;
+            typeck_expr(tccx, &ass.expr).reported(tccx)?;
         }
         AstStmtKind::If(stmt) => typeck_if(tccx, stmt)?,
         AstStmtKind::Block(block) => typeck_block(tccx, block)?,
         AstStmtKind::Print(stmt) => {
             // for now can only print expressions
-            let ty = typeck_expr(tccx, &stmt.expr)?;
+            let ty = typeck_expr(tccx, &stmt.expr).reported(tccx)?;
 
             // Cannot print voids and funcs
             if matches!(ty.kind(), TyKind::Func(..) | TyKind::Void) {
-                return Err(TypeError::CannotPrintFuncOrVoid);
+                return Err(TypeError::CannotPrintFuncOrVoid(stmt.node_id)).reported(tccx);
             }
         }
-        AstStmtKind::Return(return_stmt) => typeck_return(tccx, return_stmt)?,
+        AstStmtKind::Return(return_stmt) => typeck_return(tccx, return_stmt).reported(tccx)?,
     };
 
     Ok(())
@@ -263,29 +477,35 @@ fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Res
         .map_or(Ok(None), |v| v.map(Some))?;
 
     match (&return_ty, tccx.body.return_ty.kind()) {
+        // Returns but didn't expect return (non-void return in void context)
+        (Some(ty), TyKind::Void) if ty.kind() != &TyKind::Void => Err(
+            TypeError::DidNotExpectReturn(return_stmt.node_id, ty.clone()),
+        ),
         // Returns wrong type
         (Some(ty), expected) if ty.kind() != expected => Err(TypeError::IncompatibleTypes(
             ty.clone(),
             tccx.body.return_ty.clone(),
+            return_stmt.node_id,
+            tccx.return_node_id.unwrap(),
         )),
-        // Returns but didn't expect return (non-void return in void context)
-        (Some(ty), TyKind::Void) if ty.kind() != &TyKind::Void => {
-            Err(TypeError::DidNotExpectReturn)
-        }
         // Returns and expects return or no return and expects void
         // This also covers returning (but returning void from somewhere else)
         // or not returning at all in void context
         (Some(_), _) | (None, TyKind::Void) => Ok(()),
         // Did not return, expected return (see above for None, TyKind::Void)
         // case handled.
-        (None, _) => Err(TypeError::ExpectedReturn),
+        (None, _) => Err(TypeError::ExpectedReturn(
+            return_stmt.node_id,
+            tccx.return_node_id.unwrap(),
+            tccx.body.return_ty.clone(),
+        )),
     }
 }
 
-fn typeck_if(tccx: &mut TypeckCtxt, stmt: &ast::AstIfStmt) -> Result<(), TypeError> {
-    let res = typeck_expr(tccx, &stmt.cond)?;
+fn typeck_if(tccx: &mut TypeckCtxt, stmt: &ast::AstIfStmt) -> Result<(), ()> {
+    let res = typeck_expr(tccx, &stmt.cond).reported(tccx)?;
     if res != tccx.tcx.int_ty() {
-        return Err(TypeError::IfConditionNotInt);
+        return Err(TypeError::IfConditionNotInt(stmt.cond.node_id(), res)).reported(tccx);
     }
     typeck_block(tccx, &stmt.then)?;
     if let Some(else_) = &stmt.else_ {
@@ -298,10 +518,10 @@ fn typeck_if(tccx: &mut TypeckCtxt, stmt: &ast::AstIfStmt) -> Result<(), TypeErr
     Ok(())
 }
 
-fn typeck_block(tccx: &mut TypeckCtxt, block: &ast::AstBlockStmt) -> Result<(), TypeError> {
+fn typeck_block(tccx: &mut TypeckCtxt, block: &ast::AstBlockStmt) -> Result<(), ()> {
     tccx.open_scope();
     for stmt in block.stmts.iter() {
-        typeck_stmt(tccx, stmt)?;
+        typeck_stmt(tccx, stmt);
     }
     tccx.close_scope();
 
@@ -333,11 +553,11 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
         }) => {
             let res = tccx
                 .resolve_local(name)
-                .ok_or_else(|| TypeError::CannotResolve(name.clone()))?;
+                .ok_or_else(|| TypeError::CannotResolve(name.clone(), *node_id))?;
 
             let ty = tccx
                 .res_ty(res)
-                .ok_or_else(|| TypeError::UnresolvableType(name.clone()))?;
+                .ok_or_else(|| TypeError::UnresolvableType(name.clone(), *node_id))?;
 
             // Also store in node_res for codegen.
             tccx.body.set_node_res(*node_id, res);
@@ -359,19 +579,29 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
 fn typeck_call_expr(tccx: &mut TypeckCtxt, call_expr: &ast::AstCallExpr) -> Result<Ty, TypeError> {
     let func_ty = typeck_expr(tccx, &call_expr.callee)?;
     let TyKind::Func(sig) = func_ty.kind.as_ref() else {
-        return Err(TypeError::CannotCallNonFunction);
+        return Err(TypeError::CannotCallNonFunction(call_expr.callee.node_id()));
     };
 
     let args = &call_expr.args;
     if args.len() != sig.param_tys.len() {
-        return Err(TypeError::IncorrectNumberOfArguments);
+        return Err(TypeError::IncorrectNumberOfArguments(
+            call_expr.node_id,
+            args.len(),
+            tccx.func_node_id,
+            sig.param_tys.len(),
+        ));
     }
 
     // Ensure args match
     for (i, (arg, param_ty)) in args.iter().zip(sig.param_tys.iter()).enumerate() {
         let arg_ty = typeck_expr(tccx, arg)?;
         if arg_ty != *param_ty {
-            return Err(TypeError::IncorrectArgumentType(i));
+            return Err(TypeError::IncorrectArgumentType(
+                param_ty.clone(),
+                arg_ty,
+                i,
+                arg.node_id(),
+            ));
         }
     }
 
@@ -386,15 +616,27 @@ fn typeck_binary_expr(
     let left = typeck_expr(tccx, &bin_expr.left)?;
     let right = typeck_expr(tccx, &bin_expr.right)?;
     if left != right {
-        return Err(TypeError::IncompatibleTypes(left, right));
+        return Err(TypeError::IncompatibleTypes(
+            left,
+            right,
+            bin_expr.left.node_id(),
+            bin_expr.right.node_id(),
+        ));
     }
 
     if *left.kind() == TyKind::Void {
-        return Err(TypeError::ExpressionOnVoid(bin_expr.operator));
+        return Err(TypeError::ExpressionOnVoid(
+            bin_expr.operator,
+            bin_expr.node_id,
+        ));
     }
 
     if matches!(*left.kind(), TyKind::Func(..)) {
-        return Err(TypeError::ExpressionOnFunc(left, bin_expr.operator));
+        return Err(TypeError::ExpressionOnFunc(
+            left,
+            bin_expr.operator,
+            bin_expr.node_id,
+        ));
     }
 
     match &bin_expr.operator {

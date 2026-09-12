@@ -1,6 +1,9 @@
 use std::{fs::File, path::PathBuf};
 
-use crate::ty::TyCtxt;
+use crate::{
+    sourcemap::{DiagnoseManyWith as _, report::Diagnostic},
+    ty::TyCtxt,
+};
 
 #[macro_use]
 mod id;
@@ -13,30 +16,44 @@ mod sourcemap;
 mod syntax;
 mod ty;
 
+pub use sourcemap::SourceMap;
+
 pub fn compile(
     input_path: PathBuf,
     output_path: PathBuf,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let input = std::fs::read(&input_path)?;
+    source_map: &mut sourcemap::SourceMap,
+) -> Result<(), Vec<Diagnostic>> {
+    let input = std::fs::read(&input_path)
+        .map_err(|_| vec![Diagnostic::new("unable to read input file")])?;
+    let contents = String::from_utf8(input)
+        .map_err(|_| vec![Diagnostic::new("unable to parse input file as utf8")])?;
+    // for now its only one file
+    let source_file_id =
+        source_map.add_file(input_path.clone().into_boxed_path(), contents.clone());
 
-    let raw = syntax::parse(&String::from_utf8(input)?);
+    let raw = syntax::parse(&contents, source_file_id)?;
 
-    let ast = syntax::lower_to_ast(raw);
+    let mut node_to_span = sourcemap::SpanRecorder::new();
+    let ast = syntax::lower_to_ast(raw, source_file_id, &mut node_to_span);
 
     let mut ty_ctxt = TyCtxt::new();
     defs::resolve(&mut ty_ctxt, &ast);
-    ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)?;
+    ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)
+        .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
-    let mut typed_output = File::create({
+    let typed_output = File::create({
         let mut path = input_path.clone();
         path.set_file_name(format!(
             "__{}.typed",
             input_path.file_name().unwrap().to_string_lossy()
         ));
         path
-    })?;
+    })
+    .ok();
 
-    ty::debug::display_debug(&mut typed_output, &ty_ctxt, &ast)?;
+    if let Some(mut typed_output) = typed_output {
+        let _ = ty::debug::display_debug(&mut typed_output, &ty_ctxt, &ast);
+    }
 
     std::fs::write(
         {
@@ -48,7 +65,8 @@ pub fn compile(
             path
         },
         format!("{}", ast),
-    )?;
+    )
+    .unwrap();
 
     let bytes = codegen::generate_object(
         &mut ty_ctxt,
@@ -79,7 +97,8 @@ pub fn compile(
                 Some(path)
             },
         }),
-    )?;
+    )
+    .unwrap();
 
     // Generate a ugly named .o file just for compilation.
     let mut object_path = input_path.clone();
@@ -88,7 +107,7 @@ pub fn compile(
         input_path.file_name().unwrap().to_string_lossy()
     ));
 
-    std::fs::write(&object_path, &bytes)?;
+    std::fs::write(&object_path, &bytes).unwrap();
 
     use std::process::Command;
 
@@ -113,7 +132,7 @@ pub fn compile(
 
     args.extend(["-o".into(), output_path.to_string_lossy().into_owned()]);
 
-    let status = Command::new("cc").args(args).status()?;
+    let status = Command::new("cc").args(args).status().unwrap();
 
     if !status.success() {
         panic!("linking failed");
@@ -141,10 +160,24 @@ macro_rules! compileq {
         let path = ::std::path::PathBuf::from($path);
         $crate::compileq!(path.clone(), path.with_extension(""))
     }};
-    ($path:expr, $output:expr) => {
-        $crate::compile(
+    ($path:expr, $output:expr) => {{
+        let mut source_map = $crate::SourceMap::new();
+        match $crate::compile(
             ::std::path::PathBuf::from($path),
             ::std::path::PathBuf::from($output),
-        );
-    };
+            &mut source_map,
+        ) {
+            Ok(res) => Ok(res),
+            Err(err) => {
+                let builder = source_map.build_report().with_diagnostics(err.clone());
+
+                builder
+                    .build()
+                    .iter()
+                    .for_each(|r| r.eprint(builder.as_cache()).unwrap());
+
+                Err(err)
+            }
+        }
+    }};
 }

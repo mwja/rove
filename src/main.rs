@@ -14,11 +14,11 @@ struct Cli {
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
-    rove::compile(
+    rove::compileq!(
         path::absolute(&cli.input)?,
-        path::absolute(&cli.output.unwrap_or_else(|| cli.input.with_extension("")))?,
+        path::absolute(&cli.output.unwrap_or_else(|| cli.input.with_extension("")))?
     )
-    .expect("to compile fully");
+    .map_err(|_| "unable to compile".to_string())?;
 
     Ok(())
 }

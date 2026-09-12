@@ -53,6 +53,7 @@ pub struct AstFunctionDef {
     pub node_id: NodeId,
     pub name: String,
     pub args: Vec<AstArgDef>,
+    pub return_node_id: Option<NodeId>,
     pub return_ty: AstType,
     pub body: AstBlockStmt,
     pub is_main: bool,
@@ -138,6 +139,8 @@ impl Display for AstStmtKind {
 
 #[derive(Debug)]
 pub struct AstReturnStmt {
+    /// Only for diagnostics, do NOT type this
+    pub node_id: NodeId,
     pub expr: Option<AstExpr>,
 }
 

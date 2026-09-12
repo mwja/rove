@@ -1,0 +1,26 @@
+func output(digit: int) {
+    print digit;
+}
+
+func main() {
+    // intentionally cause error by passing float.
+    output(1.0);
+}
+
+func incomp_binary_operand(digit: int) {
+    print digit * 2.0;
+}
+
+func wrong_if_type() {
+    if 1.0 {
+
+    }
+}
+
+func unexpected_return_type() {
+    return 1.0;
+}
+
+func wrong_return_type() -> float {
+    return 1;
+}
