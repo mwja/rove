@@ -3,12 +3,11 @@
 //! Currently just takes Ast as everything is a i64, will eventually
 //! take a ctxt with sidetables from a type pass.
 
-use std::{collections::HashMap, path::PathBuf};
-
 use cranelift::{
     codegen::{
         ir::{
-            AbiParam, FuncRef, InstBuilder, SourceLoc, Type, Value,
+            AbiParam, FuncRef, InstBuilder, SigRef, Signature, SourceLoc, Type, UserExternalName,
+            Value,
             condcodes::{FloatCC, IntCC},
             types,
         },
@@ -18,15 +17,71 @@ use cranelift::{
     module::{FuncId, Linkage, Module, default_libcall_names},
     object::{ObjectBuilder, ObjectModule},
 };
+use std::{collections::HashMap, io::Write as _, path::PathBuf};
 
 use crate::{
-    ast,
+    ast::{self, AstDef},
+    defs::{self, Def, DefKind, FuncSig},
     ty::{
         Ty, TyCtxt, TyKind,
         res::{LocalId, Res},
         typeck::BodyInfo,
     },
 };
+
+pub struct CompilerCtxt<'c> {
+    pub tcx: &'c TyCtxt,
+    pub body: &'c BodyInfo,
+    def_id_to_function_id: &'c HashMap<defs::DefId, FuncId>,
+}
+
+impl<'c> CompilerCtxt<'c> {
+    pub fn new(
+        tcx: &'c TyCtxt,
+        body: &'c BodyInfo,
+        table: &'c HashMap<defs::DefId, FuncId>,
+    ) -> Self {
+        Self {
+            tcx,
+            body,
+            def_id_to_function_id: table,
+        }
+    }
+
+    pub fn def_id_to_function_id(&self, def_id: defs::DefId) -> Option<FuncId> {
+        self.def_id_to_function_id.get(&def_id).copied()
+    }
+}
+
+fn func_ty(om: &ObjectModule) -> Type {
+    om.target_config().pointer_type()
+}
+
+fn lower_ty(om: &ObjectModule, ty: &Ty) -> Type {
+    // for now we only do scalar types.
+    match ty.kind() {
+        TyKind::Int => types::I64,
+        TyKind::Float => types::F64,
+        // null pointer
+        TyKind::Void => types::I32,
+        //TyKind::Void => om.target_config().pointer_type(),
+        TyKind::Func(_) => func_ty(om),
+    }
+}
+
+fn lower_sig(om: &ObjectModule, def_sig: &FuncSig) -> Signature {
+    let mut sig = om.make_signature();
+
+    for param in &def_sig.param_tys {
+        let param_ty = lower_ty(om, param);
+        sig.params.push(AbiParam::new(param_ty));
+    }
+
+    let return_ty = lower_ty(om, &def_sig.return_ty);
+    sig.returns.push(AbiParam::new(return_ty));
+
+    sig
+}
 
 #[derive(Default)]
 pub struct CodegenOptions {
@@ -54,11 +109,6 @@ pub fn generate_object(
 
     let object_builder = ObjectBuilder::new(isa, "program", default_libcall_names()).unwrap();
     let mut module = ObjectModule::new(object_builder);
-    let mut main_sig = module.make_signature();
-    main_sig.returns.push(AbiParam::new(types::I32));
-
-    let main_id = module.declare_function("main", Linkage::Export, &main_sig)?;
-    let mut ctx = module.make_context();
 
     // preload printf, just in version 0.1
     let printf_u64_id = {
@@ -81,37 +131,103 @@ pub fn generate_object(
         module.declare_function("rt_println_f64", Linkage::Import, &printf_sig)?
     };
 
-    ctx.func.signature = main_sig;
+    let mut table = HashMap::new();
+    let mut func_sig = HashMap::new();
+    // first, make all functions
+    for def in ast.defs.iter() {
+        match def {
+            ast::AstDef::Function(func_def) => {
+                let def_id = tcx
+                    .defs
+                    .resolve_def_id_for_node_id(func_def.node_id)
+                    .unwrap();
+                let def = tcx.defs.def(def_id);
+                let Some(Def {
+                    kind: DefKind::Function(sig),
+                }) = def
+                else {
+                    continue;
+                };
 
-    let mut func_ctx = FunctionBuilderContext::new();
-    let mut fbuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+                let sig = lower_sig(&module, sig);
 
-    let block = fbuilder.create_block();
-    fbuilder.append_block_params_for_function_params(block);
-    fbuilder.switch_to_block(block);
-    fbuilder.seal_block(block);
-
-    // for now we just focus on one body
-    let codegen = CraneliftCodegen {
-        module: &mut module,
-        builder: &mut fbuilder,
-        printf_u64_id,
-        printf_f64_id,
-        locals: HashMap::new(),
-        cached_functions: HashMap::new(),
-        body: &tcx.body,
-    };
-    codegen.lower(ast);
-    fbuilder.finalize(module.target_config());
-
-    if let Some(path) = &options.emit_clif_to {
-        std::fs::write(path, ctx.func.display().to_string()).unwrap();
+                let id = module.declare_function(
+                    &func_def.name,
+                    if func_def.is_main {
+                        Linkage::Export
+                    } else {
+                        Linkage::Local
+                    },
+                    &sig,
+                )?;
+                func_sig.insert(def_id, sig);
+                table.insert(def_id, id);
+            }
+        }
     }
 
-    module.define_function(main_id, &mut ctx)?;
+    let mut emit_clif_file = match &options.emit_clif_to {
+        Some(path) => Some(std::fs::File::create(path).unwrap()),
+        None => None,
+    };
+    let mut emit_opt_clif_file = match &options.emit_opt_clif_to {
+        Some(path) => Some(std::fs::File::create(path).unwrap()),
+        None => None,
+    };
 
-    if let Some(path) = &options.emit_opt_clif_to {
-        std::fs::write(path, ctx.func.display().to_string()).unwrap();
+    let mut ctx = module.make_context();
+    let defs = ast.defs;
+    for def in defs {
+        let AstDef::Function(func_def) = def else {
+            continue;
+        };
+
+        let def_id = tcx
+            .defs
+            .resolve_def_id_for_node_id(func_def.node_id)
+            .unwrap();
+        let id = table.get(&def_id).unwrap();
+        ctx.func.name = cranelift::codegen::ir::UserFuncName::User(UserExternalName {
+            namespace: 0,
+            index: id.as_u32(),
+        });
+
+        let mut func_ctx = FunctionBuilderContext::new();
+
+        let cx = CompilerCtxt::new(tcx, tcx.bodies.get(&def_id).unwrap(), &table);
+        ctx.func.signature = func_sig.remove(&def_id).unwrap();
+
+        let mut fbuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
+        let block = fbuilder.create_block();
+        fbuilder.append_block_params_for_function_params(block);
+        fbuilder.switch_to_block(block);
+        fbuilder.seal_block(block);
+
+        let codegen = CraneliftCodegen {
+            module: &mut module,
+            builder: &mut fbuilder,
+            printf_f64_id,
+            printf_u64_id,
+            locals: HashMap::new(),
+            cached_functions: HashMap::new(),
+            cached_signatures: HashMap::new(),
+            cx,
+        };
+
+        codegen.lower(func_def);
+        fbuilder.finalize(module.target_config());
+
+        if let Some(file) = &mut emit_clif_file {
+            writeln!(file, "{}", ctx.func.display()).unwrap();
+        }
+
+        module.define_function(*id, &mut ctx)?;
+
+        if let Some(file) = &mut emit_opt_clif_file {
+            writeln!(file, "{}", ctx.func.display()).unwrap();
+        }
+
+        module.clear_context(&mut ctx);
     }
 
     let product = module.finish();
@@ -129,16 +245,30 @@ struct CraneliftCodegen<'a, 'o> {
     printf_f64_id: FuncId,
     locals: HashMap<LocalId, Variable>,
     cached_functions: HashMap<FuncId, FuncRef>,
-    body: &'o BodyInfo,
+    cached_signatures: HashMap<FuncSig, SigRef>,
+    cx: CompilerCtxt<'o>,
 }
 
 impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     // Likely to change...
-    fn lookup(&self, res: &Res) -> Option<Variable> {
+    fn lookup_local(&self, res: &Res) -> Option<Variable> {
         match res {
             Res::Local(local_id) => self.locals.get(local_id).copied(),
             _ => None,
         }
+    }
+
+    fn lower_sig_cached(&mut self, def_sig: FuncSig) -> SigRef {
+        if let Some(signature) = self.cached_signatures.get(&def_sig) {
+            return *signature;
+        }
+
+        let sig = lower_sig(&self.module, &def_sig);
+        let sig_ref = self.builder.import_signature(sig);
+
+        self.cached_signatures.insert(def_sig, sig_ref);
+
+        sig_ref
     }
 
     fn insert(&mut self, res: Res, var: Variable) {
@@ -175,8 +305,6 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         };
     }
 
-    /// Full disclosure: blocks do not have their own closures for now. This
-    /// is a known limitation that will be fixed once a HIR/Typeck may be added.
     fn lower_block_stmt(&mut self, block: ast::AstBlockStmt) {
         self.builder
             .set_srcloc(SourceLoc::new(block.node_id.index() as u32));
@@ -233,7 +361,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder
             .set_srcloc(SourceLoc::new(assign.node_id.index() as u32));
         let target = self
-            .lookup(&self.body.node_res(assign.node_id).unwrap())
+            .lookup_local(&self.cx.body.node_res(assign.node_id).unwrap())
             .unwrap();
         let value = self.lower_expr(*assign.expr);
         self.builder.def_var(target, value);
@@ -249,16 +377,19 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder
             .set_srcloc(SourceLoc::new(let_decl.name.node_id.index() as u32));
 
-        let Res::Local(local_id) = self.body.node_res(let_decl.name.node_id).unwrap() else {
+        let Res::Local(local_id) = self.cx.body.node_res(let_decl.name.node_id).unwrap() else {
             unreachable!();
         };
-        let ty = self.body.local_ty(local_id).unwrap();
+        let ty = self.cx.body.local_ty(local_id).unwrap();
         let value = self.lower_expr(*let_decl.expr);
         // for now we only have i64s... so no need to check
         let variable = self.builder.declare_var(self.scalar_type(ty).unwrap());
         self.builder.def_var(variable, value);
 
-        self.insert(self.body.node_res(let_decl.name.node_id).unwrap(), variable);
+        self.insert(
+            self.cx.body.node_res(let_decl.name.node_id).unwrap(),
+            variable,
+        );
     }
 
     fn lower_expr(&mut self, expr: ast::AstExpr) -> Value {
@@ -268,41 +399,80 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstExprKind::Literal(_) => self.lower_lit(expr),
             ast::AstExprKind::Binary(_) => self.lower_bin_expr(expr),
             ast::AstExprKind::Ident(ident) => self.lower_ident(ident),
+            ast::AstExprKind::Call(call_expr) => self.lower_call(call_expr),
         }
     }
 
+    fn lower_call(&mut self, expr: ast::AstCallExpr) -> Value {
+        // Get callee
+        let callee_ty = self.cx.body.node_ty(expr.callee.node_id()).unwrap();
+        let callee_sig = match callee_ty.kind() {
+            TyKind::Func(callee_sig) => callee_sig,
+            _ => unreachable!(),
+        };
+        let callee = self.lower_expr(*expr.callee);
+        let args = expr
+            .args
+            .into_iter()
+            .map(|arg| self.lower_expr(*arg))
+            .collect::<Vec<_>>();
+
+        let sig = self.lower_sig_cached(callee_sig.clone());
+
+        let call_inst = self.builder.ins().call_indirect(sig, callee, &args);
+        let results = self.builder.inst_results(call_inst);
+
+        results[0]
+    }
+
     fn lower_ident(&mut self, ident: ast::AstIdent) -> Value {
-        self.builder.use_var(
-            self.lookup(&self.body.node_res(ident.node_id).unwrap())
-                .expect(&format!("unable to find local variable: {}", ident.text)),
-        )
+        let res = &self.cx.body.node_res(ident.node_id).unwrap();
+        match res {
+            Res::Local(..) => self.builder.use_var(
+                self.lookup_local(res)
+                    .expect(&format!("unable to find local variable: {}", ident.text)),
+            ),
+            Res::Def(def_id) => {
+                let callee = self.module.declare_func_in_func(
+                    self.cx.def_id_to_function_id(*def_id).unwrap(),
+                    &mut self.builder.func,
+                );
+                let def = self.cx.tcx.defs.def(*def_id).unwrap();
+                match def.kind {
+                    DefKind::Function(_) => {
+                        self.builder.ins().func_addr(func_ty(self.module), callee)
+                    }
+                }
+            }
+            Res::Err => panic!("res::err"),
+        }
     }
 
     fn lower_bin_expr(&mut self, expr: ast::AstExpr) -> Value {
         let ast::AstExprKind::Binary(bin_expr) = expr.kind else {
             unreachable!()
         };
-        let x_ty = self.body.node_ty(bin_expr.left.node_id()).unwrap();
+        let x_ty = self.cx.body.node_ty(bin_expr.left.node_id()).unwrap();
         let x = self.lower_expr(*bin_expr.left);
         let y = self.lower_expr(*bin_expr.right);
 
-        let res_ty = self.body.node_ty(bin_expr.node_id).unwrap();
+        let res_ty = self.cx.body.node_ty(bin_expr.node_id).unwrap();
         match bin_expr.operator {
             // later on we will typecheck this beforehand, as x could be a string.
             ast::AstBinaryOperator::Add => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().iadd(x, y),
                 TyKind::Float => self.builder.ins().fadd(x, y),
-                TyKind::Void => unreachable!(),
+                TyKind::Void | TyKind::Func(_) => unreachable!(),
             },
             ast::AstBinaryOperator::Sub => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().isub(x, y),
                 TyKind::Float => self.builder.ins().fsub(x, y),
-                TyKind::Void => unreachable!(),
+                TyKind::Void | TyKind::Func(_) => unreachable!(),
             },
             ast::AstBinaryOperator::Mul => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().imul(x, y),
                 TyKind::Float => self.builder.ins().fmul(x, y),
-                TyKind::Void => unreachable!(),
+                TyKind::Void | TyKind::Func(_) => unreachable!(),
             },
             ast::AstBinaryOperator::Div => {
                 // In the future this will be defined in the language itself.
@@ -344,6 +514,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                         x,
                         y,
                     ),
+                    TyKind::Func(_) => unreachable!(),
                     TyKind::Void => unreachable!(),
                 };
 
@@ -366,18 +537,19 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_print(&mut self, print: ast::AstPrintStmt) {
         self.builder
             .set_srcloc(SourceLoc::new(print.node_id.index() as u32));
-        let x_ty = self.body.node_ty(print.expr.node_id()).unwrap();
+        let x_ty = self.cx.body.node_ty(print.expr.node_id()).unwrap();
         let x = self.lower_expr(*print.expr);
         let printf_ref = self.get_or_cache_function(match x_ty.kind() {
             TyKind::Int => self.printf_u64_id,
             TyKind::Float => self.printf_f64_id,
             TyKind::Void => unreachable!(),
+            TyKind::Func(_) => unreachable!(),
         });
         let _call = self.builder.ins().call(printf_ref, &[x]);
     }
 
-    fn lower(mut self, ast: ast::AstProgram) {
-        for stmt in ast.statements {
+    fn lower(mut self, def: ast::AstFunctionDef) {
+        for stmt in def.body.stmts {
             self.lower_stmt(stmt);
         }
 
@@ -393,11 +565,13 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             TyKind::Int => Some(types::I64),
             TyKind::Float => Some(types::F64),
             TyKind::Void => None,
+            TyKind::Func(_) => unreachable!(),
         }
     }
 
     fn scalar_type_for(&self, node_id: ast::NodeId) -> Option<Type> {
-        self.body
+        self.cx
+            .body
             .node_ty(node_id)
             .and_then(|ty| self.scalar_type(ty))
     }

@@ -8,6 +8,7 @@ mod id;
 mod arena;
 mod ast;
 mod codegen;
+mod defs;
 mod sourcemap;
 mod syntax;
 mod ty;
@@ -23,7 +24,8 @@ pub fn compile(
     let ast = syntax::lower_to_ast(raw);
 
     let mut ty_ctxt = TyCtxt::new();
-    ty_ctxt.body = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)?;
+    defs::resolve(&mut ty_ctxt, &ast);
+    ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)?;
 
     let mut typed_output = File::create({
         let mut path = input_path.clone();
@@ -33,7 +35,9 @@ pub fn compile(
         ));
         path
     })?;
-    ty::debug::display_debug(&mut typed_output, &ty_ctxt.body, &ast)?;
+
+    ty::debug::display_debug(&mut typed_output, &ty_ctxt, &ast)?;
+
     std::fs::write(
         {
             let mut path = input_path.clone();
@@ -76,7 +80,6 @@ pub fn compile(
         input_path.file_name().unwrap().to_string_lossy()
     ));
 
-    println!("writing object file to {}", object_path.display());
     std::fs::write(&object_path, &bytes)?;
 
     use std::process::Command;

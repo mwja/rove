@@ -30,7 +30,7 @@ macro_rules! indexable_id {
 }
 
 macro_rules! impl_next_id {
-    ($struct:ident $(<$($lt:lifetime),+>)?::$field:ident -> $name:ident) => {
+    ($struct:ident $(<$($lt:lifetime),+>)?.$field:ident -> $name:ident) => {
         impl$(<$($lt),+>)? $struct$(<$($lt),+>)? {
             fn next_id(&mut self) -> $name {
                 let id = self.$field;

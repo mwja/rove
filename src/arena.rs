@@ -1,5 +1,6 @@
 use std::{collections::HashSet, hash::Hash, rc::Rc};
 
+#[derive(Debug)]
 pub struct Store<T> {
     values: HashSet<Rc<T>>,
 }

@@ -8,8 +8,50 @@ mod grammar {
 
     #[rust_sitter::language]
     pub struct Program {
-        pub stmts: Vec<Spanned<Stmt>>,
+        pub defs: Vec<Def>,
     }
+
+    pub enum Type {
+        #[rust_sitter::leaf(text = "int")]
+        Int,
+        #[rust_sitter::leaf(text = "float")]
+        Float,
+    }
+
+    pub enum Def {
+        Function(Spanned<FunctionDef>),
+    }
+
+    pub struct FunctionDef {
+        #[rust_sitter::leaf(text = "func")]
+        _fn: (),
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = "(")]
+        _lp: (),
+        #[rust_sitter::delimited(
+            #[rust_sitter::leaf(text = ",")]
+            ()
+        )]
+        pub args: Vec<Spanned<ArgDef>>,
+        #[rust_sitter::leaf(text = ")")]
+        _rp: (),
+        pub return_ty: Option<ReturnDef>,
+        pub body: Spanned<BlockStmt>,
+    }
+
+    pub struct ArgDef {
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = ":")]
+        _cl: (),
+        pub ty: Spanned<Type>,
+    }
+
+    pub struct ReturnDef {
+        #[rust_sitter::leaf(text = "->")]
+        _arrow: (),
+        pub ty: Spanned<Type>,
+    }
+
     pub enum Stmt {
         Expr(Spanned<Expr>, #[rust_sitter::leaf(text = ";")] ()),
         Decl(Spanned<Decl>, #[rust_sitter::leaf(text = ";")] ()),
@@ -82,6 +124,20 @@ mod grammar {
             Box<Spanned<Expr>>,
             #[rust_sitter::leaf(text = ")")] (),
         ),
+        Call(Spanned<CallExpr>),
+    }
+
+    pub struct CallExpr {
+        pub callee: Box<Spanned<Expr>>,
+        #[rust_sitter::leaf(text = "(")]
+        _l: (),
+        #[rust_sitter::delimited(
+            #[rust_sitter::leaf(text = ",")]
+            ()
+        )]
+        pub args: Vec<Box<Spanned<Expr>>>,
+        #[rust_sitter::leaf(text = ")")]
+        _r: (),
     }
 
     pub struct PrintStmt {
@@ -193,7 +249,7 @@ pub fn lower_to_ast(program: grammar::Program) -> ast::AstProgram {
 struct ProgramLowerer {
     next_node_id: usize,
 }
-impl_next_id!(ProgramLowerer::next_node_id -> NodeId);
+impl_next_id!(ProgramLowerer.next_node_id -> NodeId);
 
 impl ProgramLowerer {
     fn new() -> Self {
@@ -202,12 +258,49 @@ impl ProgramLowerer {
 
     pub fn lower(mut self, program: grammar::Program) -> ast::AstProgram {
         ast::AstProgram {
-            statements: program
-                .stmts
+            defs: program
+                .defs
                 .into_iter()
-                // Lose the span for now
-                .map(|stmt| self.lower_stmt(stmt))
+                .map(|def| self.lower_def(def))
                 .collect(),
+        }
+    }
+
+    fn lower_def(&mut self, def: grammar::Def) -> ast::AstDef {
+        match def {
+            grammar::Def::Function(func) => ast::AstDef::Function(self.lower_function_def(func)),
+        }
+    }
+
+    fn lower_function_def(&mut self, func: Spanned<grammar::FunctionDef>) -> ast::AstFunctionDef {
+        ast::AstFunctionDef {
+            node_id: self.next_id(),
+            name: func.value.name.text.clone(),
+            args: func
+                .value
+                .args
+                .into_iter()
+                .map(|arg| self.lower_arg_def(arg))
+                .collect(),
+            return_ty: self.lower_type(func.value.return_ty.and_then(|rty| Some(rty.ty))),
+            body: self.lower_block_stmt(func.value.body),
+            is_main: func.value.name.text == "main",
+        }
+    }
+
+    fn lower_arg_def(&mut self, arg: Spanned<grammar::ArgDef>) -> ast::AstArgDef {
+        ast::AstArgDef {
+            node_id: self.next_id(),
+            name: arg.value.name.text.clone(),
+            ty: self.lower_type(Some(arg.value.ty)),
+        }
+    }
+
+    fn lower_type(&mut self, ty: Option<Spanned<grammar::Type>>) -> ast::AstType {
+        match ty.and_then(|ty| Some(ty.value)) {
+            Some(grammar::Type::Float) => ast::AstType::Float,
+            Some(grammar::Type::Int) => ast::AstType::Int,
+            None => ast::AstType::Void,
         }
     }
 
@@ -307,6 +400,19 @@ impl ProgramLowerer {
             grammar::Expr::Ident(ident) => ast::AstExprKind::Ident(self.lower_ident(ident)),
             // we discard a node id here, but that's okay
             grammar::Expr::Wrapped(_, expr, _) => self.lower_expr(*expr).kind,
+            grammar::Expr::Call(call) => ast::AstExprKind::Call(self.lower_call(call.value)),
+        }
+    }
+
+    fn lower_call(&mut self, call: grammar::CallExpr) -> ast::AstCallExpr {
+        ast::AstCallExpr {
+            node_id: self.next_id(),
+            callee: Box::new(self.lower_expr(*call.callee)),
+            args: call
+                .args
+                .into_iter()
+                .map(|arg| Box::new(self.lower_expr(*arg)))
+                .collect::<Vec<_>>(),
         }
     }
 
@@ -372,37 +478,5 @@ impl ProgramLowerer {
             node_id: self.next_id(),
             expr: Box::new(self.lower_expr(*stmt.value.expr)),
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_parse() {
-        let input = "print 1 + 2;";
-        let program = parse(input);
-        assert_eq!(program.stmts.len(), 1);
-    }
-
-    #[test]
-    fn test_parse_print() {
-        let input = "print 1 + 2;";
-        let program = parse(input);
-        assert_eq!(program.stmts.len(), 1);
-        assert!(matches!(program.stmts[0].value, grammar::Stmt::Print(..)));
-    }
-
-    #[test]
-    fn test_lower_print() {
-        let input = "print 1 + 2;";
-        let program = parse(input);
-        let res = lower_to_ast(program);
-        assert_eq!(res.statements.len(), 1);
-        assert!(matches!(
-            res.statements[0].kind,
-            ast::AstStmtKind::Print(..)
-        ));
     }
 }

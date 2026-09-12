@@ -1,7 +1,10 @@
 use std::fmt::Display;
 
 use super::Ty;
-use crate::{ast, ty::typeck::BodyInfo};
+use crate::{
+    ast,
+    ty::{TyCtxt, typeck::BodyInfo},
+};
 
 pub struct OptionalTy(pub Option<Ty>);
 impl Display for OptionalTy {
@@ -27,14 +30,43 @@ fn opt_ty(ty: Option<Ty>) -> OptionalTy {
 /// It re-uses the display impl of ast and just adds comments after.
 pub fn display_debug(
     f: &mut dyn std::io::Write,
-    body: &BodyInfo,
+    tcx: &TyCtxt,
     tree: &ast::AstProgram,
 ) -> std::io::Result<()> {
-    for stmt in &tree.statements {
-        writeln!(f, "{}", display_stmt(body, stmt))?;
+    for def in &tree.defs {
+        writeln!(f, "{}", display_def(tcx, def))?;
     }
 
     Ok(())
+}
+
+fn display_def(tcx: &TyCtxt, def: &ast::AstDef) -> String {
+    match def {
+        ast::AstDef::Function(func_def) => {
+            let def_id = tcx
+                .defs
+                .resolve_def_id_for_node_id(func_def.node_id)
+                .unwrap();
+            let body = tcx.bodies.get(&def_id).unwrap();
+            format!("{}", display_func(body, func_def))
+        }
+    }
+}
+
+fn display_func(body: &BodyInfo, func_def: &ast::AstFunctionDef) -> String {
+    format!(
+        "func {}({}) -> {} {}",
+        func_def.name,
+        func_def
+            .args
+            .iter()
+            .map(|a| (a, body.node_res(a.node_id)))
+            .map(|(a, b)| format!("{}: {}", a, b.unwrap()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        func_def.return_ty,
+        display_block(body, &func_def.body)
+    )
 }
 
 fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {

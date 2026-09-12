@@ -3,6 +3,7 @@ use thiserror::Error;
 use super::*;
 use crate::{
     ast::{self, AstIdent, AstLetDecl, AstStmtKind},
+    defs::{self, FuncSig},
     ty::res::{LocalId, Res},
 };
 
@@ -16,8 +17,18 @@ pub enum TypeError {
     IfConditionNotInt,
     #[error("expression on void (operator of {0})")]
     ExpressionOnVoid(ast::AstBinaryOperator),
+    #[error("expression on func ({0}) (operator of {1})")]
+    ExpressionOnFunc(Ty, ast::AstBinaryOperator),
     #[error("cannot resolve name {0}")]
     CannotResolve(String),
+    #[error("cannot call non-function")]
+    CannotCallNonFunction,
+    #[error("incorrect number of arguments")]
+    IncorrectNumberOfArguments,
+    #[error("incorrect argument type at {0}")]
+    IncorrectArgumentType(usize),
+    #[error("cannot print func or void")]
+    CannotPrintFuncOrVoid,
 }
 
 #[derive(Default, Debug)]
@@ -50,6 +61,7 @@ impl BodyInfo {
 }
 
 /// Exists only within a function and is discarded with the function.
+
 struct TypeckCtxt<'c> {
     next_id: usize,
     tcx: &'c mut TyCtxt,
@@ -57,10 +69,35 @@ struct TypeckCtxt<'c> {
     /// This will be replaced by a localised res table.
     scopes: Vec<HashMap<String, Res>>,
     body: BodyInfo,
+    return_ty: Option<Ty>,
 }
 
-impl_next_id!(TypeckCtxt<'c>::next_id -> LocalId);
+impl_next_id!(TypeckCtxt<'c>.next_id -> LocalId);
 impl<'c> TypeckCtxt<'c> {
+    pub fn new(tcx: &'c mut TyCtxt) -> Self {
+        Self {
+            tcx,
+            scopes: Vec::new(),
+            body: BodyInfo::default(),
+            next_id: 0,
+            return_ty: None,
+        }
+    }
+
+    fn new_with_func_sig(
+        tcx: &'c mut TyCtxt,
+        def: &ast::AstFunctionDef,
+        sig: &defs::FuncSig,
+    ) -> Self {
+        let mut tccx = Self::new(tcx);
+        for (param, ty) in def.args.iter().zip(sig.param_tys.iter()) {
+            tccx.declare_local(param.node_id, &param.name, ty.clone());
+        }
+
+        tccx.return_ty = Some(sig.return_ty.clone());
+        tccx
+    }
+
     fn declare_local(&mut self, node_id: NodeId, name: &str, ty: Ty) -> LocalId {
         let local_id = self.next_id();
         self.body.local_tys.push(ty);
@@ -73,12 +110,30 @@ impl<'c> TypeckCtxt<'c> {
     }
 
     fn resolve_local(&self, name: &str) -> Option<Res> {
-        self.scopes.iter().rev().find_map(|s| s.get(name).copied())
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|s| {
+                // prefer locals
+                s.get(name).copied()
+            })
+            .or_else(|| {
+                self.tcx
+                    .defs
+                    .resolve_name(name)
+                    .map(|def_id| Res::Def(def_id))
+            })
     }
 
     fn res_ty(&self, res: Res) -> Option<Ty> {
         match res {
             Res::Local(local_id) => self.body.local_tys.get(local_id.index()).cloned(),
+            Res::Def(def_id) => {
+                let def = self.tcx.defs.def(def_id)?;
+                match &def.kind {
+                    defs::DefKind::Function(sig) => Some(self.ty(TyKind::Func(sig.clone()))),
+                }
+            }
             _ => None,
         }
     }
@@ -102,19 +157,35 @@ impl<'c> TypeckCtxt<'c> {
 }
 
 /// Walks the given AST and tries to apply types to every NodeId.
-pub fn typeck_ast(tcx: &mut TyCtxt, program: &ast::AstProgram) -> Result<BodyInfo, TypeError> {
-    let mut tccx = TypeckCtxt {
-        tcx,
-        body: BodyInfo::default(),
-        next_id: 0,
-        scopes: vec![HashMap::new()],
-    };
-
-    for stmt in program.statements.iter() {
-        typeck_stmt(&mut tccx, stmt)?;
+pub fn typeck_ast(
+    tcx: &mut TyCtxt,
+    program: &ast::AstProgram,
+) -> Result<HashMap<DefId, BodyInfo>, TypeError> {
+    let mut results = HashMap::new();
+    for ast_def in program.defs.iter() {
+        match ast_def {
+            ast::AstDef::Function(ast_func_def) => {
+                let def_id = tcx
+                    .defs
+                    .resolve_def_id_for_node_id(ast_func_def.node_id)
+                    .unwrap();
+                let def = tcx.defs.def(def_id).unwrap().clone();
+                match def {
+                    defs::Def {
+                        kind: defs::DefKind::Function(sig),
+                    } => {
+                        let mut tccx = TypeckCtxt::new_with_func_sig(tcx, ast_func_def, &sig);
+                        for stmt in ast_func_def.body.stmts.iter() {
+                            typeck_stmt(&mut tccx, stmt)?;
+                        }
+                        results.insert(def_id, tccx.finish());
+                    }
+                }
+            }
+        }
     }
 
-    Ok(tccx.finish())
+    Ok(results)
 }
 
 fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), TypeError> {
@@ -137,7 +208,12 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), TypeErr
         AstStmtKind::Block(block) => typeck_block(tccx, block)?,
         AstStmtKind::Print(stmt) => {
             // for now can only print expressions
-            typeck_expr(tccx, &stmt.expr)?;
+            let ty = typeck_expr(tccx, &stmt.expr)?;
+
+            // Cannot print voids and funcs
+            if matches!(ty.kind(), TyKind::Func(..) | TyKind::Void) {
+                return Err(TypeError::CannotPrintFuncOrVoid);
+            }
         }
     };
 
@@ -211,10 +287,34 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
             ast::AstLiteralKind::Float(_) => Ok(tccx.ty(TyKind::Float)),
         },
         ast::AstExprKind::Binary(bin_expr) => typeck_binary_expr(tccx, &bin_expr),
+        ast::AstExprKind::Call(call_expr) => typeck_call_expr(tccx, &call_expr),
     }?;
 
     tccx.body.set_node_ty(expr.node_id(), ty.clone());
     Ok(ty)
+}
+
+fn typeck_call_expr(tccx: &mut TypeckCtxt, call_expr: &ast::AstCallExpr) -> Result<Ty, TypeError> {
+    let func_ty = typeck_expr(tccx, &call_expr.callee)?;
+    let TyKind::Func(sig) = func_ty.kind.as_ref() else {
+        return Err(TypeError::CannotCallNonFunction);
+    };
+
+    let args = &call_expr.args;
+    if args.len() != sig.param_tys.len() {
+        return Err(TypeError::IncorrectNumberOfArguments);
+    }
+
+    // Ensure args match
+    for (i, (arg, param_ty)) in args.iter().zip(sig.param_tys.iter()).enumerate() {
+        let arg_ty = typeck_expr(tccx, arg)?;
+        if arg_ty != *param_ty {
+            return Err(TypeError::IncorrectArgumentType(i));
+        }
+    }
+
+    // Return return type
+    Ok(sig.return_ty.clone())
 }
 
 fn typeck_binary_expr(
@@ -229,6 +329,10 @@ fn typeck_binary_expr(
 
     if *left.kind() == TyKind::Void {
         return Err(TypeError::ExpressionOnVoid(bin_expr.operator));
+    }
+
+    if matches!(*left.kind(), TyKind::Func(..)) {
+        return Err(TypeError::ExpressionOnFunc(left, bin_expr.operator));
     }
 
     match &bin_expr.operator {
