@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     ast::{self, AstIdent, AstLetDecl, AstStmtKind},
     defs::{self, FuncSig},
-    ty::res::{LocalId, Res},
+    ty::res::{LocalId, ParamId, Res},
 };
 
 #[derive(Debug, Error)]
@@ -35,6 +35,7 @@ pub enum TypeError {
 pub struct BodyInfo {
     pub node_res: HashMap<ast::NodeId, Res>,
     pub local_tys: Vec<Ty>,
+    pub param_tys: Vec<Ty>,
     pub node_tys: HashMap<ast::NodeId, Ty>,
 }
 
@@ -45,6 +46,10 @@ impl BodyInfo {
 
     pub fn local_ty(&self, local_id: LocalId) -> Option<Ty> {
         self.local_tys.get(*local_id).cloned()
+    }
+
+    pub fn param_ty(&self, param_id: ParamId) -> Option<Ty> {
+        self.param_tys.get(*param_id).cloned()
     }
 
     pub fn node_res(&self, node_id: ast::NodeId) -> Option<Res> {
@@ -64,15 +69,15 @@ impl BodyInfo {
 
 struct TypeckCtxt<'c> {
     next_id: usize,
+    next_param_id: usize,
     tcx: &'c mut TyCtxt,
-    /// For now, store local vars in a hashmap like this.
-    /// This will be replaced by a localised res table.
     scopes: Vec<HashMap<String, Res>>,
     body: BodyInfo,
     return_ty: Option<Ty>,
 }
 
 impl_next_id!(TypeckCtxt<'c>.next_id -> LocalId);
+impl_next_id!(TypeckCtxt<'c>.next_param_id -> ParamId, next_param_id);
 impl<'c> TypeckCtxt<'c> {
     pub fn new(tcx: &'c mut TyCtxt) -> Self {
         Self {
@@ -80,6 +85,7 @@ impl<'c> TypeckCtxt<'c> {
             scopes: Vec::new(),
             body: BodyInfo::default(),
             next_id: 0,
+            next_param_id: 0,
             return_ty: None,
         }
     }
@@ -90,8 +96,9 @@ impl<'c> TypeckCtxt<'c> {
         sig: &defs::FuncSig,
     ) -> Self {
         let mut tccx = Self::new(tcx);
+        tccx.open_scope();
         for (param, ty) in def.args.iter().zip(sig.param_tys.iter()) {
-            tccx.declare_local(param.node_id, &param.name, ty.clone());
+            tccx.declare_param(param.node_id, &param.name, ty.clone());
         }
 
         tccx.return_ty = Some(sig.return_ty.clone());
@@ -109,12 +116,23 @@ impl<'c> TypeckCtxt<'c> {
         local_id
     }
 
+    fn declare_param(&mut self, node_id: NodeId, name: &str, ty: Ty) -> ParamId {
+        let param_id = self.next_param_id();
+        self.body.param_tys.push(ty);
+        self.body.set_node_res(node_id, Res::Param(param_id));
+        self.scopes
+            .last_mut()
+            .unwrap()
+            .insert(name.to_string(), Res::Param(param_id));
+        param_id
+    }
+
     fn resolve_local(&self, name: &str) -> Option<Res> {
         self.scopes
             .iter()
             .rev()
             .find_map(|s| {
-                // prefer locals
+                // prefer locals and params.
                 s.get(name).copied()
             })
             .or_else(|| {
@@ -134,7 +152,8 @@ impl<'c> TypeckCtxt<'c> {
                     defs::DefKind::Function(sig) => Some(self.ty(TyKind::Func(sig.clone()))),
                 }
             }
-            _ => None,
+            Res::Param(param_id) => self.body.param_tys.get(param_id.index()).cloned(),
+            Res::Err => None,
         }
     }
 

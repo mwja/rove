@@ -1,4 +1,8 @@
 func main() {
     greet();
 }
-func greet() { print 42; }
+func greet() { print 42; output(43); }
+
+func output(digit: int) {
+    print digit;
+}

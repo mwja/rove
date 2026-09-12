@@ -6,8 +6,8 @@
 use cranelift::{
     codegen::{
         ir::{
-            AbiParam, FuncRef, InstBuilder, SigRef, Signature, SourceLoc, Type, UserExternalName,
-            Value,
+            AbiParam, Block, FuncRef, InstBuilder, SigRef, Signature, SourceLoc, Type,
+            UserExternalName, Value,
             condcodes::{FloatCC, IntCC},
             types,
         },
@@ -211,6 +211,7 @@ pub fn generate_object(
             locals: HashMap::new(),
             cached_functions: HashMap::new(),
             cached_signatures: HashMap::new(),
+            entry_block: block,
             cx,
         };
 
@@ -246,6 +247,8 @@ struct CraneliftCodegen<'a, 'o> {
     locals: HashMap<LocalId, Variable>,
     cached_functions: HashMap<FuncId, FuncRef>,
     cached_signatures: HashMap<FuncSig, SigRef>,
+    // Used to retrieve parameters from the entry block (hence function)
+    entry_block: Block,
     cx: CompilerCtxt<'o>,
 }
 
@@ -432,6 +435,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.lookup_local(res)
                     .expect(&format!("unable to find local variable: {}", ident.text)),
             ),
+            Res::Param(param_id) => self.builder.block_params(self.entry_block)[param_id.index()],
             Res::Def(def_id) => {
                 let callee = self.module.declare_func_in_func(
                     self.cx.def_id_to_function_id(*def_id).unwrap(),
