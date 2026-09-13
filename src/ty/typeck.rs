@@ -36,6 +36,10 @@ pub enum TypeError {
     ExpectedReturn(NodeId, NodeId, Ty),
     #[error("did not expect return value")]
     DidNotExpectReturn(NodeId, Ty),
+    #[error("dead code")]
+    DeadCode(NodeId),
+    #[error("not all branches return")]
+    NotAllBranchesReturn(NodeId, NodeId, Ty),
 }
 
 impl TypeError {
@@ -54,6 +58,8 @@ impl TypeError {
             CannotPrintFuncOrVoid(..) => Some(10),
             ExpectedReturn(..) => Some(11),
             DidNotExpectReturn(..) => Some(12),
+            DeadCode(..) => Some(13),
+            NotAllBranchesReturn(..) => Some(14),
         }
     }
 }
@@ -197,6 +203,29 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
+            DeadCode(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "this line (and following lines) will never be executed.",
+                        ),
+                ]
+            }
+            NotAllBranchesReturn(fn_node_id, return_node_id, return_ty) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, fn_node_id, "in this function")
+                        .with_label_from(
+                            recorder,
+                            return_node_id,
+                            format!("expectation to return a {} defined here", return_ty),
+                        ),
+                ]
+            }
         }
     }
 }
@@ -302,7 +331,6 @@ impl<'c> TypeckCtxt<'c> {
         let mut tccx = Self::new(tcx);
         tccx.open_scope();
 
-        println!("{:?}", def.args);
         for (param, ty) in def.args.iter().zip(sig.param_tys.iter()) {
             tccx.declare_param(param.node_id, &param.name, ty.clone());
         }
@@ -387,6 +415,7 @@ impl<'c> TypeckCtxt<'c> {
         if !self.errors.is_empty() {
             return Err(self.errors);
         }
+
         Ok(self.body)
     }
 }
@@ -414,6 +443,29 @@ pub fn typeck_ast(
                         for stmt in ast_func_def.body.stmts.iter() {
                             let _ = typeck_stmt(&mut tccx, stmt);
                         }
+
+                        // will eventually be togglable, but for now we do this always
+                        match (
+                            sig.return_ty.kind(),
+                            block_always_returns(&ast_func_def.body),
+                        ) {
+                            (_, Returns(true, dead_code)) => {
+                                errors.extend(
+                                    dead_code
+                                        .iter()
+                                        .map(|node_id| TypeError::DeadCode(*node_id)),
+                                );
+                            }
+                            (TyKind::Void, Returns(false, _)) => {}
+                            (_, Returns(false, _)) => {
+                                errors.push(TypeError::NotAllBranchesReturn(
+                                    ast_func_def.node_id,
+                                    ast_func_def.return_node_id.unwrap(),
+                                    tccx.body.return_ty.clone(),
+                                ));
+                            }
+                        };
+
                         match tccx.finish() {
                             Ok(res) => {
                                 results.insert(def_id, res);
@@ -521,7 +573,7 @@ fn typeck_if(tccx: &mut TypeckCtxt, stmt: &ast::AstIfStmt) -> Result<(), ()> {
 fn typeck_block(tccx: &mut TypeckCtxt, block: &ast::AstBlockStmt) -> Result<(), ()> {
     tccx.open_scope();
     for stmt in block.stmts.iter() {
-        typeck_stmt(tccx, stmt);
+        let _ = typeck_stmt(tccx, stmt);
     }
     tccx.close_scope();
 
@@ -654,4 +706,78 @@ fn typeck_binary_expr(
         | ast::AstBinaryOperator::Gt
         | ast::AstBinaryOperator::Ge => Ok(tccx.ty(TyKind::Int)), // for now we resolve true as a non zero i64.
     }
+}
+
+struct Returns(bool, Vec<NodeId>);
+
+impl Returns {
+    pub fn always() -> Self {
+        Self(true, vec![])
+    }
+
+    pub fn never() -> Self {
+        Self(false, vec![])
+    }
+
+    pub fn if_always_returns(self) -> Option<Self> {
+        if self.0 { Some(self) } else { None }
+    }
+
+    pub fn and(self, other: Self) -> Self {
+        Self(
+            self.0 && other.0,
+            self.1.iter().chain(other.1.iter()).copied().collect(),
+        )
+    }
+
+    pub fn or(self, other: Self) -> Self {
+        Self(
+            self.0 || other.0,
+            self.1.iter().chain(other.1.iter()).copied().collect(),
+        )
+    }
+}
+
+/// Does this statement return on every path through it?
+/// bool is if always returns, NodeId is dead code paths
+fn always_returns(stmt: &ast::AstStmt) -> Returns {
+    match &stmt.kind {
+        AstStmtKind::Return(_) => Returns::always(),
+        AstStmtKind::Block(b) => block_always_returns(b),
+        AstStmtKind::If(s) => if_always_returns(s),
+
+        AstStmtKind::Expr(_)
+        | AstStmtKind::Print(_)
+        | AstStmtKind::Decl(_)
+        | AstStmtKind::Assign(_) => Returns::never(),
+    }
+}
+
+fn block_always_returns(block: &ast::AstBlockStmt) -> Returns {
+    let position = block
+        .stmts
+        .iter()
+        .enumerate()
+        .find_map(|(i, stmt)| always_returns(stmt).if_always_returns().map(|r| (i, r)));
+
+    if let Some((i, mut r)) = position {
+        if i + 1 != block.stmts.len() {
+            r.1.push(block.stmts[i + 1].inner_node_id());
+        }
+        r
+    } else {
+        Returns::never()
+    }
+}
+
+fn if_always_returns(s: &ast::AstIfStmt) -> Returns {
+    // If no else it may continue, so we can't say for sure.
+    let Some(else_) = &s.else_ else {
+        return Returns::never();
+    };
+
+    block_always_returns(&s.then).and(match else_ {
+        ast::AstElseBranch::Block(b) => block_always_returns(b),
+        ast::AstElseBranch::If(nested) => if_always_returns(nested),
+    })
 }

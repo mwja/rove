@@ -24,3 +24,16 @@ func unexpected_return_type() {
 func wrong_return_type() -> float {
     return 1;
 }
+
+func dead_code() {
+    return;
+    print 1;
+}
+
+func doesnt_always_returns(digit: int) -> float {
+    if digit == 1 {
+        return 1.0;
+    } else if digit == 2 {
+        return 2.0;
+    }
+}

@@ -354,13 +354,13 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn prepare_for_landing_pad(&mut self) {
         // if current block does not jump, jump to landing pad
         if !self.is_current_block_terminated() {
+            // typeck ensures this only happens for void funcs, but still.
+            //
+            // should ideally change landing pad block args if void function.
             let ret_val = self.build_dummy_return_value();
-            self.builder.ins().jump(
-                self.landing_pad,
-                // really we should never end up here but typeck doesn't yet check
-                // all paths for a return value
-                [&BlockArg::Value(ret_val)],
-            );
+            self.builder
+                .ins()
+                .jump(self.landing_pad, [&BlockArg::Value(ret_val)]);
         }
 
         self.builder.switch_to_block(self.landing_pad);
@@ -424,6 +424,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_return_stmt(&mut self, return_: ast::AstReturnStmt) {
+        // TODO: Handle void cases better.
         let v = return_
             .expr
             .map(|expr| self.lower_expr(expr))

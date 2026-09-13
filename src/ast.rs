@@ -106,6 +106,20 @@ pub struct AstStmt {
     pub kind: AstStmtKind,
 }
 
+impl AstStmt {
+    pub fn inner_node_id(&self) -> NodeId {
+        match &self.kind {
+            AstStmtKind::Expr(expr) => expr.node_id(),
+            AstStmtKind::Print(print) => print.node_id,
+            AstStmtKind::Decl(decl) => decl.inner_node_id(),
+            AstStmtKind::Assign(assign) => assign.node_id,
+            AstStmtKind::Block(block) => block.node_id,
+            AstStmtKind::If(if_stmt) => if_stmt.node_id,
+            AstStmtKind::Return(return_stmt) => return_stmt.node_id,
+        }
+    }
+}
+
 impl Display for AstStmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.kind)
@@ -262,6 +276,14 @@ pub struct AstDecl {
     pub kind: AstDeclKind,
 }
 
+impl AstDecl {
+    pub fn inner_node_id(&self) -> NodeId {
+        match &self.kind {
+            AstDeclKind::Let(let_decl) => let_decl.inner_node_id(),
+        }
+    }
+}
+
 impl Display for AstDecl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}", self.kind)
@@ -285,6 +307,12 @@ impl Display for AstDeclKind {
 pub struct AstLetDecl {
     pub name: AstIdent,
     pub expr: Box<AstExpr>,
+}
+
+impl AstLetDecl {
+    pub fn inner_node_id(&self) -> NodeId {
+        self.name.node_id
+    }
 }
 
 impl Display for AstLetDecl {
