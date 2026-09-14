@@ -2,8 +2,11 @@
 
 use std::collections::HashMap;
 
+use thiserror::Error;
+
 use crate::{
     ast::{self, NodeId},
+    sourcemap::{DiagnoseWith, report::Diagnostic},
     ty::{Ty, TyCtxt},
 };
 indexable_id!(pub DefId);
@@ -73,20 +76,35 @@ impl<'d> DefCtxt<'d> {
         }
     }
 
+    fn reverse_def_id_to_node_id(&self, def_id: DefId) -> Option<NodeId> {
+        for (node_id, id) in &self.node_id_to_def_id {
+            if *id == def_id {
+                return Some(*node_id);
+            }
+        }
+        None
+    }
+
     fn node_to_def_id(&self, node_id: NodeId) -> Option<DefId> {
         self.node_id_to_def_id.get(&node_id).copied()
     }
 
     // used in first pass just to declare existence of a def and map it up.
-    fn declare(&mut self, node_id: NodeId, name: String) -> DefId {
-        if self.name_to_def_id.contains_key(&name) {
+    fn declare(&mut self, node_id: NodeId, name: String) -> Result<DefId, DefError> {
+        match self.name_to_def_id.get(&name) {
             // again: will cleanup panics later.
-            panic!("name already declared: {}", name);
+            Some(def_id) => Err(DefError::DuplicateImpl(
+                name,
+                node_id,
+                self.reverse_def_id_to_node_id(*def_id).unwrap(),
+            )),
+            None => {
+                let def_id = self.next_id();
+                self.node_id_to_def_id.insert(node_id, def_id);
+                self.name_to_def_id.insert(name, def_id);
+                Ok(def_id)
+            }
         }
-        let def_id = self.next_id();
-        self.node_id_to_def_id.insert(node_id, def_id);
-        self.name_to_def_id.insert(name, def_id);
-        def_id
     }
 
     fn prepare_defs(&mut self) {
@@ -110,6 +128,45 @@ impl<'d> DefCtxt<'d> {
     }
 }
 
+#[derive(Debug, Error)]
+pub enum DefError {
+    #[error("duplicate definitions of {0}")]
+    DuplicateImpl(String, NodeId, NodeId),
+}
+
+impl DefError {
+    fn as_code(&self) -> Option<usize> {
+        use DefError::*;
+        match self {
+            DuplicateImpl(_, _, _) => Some(2001),
+        }
+    }
+}
+
+impl DiagnoseWith<NodeId> for DefError {
+    fn diagnose_with(
+        &self,
+        recorder: &mut crate::sourcemap::SpanRecorder<NodeId>,
+    ) -> Vec<Diagnostic> {
+        use DefError::*;
+        let message = self.to_string();
+        match self {
+            DuplicateImpl(_name, original_node, current_node) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, original_node, "original definition here")
+                        .with_label_from(
+                            recorder,
+                            current_node,
+                            "conflicting definition of same name here",
+                        ),
+                ]
+            }
+        }
+    }
+}
+
 /// Analyses the given program and provides definitions (it does not perform
 /// type checking)
 ///
@@ -118,42 +175,69 @@ impl<'d> DefCtxt<'d> {
 /// - second pass: resolve function signatures
 ///
 /// This is split into two steps for future custom type resolution.
-pub fn resolve(tcx: &mut TyCtxt, program: &ast::AstProgram) {
+pub fn resolve(tcx: &mut TyCtxt, program: &ast::AstProgram) -> Result<(), Vec<DefError>> {
     let mut dcx = DefCtxt::new(tcx);
 
-    resolve_names(&mut dcx, program);
+    resolve_names(&mut dcx, program)?;
     dcx.prepare_defs();
-    resolve_defs(tcx, &mut dcx, program);
+    resolve_defs(tcx, &mut dcx, program)?;
     tcx.defs = dcx.finish();
+    Ok(())
 }
 
-fn resolve_names(dcx: &mut DefCtxt, program: &ast::AstProgram) {
+fn resolve_names(dcx: &mut DefCtxt, program: &ast::AstProgram) -> Result<(), Vec<DefError>> {
+    let mut errors = Vec::new();
     for def in &program.defs {
         match def {
             ast::AstDef::Function(func) => {
-                dcx.declare(func.node_id, func.name.clone());
+                match dcx.declare(func.node_id, func.name.clone()) {
+                    Ok(_) => {}
+                    Err(err) => errors.push(err),
+                };
             }
         }
     }
+    if !errors.is_empty() {
+        Err(errors)
+    } else {
+        Ok(())
+    }
 }
 
-fn resolve_defs(tcx: &TyCtxt, dcx: &mut DefCtxt, program: &ast::AstProgram) {
+fn resolve_defs(
+    tcx: &TyCtxt,
+    dcx: &mut DefCtxt,
+    program: &ast::AstProgram,
+) -> Result<(), Vec<DefError>> {
+    let mut errors = Vec::new();
     for def in &program.defs {
         match def {
             ast::AstDef::Function(func) => {
-                resolve_func(tcx, dcx, func);
+                match resolve_func(tcx, dcx, func) {
+                    Ok(_) => {}
+                    Err(err) => errors.push(err),
+                };
             }
         }
     }
+    if !errors.is_empty() {
+        Err(errors)
+    } else {
+        Ok(())
+    }
 }
 
-fn resolve_func(tcx: &TyCtxt, dcx: &mut DefCtxt, func: &ast::AstFunctionDef) {
-    let return_ty = resolve_type(tcx, dcx, &func.return_ty);
+fn resolve_func(
+    tcx: &TyCtxt,
+    dcx: &mut DefCtxt,
+    func: &ast::AstFunctionDef,
+) -> Result<(), DefError> {
+    let return_ty = resolve_type(tcx, dcx, &func.return_ty)?;
     let param_tys = func
         .args
         .iter()
         .map(|p| resolve_type(tcx, dcx, &p.ty))
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>, DefError>>()?;
 
     let sig = FuncSig {
         return_ty,
@@ -166,12 +250,14 @@ fn resolve_func(tcx: &TyCtxt, dcx: &mut DefCtxt, func: &ast::AstFunctionDef) {
             kind: DefKind::Function(sig),
         },
     );
+
+    Ok(())
 }
 
-fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Ty {
+fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Result<Ty, DefError> {
     match ty {
-        ast::AstType::Float => tcx.float_ty(),
-        ast::AstType::Int => tcx.int_ty(),
-        ast::AstType::Void => tcx.void_ty(),
+        ast::AstType::Float => Ok(tcx.float_ty()),
+        ast::AstType::Int => Ok(tcx.int_ty()),
+        ast::AstType::Void => Ok(tcx.void_ty()),
     }
 }

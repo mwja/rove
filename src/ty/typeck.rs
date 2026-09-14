@@ -46,20 +46,20 @@ impl TypeError {
     fn as_code(&self) -> Option<usize> {
         use TypeError::*;
         match self {
-            UnresolvableType(..) => Some(1),
-            IncompatibleTypes(..) => Some(2),
-            IfConditionNotInt(..) => Some(3),
-            ExpressionOnVoid(..) => Some(4),
-            ExpressionOnFunc(..) => Some(5),
-            CannotResolve(..) => Some(6),
-            CannotCallNonFunction(..) => Some(7),
-            IncorrectNumberOfArguments(..) => Some(8),
-            IncorrectArgumentType(..) => Some(9),
-            CannotPrintFuncOrVoid(..) => Some(10),
-            ExpectedReturn(..) => Some(11),
-            DidNotExpectReturn(..) => Some(12),
-            DeadCode(..) => Some(13),
-            NotAllBranchesReturn(..) => Some(14),
+            UnresolvableType(..) => Some(1001),
+            IncompatibleTypes(..) => Some(1002),
+            IfConditionNotInt(..) => Some(1003),
+            ExpressionOnVoid(..) => Some(1004),
+            ExpressionOnFunc(..) => Some(1005),
+            CannotResolve(..) => Some(1006),
+            CannotCallNonFunction(..) => Some(1007),
+            IncorrectNumberOfArguments(..) => Some(1008),
+            IncorrectArgumentType(..) => Some(1009),
+            CannotPrintFuncOrVoid(..) => Some(1010),
+            ExpectedReturn(..) => Some(1011),
+            DidNotExpectReturn(..) => Some(1012),
+            DeadCode(..) => Some(1013),
+            NotAllBranchesReturn(..) => Some(1014),
         }
     }
 }

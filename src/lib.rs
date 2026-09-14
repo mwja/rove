@@ -1,7 +1,7 @@
 use std::{fs::File, path::PathBuf};
 
 use crate::{
-    sourcemap::{DiagnoseManyWith as _, report::Diagnostic},
+    sourcemap::{DiagnoseManyWith as _, DiagnoseWith, report::Diagnostic},
     ty::TyCtxt,
 };
 
@@ -37,7 +37,7 @@ pub fn compile(
     let ast = syntax::lower_to_ast(raw, source_file_id, &mut node_to_span);
 
     let mut ty_ctxt = TyCtxt::new();
-    defs::resolve(&mut ty_ctxt, &ast);
+    defs::resolve(&mut ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
     ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 

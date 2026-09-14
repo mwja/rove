@@ -37,3 +37,13 @@ func doesnt_always_returns(digit: int) -> float {
         return 2.0;
     }
 }
+
+
+func double_impl() {}
+
+func double_impl() {}
+
+
+func double_impl2() {}
+
+func double_impl2() {}
