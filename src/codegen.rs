@@ -26,7 +26,7 @@ use crate::{
     ty::{
         Ty, TyCtxt, TyKind,
         res::{LocalId, Res},
-        typeck::BodyInfo,
+        typeck::{BodyInfo, ScopeId},
     },
 };
 
@@ -228,6 +228,9 @@ pub fn generate_object(
             entry_block: block,
             landing_pad,
             is_main: func_def.is_main,
+            current_scope: None,
+            scope_frames: HashMap::new(),
+            loops: Vec::new(),
             cx,
         };
 
@@ -261,6 +264,26 @@ pub fn generate_object(
     Ok(bytes)
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum ExitKind {
+    Continue,
+    Break,
+    Return,
+    Error,
+}
+
+struct ScopeFrame {
+    scope: ScopeId,
+    parent: Option<ScopeId>,
+    links: HashMap<ExitKind, Block>,
+}
+
+struct LoopInfo {
+    scope: ScopeId,
+    header: Block,
+    exit: Block,
+}
+
 struct CraneliftCodegen<'a, 'o> {
     module: &'o mut ObjectModule,
     builder: &'o mut FunctionBuilder<'a>,
@@ -277,6 +300,11 @@ struct CraneliftCodegen<'a, 'o> {
     /// The landing pad takes ONE argument for now, the return type
     landing_pad: Block,
     is_main: bool,
+
+    // Scope frames
+    current_scope: Option<ScopeId>,
+    scope_frames: HashMap<ScopeId, ScopeFrame>,
+    loops: Vec<LoopInfo>,
     cx: CompilerCtxt<'o>,
 }
 
@@ -325,13 +353,95 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder
             .set_srcloc(SourceLoc::new(node_id.index() as u32));
     }
+
+    fn frame(&self, scope: ScopeId) -> &ScopeFrame {
+        self.scope_frames
+            .get(&scope)
+            .expect("no current frame to compile with")
+    }
+
+    fn frame_mut(&mut self, scope: ScopeId) -> &mut ScopeFrame {
+        self.scope_frames
+            .get_mut(&scope)
+            .expect("no current frame to compile with")
+    }
+
+    fn frame_locals(&self, scope: ScopeId) -> Vec<LocalId> {
+        self.cx
+            .body
+            .scope_locals
+            .get(&scope)
+            .map(|v| v.clone())
+            .unwrap_or_default()
+    }
+
+    /// Returns a list of locals to declare for the given frame ahead of time.
+    fn open_frame(&mut self, scope: ScopeId) -> Vec<LocalId> {
+        self.scope_frames
+            .entry(scope)
+            .or_insert_with(|| ScopeFrame {
+                scope,
+                parent: self.current_scope,
+                links: HashMap::new(),
+            });
+
+        self.current_scope = Some(scope);
+        self.frame_locals(scope)
+    }
+
+    /// You are responsible for releasing any resources later before calling this.
+    fn close_frame(&mut self, scope: ScopeId) {
+        let (parent, links) = {
+            let Some(frame) = self.scope_frames.get(&scope) else {
+                return;
+            };
+            let links: Vec<(ExitKind, Block)> = frame.links.iter().map(|(k, b)| (*k, *b)).collect();
+            (frame.parent, links)
+        };
+
+        // Terminate the open block first, so every switch below is legal.
+        let cont = match self.builder.current_block() {
+            Some(b) if !self.is_block_terminated(b) => {
+                let c = self.builder.create_block();
+                self.builder.ins().jump(c, &[]);
+                Some(c)
+            }
+            _ => None,
+        };
+
+        for (kind, block) in &links {
+            let target = self.locate_cleanup_target(scope, *kind);
+            self.builder.switch_to_block(*block);
+            self.emit_frame_locals_release(scope);
+            match self.chain_param(*kind) {
+                Some(_) => {
+                    let v = self.builder.block_params(*block)[0];
+                    self.builder.ins().jump(target, &[BlockArg::Value(v)]);
+                }
+                None => {
+                    self.builder.ins().jump(target, &[]);
+                }
+            }
+            // no restore — each link is filled before the next switch
+        }
+
+        for (_, block) in &links {
+            self.builder.seal_block(*block);
+        }
+
+        if let Some(c) = cont {
+            self.builder.seal_block(c);
+            self.builder.switch_to_block(c);
+        }
+
+        self.scope_frames.remove(&scope);
+        self.current_scope = parent;
+    }
 }
 
 impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower(mut self, def: ast::AstFunctionDef) {
-        for stmt in def.body.stmts {
-            self.lower_stmt(stmt);
-        }
+        self.lower_block_stmt(def.body);
 
         // build landing pad
         if self.is_main {
@@ -342,11 +452,13 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn is_current_block_terminated(&mut self) -> bool {
-        if let Some(current_block) = self.builder.current_block() {
-            if let Some(last_inst) = self.builder.func.layout.last_inst(current_block) {
-                let opcode = self.builder.func.dfg.insts[last_inst].opcode();
-                return opcode.is_terminator();
-            }
+        self.is_block_terminated(self.builder.current_block().unwrap())
+    }
+
+    fn is_block_terminated(&mut self, block: Block) -> bool {
+        if let Some(last_inst) = self.builder.func.layout.last_inst(block) {
+            let opcode = self.builder.func.dfg.insts[last_inst].opcode();
+            return opcode.is_terminator();
         }
         false
     }
@@ -393,7 +505,115 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstStmtKind::Block(block) => self.lower_block_stmt(block),
             ast::AstStmtKind::If(if_) => self.lower_if_stmt(if_),
             ast::AstStmtKind::Return(return_) => self.lower_return_stmt(return_),
+            ast::AstStmtKind::Loop(loop_) => self.lower_gen_loop(loop_.body, None),
+            ast::AstStmtKind::While(while_) => self.lower_gen_loop(while_.body, Some(*while_.cond)),
+            ast::AstStmtKind::Break(_) => self.lower_break_stmt(),
+            ast::AstStmtKind::Continue(_) => self.lower_continue_stmt(),
         };
+    }
+
+    fn lower_break_stmt(&mut self) {
+        let dest = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Break);
+        self.builder.ins().jump(dest, &[]);
+    }
+
+    fn lower_continue_stmt(&mut self) {
+        let dest = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Continue);
+        self.builder.ins().jump(dest, &[]);
+    }
+
+    /// Cranelift rep of the expected param type of a cleanup block. This is
+    /// future proofed to handle errors (though there's no way to natively throw
+    /// errors yet.)
+    fn chain_param(&self, kind: ExitKind) -> Option<Type> {
+        match kind {
+            ExitKind::Return => Some(lower_ty(self.module, &self.cx.body.return_ty)),
+            // Errors are emitted as i32 tags (well, will be)
+            ExitKind::Error => Some(types::I32),
+            _ => None,
+        }
+    }
+
+    fn cleanup_block(&mut self, scope_id: ScopeId, kind: ExitKind) -> Block {
+        if let Some(b) = self.frame(scope_id).links.get(&kind) {
+            return *b;
+        }
+
+        let block = self.builder.create_block();
+        if let Some(ty) = self.chain_param(kind) {
+            self.builder.append_block_param(block, ty);
+        }
+
+        self.frame_mut(scope_id).links.insert(kind, block);
+
+        block
+    }
+
+    fn locate_cleanup_target(&mut self, scope_id: ScopeId, kind: ExitKind) -> Block {
+        let parent = self.frame(scope_id).parent;
+        let innermost = self.loops.last();
+        match kind {
+            ExitKind::Continue if innermost.is_some_and(|l| l.scope == scope_id) => {
+                innermost.unwrap().header
+            }
+            ExitKind::Break if innermost.is_some_and(|l| l.scope == scope_id) => {
+                innermost.unwrap().exit
+            }
+            ExitKind::Continue | ExitKind::Break => match parent {
+                Some(parent) => self.cleanup_block(parent, kind),
+                None => unreachable!("continue/break outside of loop is rejected by typeck"),
+            },
+            ExitKind::Return | ExitKind::Error => match parent {
+                Some(p) => self.cleanup_block(p, kind),
+                None => self.landing_pad,
+            },
+        }
+    }
+
+    fn lower_gen_loop(&mut self, body: ast::AstBlockStmt, cond: Option<ast::AstExpr>) {
+        let scope_id = self
+            .cx
+            .body
+            .node_scope(body.node_id)
+            .expect("node scope not found");
+
+        // Create relevant header blocks (condition checks)
+        let header_block = self.builder.create_block();
+        let body_block = self.builder.create_block();
+        let exit_block = self.builder.create_block();
+
+        // Entry edge. Header is NOT sealed: the back-edge doesn't exist yet.
+        self.builder.ins().jump(header_block, &[]);
+        self.builder.switch_to_block(header_block);
+        match cond {
+            Some(c) => {
+                let v = self.lower_expr(c); // outer scope: frame not pushed yet
+                self.builder.ins().brif(v, body_block, &[], exit_block, &[]);
+            }
+            None => {
+                self.builder.ins().jump(body_block, &[]);
+            }
+        }
+        self.builder.seal_block(body_block); // header is its only predecessor
+        self.builder.switch_to_block(body_block);
+        self.loops.push(LoopInfo {
+            scope: scope_id,
+            header: header_block,
+            exit: exit_block,
+        });
+
+        self.lower_block_stmt(body);
+
+        // Falling off the end is a continue: releases inline, then the back-edge.
+        if !self.is_current_block_terminated() {
+            self.builder.ins().jump(header_block, &[]);
+        }
+        self.loops.pop();
+        // Every continue is emitted, so every header predecessor now exists.
+        self.builder.seal_block(header_block);
+        self.builder.seal_block(exit_block);
+
+        self.builder.switch_to_block(exit_block);
     }
 
     fn build_dummy_return_value(&mut self) -> Value {
@@ -432,14 +652,49 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
         let block_arg = BlockArg::Value(v);
         // jump to landing pad
-        self.builder.ins().jump(self.landing_pad, [&block_arg]);
+        let target = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Return);
+        self.builder.ins().jump(target, [&block_arg]);
     }
+
+    fn emit_frame_locals_declare(&mut self, scope_id: ScopeId) {
+        for local_id in self.frame_locals(scope_id).into_iter() {
+            let ty = self.cx.body.local_ty(local_id).unwrap();
+            let variable = self.builder.declare_var(self.scalar_type(ty).unwrap());
+            self.insert(Res::Local(local_id), variable);
+        }
+    }
+
+    fn emit_frame_locals_release(&mut self, scope_id: ScopeId) {
+        for _local_id in self.frame_locals(scope_id).into_iter() {
+            // in the future, work with the reference counts to release locals
+        }
+    }
+
+    /// Blocks need to be cleaned up in certain ways,
 
     fn lower_block_stmt(&mut self, block: ast::AstBlockStmt) {
         self.loc(&block.node_id);
+        let scope_id = self
+            .cx
+            .body
+            .node_scope(block.node_id)
+            .expect("node scope not found");
+
+        // open scope frame for this block.
+        self.open_frame(scope_id);
+        self.emit_frame_locals_declare(scope_id);
+
         for stmt in block.stmts {
             self.lower_stmt(stmt);
         }
+
+        // Got quite a few of these through the file for the minute but I'm not
+        // really sure how to consistently impl that.
+        if !self.is_current_block_terminated() {
+            self.emit_frame_locals_release(scope_id);
+        }
+
+        self.close_frame(scope_id);
     }
 
     fn lower_if_stmt(&mut self, if_stmt: ast::AstIfStmt) {
@@ -510,16 +765,12 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let Res::Local(local_id) = self.cx.body.node_res(let_decl.name.node_id).unwrap() else {
             unreachable!();
         };
-        let ty = self.cx.body.local_ty(local_id).unwrap();
         let value = self.lower_expr(*let_decl.expr);
         // for now we only have i64s... so no need to check
-        let variable = self.builder.declare_var(self.scalar_type(ty).unwrap());
+        let variable = self.locals.get(&local_id).copied().unwrap();
         self.builder.def_var(variable, value);
 
-        self.insert(
-            self.cx.body.node_res(let_decl.name.node_id).unwrap(),
-            variable,
-        );
+        self.insert(Res::Local(local_id), variable);
     }
 
     fn lower_expr(&mut self, expr: ast::AstExpr) -> Value {

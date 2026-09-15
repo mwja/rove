@@ -1,0 +1,14 @@
+func count_to_billion() {
+    let i = 0;
+    loop {
+        i = i + 1;
+        if i == 1000000000 {
+            break;
+        }
+    }
+    print i;
+}
+
+func main() {
+    count_to_billion();
+}

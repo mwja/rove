@@ -39,9 +39,9 @@ macro_rules! impl_next_id {
             }
         }
     };
-    ($struct:ident $(<$($lt:lifetime),+>)?.$field:ident -> $name:ident, $method_name:ident) => {
+    ($struct:ident $(<$($lt:lifetime),+>)?.$field:ident -> $name:ident, $vis:vis $method_name:ident) => {
         impl$(<$($lt),+>)? $struct$(<$($lt),+>)? {
-            fn $method_name(&mut self) -> $name {
+            $vis fn $method_name(&mut self) -> $name {
                 let id = self.$field;
                 self.$field += 1;
                 $name::new(id)

@@ -1,0 +1,63 @@
+func sum_skip(limit: int) -> int {
+    let total = 0;
+    let i = 0;
+    while (i <= limit) {
+        i = i + 1;
+        if i == 3 {
+            continue;
+        }
+        if i == 5 {
+            continue;
+        }
+        if i == 8 {
+            break;
+        }
+        {
+            let step = i + 0;
+            total = total + step;
+        }
+    }
+    return total;
+}
+
+func grid(n: int) -> int {
+    let count = 0;
+    let i = 0;
+    while (i < n) {
+        i = i + 1;
+        let j = 0;
+        while (j < n) {
+            j = j + 1;
+            if j == 2 {
+                continue;
+            }
+            if i + j == 7 {
+                return count;
+            }
+            count = count + 1;
+        }
+    }
+    return count - 100;
+}
+
+func countdown(start: int) -> int {
+    let x = start;
+    let ticks = 0;
+    loop {
+        if x <= 0 {
+            break;
+        }
+        x = x - 1;
+        ticks = ticks + 1;
+    }
+    return ticks;
+}
+
+func main() {
+    let a = sum_skip(10);
+    print a;
+    let b = grid(4);
+    print b;
+    let c = countdown(5);
+    print c;
+}

@@ -64,6 +64,16 @@ mod grammar {
         Assign(Spanned<AssignStmt>, #[rust_sitter::leaf(text = ";")] ()),
         Block(Spanned<BlockStmt>),
         If(Spanned<IfStmt>),
+        Loop(Spanned<LoopStmt>),
+        While(Spanned<WhileStmt>),
+        Break(
+            #[rust_sitter::leaf(text = "break")] Spanned<()>,
+            #[rust_sitter::leaf(text = ";")] (),
+        ),
+        Continue(
+            #[rust_sitter::leaf(text = "continue")] Spanned<()>,
+            #[rust_sitter::leaf(text = ";")] (),
+        ),
         Return(Spanned<ReturnStmt>, #[rust_sitter::leaf(text = ";")] ()),
     }
 
@@ -79,6 +89,19 @@ mod grammar {
         pub cond: Box<Spanned<Expr>>,
         pub then: Spanned<BlockStmt>,
         pub else_: Option<ElsePath>,
+    }
+
+    pub struct LoopStmt {
+        #[rust_sitter::leaf(text = "loop")]
+        pub _loop: (),
+        pub body: Spanned<BlockStmt>,
+    }
+
+    pub struct WhileStmt {
+        #[rust_sitter::leaf(text = "while")]
+        pub _while: (),
+        pub cond: Box<Spanned<Expr>>,
+        pub body: Spanned<BlockStmt>,
     }
 
     pub struct ElsePath {
@@ -402,6 +425,39 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Stmt::Return(return_stmt, _) => {
                 ast::AstStmtKind::Return(self.lower_return_stmt(return_stmt))
             }
+            grammar::Stmt::Loop(loop_) => ast::AstStmtKind::Loop(self.lower_loop_stmt(loop_)),
+            grammar::Stmt::While(while_) => ast::AstStmtKind::While(self.lower_while_stmt(while_)),
+            grammar::Stmt::Break(v, _) => ast::AstStmtKind::Break(self.lower_break_stmt(v)),
+            grammar::Stmt::Continue(v, _) => {
+                ast::AstStmtKind::Continue(self.lower_continue_stmt(v))
+            }
+        }
+    }
+
+    fn lower_loop_stmt(&mut self, loop_stmt: Spanned<grammar::LoopStmt>) -> ast::AstLoopStmt {
+        ast::AstLoopStmt {
+            node_id: self.next_id_spanned(loop_stmt.span),
+            body: self.lower_block_stmt(loop_stmt.value.body),
+        }
+    }
+
+    fn lower_while_stmt(&mut self, while_stmt: Spanned<grammar::WhileStmt>) -> ast::AstWhileStmt {
+        ast::AstWhileStmt {
+            node_id: self.next_id_spanned(while_stmt.span),
+            cond: Box::new(self.lower_expr(*while_stmt.value.cond)),
+            body: self.lower_block_stmt(while_stmt.value.body),
+        }
+    }
+
+    fn lower_break_stmt(&mut self, break_stmt: Spanned<()>) -> ast::AstBreakStmt {
+        ast::AstBreakStmt {
+            node_id: self.next_id_spanned(break_stmt.span),
+        }
+    }
+
+    fn lower_continue_stmt(&mut self, continue_stmt: Spanned<()>) -> ast::AstContinueStmt {
+        ast::AstContinueStmt {
+            node_id: self.next_id_spanned(continue_stmt.span),
         }
     }
 

@@ -1,0 +1,23 @@
+func fib (n: int) -> int {
+    if n <= 1 {
+        return n;
+    } else if n == 1 {
+        return 1;
+    }
+
+    let a = 0;
+    let b = 1;
+    let curr_n = 2;
+    while (curr_n <= n) {
+        let c = a + b;
+        a = b;
+        b = c;
+        curr_n = curr_n + 1;
+    }
+    return b;
+}
+
+func main() {
+    let result = fib(10);
+    print result;
+}

@@ -88,7 +88,32 @@ fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
         ast::AstStmtKind::Block(block) => format!("{};", display_block(body, block)),
         ast::AstStmtKind::If(if_stmt) => display_if(body, if_stmt),
         ast::AstStmtKind::Return(return_stmt) => display_return(body, return_stmt),
+        ast::AstStmtKind::Loop(loop_stmt) => display_loop(body, loop_stmt),
+        ast::AstStmtKind::While(while_stmt) => display_while(body, while_stmt),
+        ast::AstStmtKind::Break(break_stmt) => display_break(body, break_stmt),
+        ast::AstStmtKind::Continue(continue_stmt) => display_continue(body, continue_stmt),
     }
+}
+
+fn display_while(body: &BodyInfo, while_stmt: &ast::AstWhileStmt) -> String {
+    format!(
+        "while {} {}; // while {}",
+        while_stmt.cond,
+        display_block(body, &while_stmt.body),
+        annotate_expr(body, &while_stmt.cond)
+    )
+}
+
+fn display_loop(body: &BodyInfo, loop_stmt: &ast::AstLoopStmt) -> String {
+    format!("loop {}; // loop", display_block(body, &loop_stmt.body))
+}
+
+fn display_break(body: &BodyInfo, break_stmt: &ast::AstBreakStmt) -> String {
+    break_stmt.to_string()
+}
+
+fn display_continue(body: &BodyInfo, continue_stmt: &ast::AstContinueStmt) -> String {
+    continue_stmt.to_string()
 }
 
 fn display_return(body: &BodyInfo, return_stmt: &ast::AstReturnStmt) -> String {

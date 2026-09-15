@@ -116,7 +116,15 @@ impl AstStmt {
             AstStmtKind::Block(block) => block.node_id,
             AstStmtKind::If(if_stmt) => if_stmt.node_id,
             AstStmtKind::Return(return_stmt) => return_stmt.node_id,
+            AstStmtKind::Loop(loop_stmt) => loop_stmt.node_id,
+            AstStmtKind::While(while_stmt) => while_stmt.node_id,
+            AstStmtKind::Break(break_stmt) => break_stmt.node_id,
+            AstStmtKind::Continue(continue_stmt) => continue_stmt.node_id,
         }
+    }
+
+    pub fn is_loop(&self) -> bool {
+        matches!(self.kind, AstStmtKind::Loop(_) | AstStmtKind::While(_))
     }
 }
 
@@ -134,6 +142,10 @@ pub enum AstStmtKind {
     Assign(AstAssignStmt),
     Block(AstBlockStmt),
     If(AstIfStmt),
+    Loop(AstLoopStmt),
+    While(AstWhileStmt),
+    Break(AstBreakStmt),
+    Continue(AstContinueStmt),
     Return(AstReturnStmt),
 }
 
@@ -147,7 +159,58 @@ impl Display for AstStmtKind {
             AstStmtKind::Block(block) => write!(f, "{};", block),
             AstStmtKind::If(if_stmt) => write!(f, "{}", if_stmt),
             AstStmtKind::Return(return_stmt) => write!(f, "{};", return_stmt),
+            AstStmtKind::Loop(loop_stmt) => write!(f, "{};", loop_stmt),
+            AstStmtKind::While(while_stmt) => write!(f, "{};", while_stmt),
+            AstStmtKind::Break(break_stmt) => write!(f, "{};", break_stmt),
+            AstStmtKind::Continue(continue_stmt) => write!(f, "{};", continue_stmt),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct AstLoopStmt {
+    pub node_id: NodeId,
+    pub body: AstBlockStmt,
+}
+
+impl Display for AstLoopStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "loop {{ {} }}", self.body)
+    }
+}
+
+#[derive(Debug)]
+pub struct AstWhileStmt {
+    pub node_id: NodeId,
+    pub cond: Box<AstExpr>,
+    pub body: AstBlockStmt,
+}
+
+impl Display for AstWhileStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "while {} {{ {} }}", self.cond, self.body)
+    }
+}
+
+#[derive(Debug)]
+pub struct AstBreakStmt {
+    pub node_id: NodeId,
+}
+
+impl Display for AstBreakStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "break")
+    }
+}
+
+#[derive(Debug)]
+pub struct AstContinueStmt {
+    pub node_id: NodeId,
+}
+
+impl Display for AstContinueStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "continue")
     }
 }
 
@@ -164,7 +227,8 @@ impl Display for AstReturnStmt {
         if let Some(expr) = &self.expr {
             write!(f, " {}", expr)?;
         }
-        write!(f, ";")
+
+        Ok(())
     }
 }
 

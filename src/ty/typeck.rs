@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use super::*;
 use crate::{
-    ast::{self, AstIdent, AstLetDecl, AstStmtKind},
+    ast::{self, AstExpr, AstIdent, AstLetDecl, AstStmtKind},
     defs::{self, FuncSig},
     sourcemap::{DiagnoseWith, report::Diagnostic},
     ty::res::{LocalId, ParamId, Res},
@@ -40,6 +40,12 @@ pub enum TypeError {
     DeadCode(NodeId),
     #[error("not all branches return")]
     NotAllBranchesReturn(NodeId, NodeId, Ty),
+    #[error("loop condition not int")]
+    LoopConditionNotInt(NodeId, NodeId, Ty),
+    #[error("break outside of a loop")]
+    BreakOutsideLoop(NodeId),
+    #[error("continue outside of a loop")]
+    ContinueOutsideLoop(NodeId),
 }
 
 impl TypeError {
@@ -60,6 +66,9 @@ impl TypeError {
             DidNotExpectReturn(..) => Some(1012),
             DeadCode(..) => Some(1013),
             NotAllBranchesReturn(..) => Some(1014),
+            LoopConditionNotInt(..) => Some(1015),
+            BreakOutsideLoop(..) => Some(1016),
+            ContinueOutsideLoop(..) => Some(1017),
         }
     }
 }
@@ -226,6 +235,36 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
+            LoopConditionNotInt(node_id, condition_node_id, condition_ty) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "loop here")
+                        .with_label_from(
+                            recorder,
+                            condition_node_id,
+                            format!(
+                                "condition here expected to be an int, found a {}",
+                                condition_ty
+                            ),
+                        ),
+                ]
+            }
+
+            BreakOutsideLoop(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "break here"),
+                ]
+            }
+            ContinueOutsideLoop(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "continue here"),
+                ]
+            }
         }
     }
 }
@@ -236,6 +275,12 @@ pub struct BodyInfo {
     pub local_tys: Vec<Ty>,
     pub param_tys: Vec<Ty>,
     pub node_tys: HashMap<ast::NodeId, Ty>,
+
+    /// will be used later for ARC mem management.
+    pub scope_locals: HashMap<ScopeId, Vec<LocalId>>,
+    /// what scopes are inside loops?
+    pub scope_loops: HashMap<ScopeId, bool>,
+    pub node_scopes: HashMap<ast::NodeId, ScopeId>,
     pub return_ty: Ty,
 }
 
@@ -246,6 +291,9 @@ impl BodyInfo {
             local_tys: Vec::new(),
             param_tys: Vec::new(),
             node_tys: HashMap::new(),
+            scope_locals: HashMap::new(),
+            scope_loops: HashMap::new(),
+            node_scopes: HashMap::new(),
             return_ty,
         }
     }
@@ -273,6 +321,22 @@ impl BodyInfo {
     fn set_node_res(&mut self, node_id: ast::NodeId, res: Res) {
         self.node_res.insert(node_id, res);
     }
+
+    fn set_node_scope(&mut self, node_id: ast::NodeId, scope_id: ScopeId) {
+        self.node_scopes.insert(node_id, scope_id);
+    }
+
+    pub fn node_scope(&self, node_id: ast::NodeId) -> Option<ScopeId> {
+        self.node_scopes.get(&node_id).cloned()
+    }
+
+    fn set_scope_as_loop(&mut self, scope_id: ScopeId) {
+        self.scope_loops.insert(scope_id, true);
+    }
+
+    pub fn is_scope_loop(&self, scope_id: ScopeId) -> bool {
+        self.scope_loops.get(&scope_id).cloned().unwrap_or(false)
+    }
 }
 
 /// Exists only within a function and is discarded with the function.
@@ -280,8 +344,11 @@ impl BodyInfo {
 struct TypeckCtxt<'c> {
     next_id: usize,
     next_param_id: usize,
+    next_scope_id: usize,
     tcx: &'c mut TyCtxt,
     scopes: Vec<HashMap<String, Res>>,
+    current_scope_ids: Vec<ScopeId>,
+    inside_loop: bool,
     body: BodyInfo,
     errors: Vec<TypeError>,
 
@@ -305,9 +372,10 @@ impl<T> Reported for Result<T, TypeError> {
         }
     }
 }
-
+indexable_id!(pub ScopeId);
 impl_next_id!(TypeckCtxt<'c>.next_id -> LocalId);
 impl_next_id!(TypeckCtxt<'c>.next_param_id -> ParamId, next_param_id);
+impl_next_id!(TypeckCtxt<'c>.next_scope_id -> ScopeId, next_scope_id);
 impl<'c> TypeckCtxt<'c> {
     pub fn new(tcx: &'c mut TyCtxt) -> Self {
         let return_ty = tcx.void_ty();
@@ -317,8 +385,11 @@ impl<'c> TypeckCtxt<'c> {
             body: BodyInfo::new_with_return_ty(return_ty),
             next_id: 0,
             next_param_id: 0,
+            next_scope_id: 0,
             errors: Vec::new(),
+            inside_loop: false,
             func_node_id: ast::NodeId::new(0),
+            current_scope_ids: Vec::new(),
             return_node_id: None,
         }
     }
@@ -329,7 +400,7 @@ impl<'c> TypeckCtxt<'c> {
         sig: &defs::FuncSig,
     ) -> Self {
         let mut tccx = Self::new(tcx);
-        tccx.open_scope();
+        tccx.open_scope(def.body.node_id);
 
         for (param, ty) in def.args.iter().zip(sig.param_tys.iter()) {
             tccx.declare_param(param.node_id, &param.name, ty.clone());
@@ -354,6 +425,13 @@ impl<'c> TypeckCtxt<'c> {
             .last_mut()
             .unwrap()
             .insert(name.to_string(), Res::Local(local_id));
+
+        self.body
+            .scope_locals
+            .entry(self.current_scope_ids.last().copied().unwrap())
+            .or_default()
+            .push(local_id);
+
         local_id
     }
 
@@ -403,12 +481,18 @@ impl<'c> TypeckCtxt<'c> {
         self.tcx.ty(kind)
     }
 
-    fn open_scope(&mut self) {
+    fn open_scope(&mut self, owner_node_id: NodeId) -> ScopeId {
         self.scopes.push(HashMap::new());
+        let scope_id = self.next_scope_id();
+        self.current_scope_ids.push(scope_id);
+        self.body.set_node_scope(owner_node_id, scope_id);
+
+        scope_id
     }
 
     fn close_scope(&mut self) {
         self.scopes.pop();
+        self.current_scope_ids.pop();
     }
 
     pub fn finish(self) -> Result<BodyInfo, Vec<TypeError>> {
@@ -505,7 +589,7 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
             typeck_expr(tccx, &ass.expr).reported(tccx)?;
         }
         AstStmtKind::If(stmt) => typeck_if(tccx, stmt)?,
-        AstStmtKind::Block(block) => typeck_block(tccx, block)?,
+        AstStmtKind::Block(block) => typeck_block(tccx, block, true)?,
         AstStmtKind::Print(stmt) => {
             // for now can only print expressions
             let ty = typeck_expr(tccx, &stmt.expr).reported(tccx)?;
@@ -516,7 +600,71 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
             }
         }
         AstStmtKind::Return(return_stmt) => typeck_return(tccx, return_stmt).reported(tccx)?,
+        // Loops are generic enough that both can be handled here.
+        AstStmtKind::Loop(loop_stmt) => {
+            typeck_gen_loop(tccx, loop_stmt.node_id, &loop_stmt.body, None);
+        }
+        AstStmtKind::While(while_stmt) => {
+            typeck_gen_loop(
+                tccx,
+                while_stmt.node_id,
+                &while_stmt.body,
+                Some(&while_stmt.cond),
+            )?;
+        }
+        AstStmtKind::Break(break_stmt) => typeck_break(tccx, break_stmt).reported(tccx)?,
+        AstStmtKind::Continue(continue_stmt) => {
+            typeck_continue(tccx, continue_stmt).reported(tccx)?
+        }
     };
+
+    Ok(())
+}
+
+fn typeck_gen_loop(
+    tccx: &mut TypeckCtxt,
+    node_id: NodeId,
+    body: &ast::AstBlockStmt,
+    condition: Option<&AstExpr>,
+) -> Result<(), ()> {
+    if let Some(condition) = condition {
+        // make sure the condition resolves a int (current placeholder for booleans)
+        let ty = typeck_expr(tccx, condition).reported(tccx)?;
+        if ty.kind() != &TyKind::Int {
+            return Err(TypeError::LoopConditionNotInt(
+                node_id,
+                condition.node_id(),
+                ty,
+            ))
+            .reported(tccx)?;
+        }
+    }
+
+    let was_loop = tccx.inside_loop;
+    tccx.inside_loop = true;
+
+    typeck_block(tccx, body, true)?;
+
+    tccx.inside_loop = was_loop;
+
+    Ok(())
+}
+
+fn typeck_break(tccx: &mut TypeckCtxt, break_stmt: &ast::AstBreakStmt) -> Result<(), TypeError> {
+    if !tccx.inside_loop {
+        return Err(TypeError::BreakOutsideLoop(break_stmt.node_id));
+    }
+
+    Ok(())
+}
+
+fn typeck_continue(
+    tccx: &mut TypeckCtxt,
+    continue_stmt: &ast::AstContinueStmt,
+) -> Result<(), TypeError> {
+    if !tccx.inside_loop {
+        return Err(TypeError::ContinueOutsideLoop(continue_stmt.node_id));
+    }
 
     Ok(())
 }
@@ -559,19 +707,22 @@ fn typeck_if(tccx: &mut TypeckCtxt, stmt: &ast::AstIfStmt) -> Result<(), ()> {
     if res != tccx.tcx.int_ty() {
         return Err(TypeError::IfConditionNotInt(stmt.cond.node_id(), res)).reported(tccx);
     }
-    typeck_block(tccx, &stmt.then)?;
+    typeck_block(tccx, &stmt.then, false)?;
     if let Some(else_) = &stmt.else_ {
         match else_ {
             ast::AstElseBranch::If(stmt) => typeck_if(tccx, stmt)?,
-            ast::AstElseBranch::Block(block) => typeck_block(tccx, block)?,
+            ast::AstElseBranch::Block(block) => typeck_block(tccx, block, false)?,
         }
     }
 
     Ok(())
 }
 
-fn typeck_block(tccx: &mut TypeckCtxt, block: &ast::AstBlockStmt) -> Result<(), ()> {
-    tccx.open_scope();
+fn typeck_block(tccx: &mut TypeckCtxt, block: &ast::AstBlockStmt, is_loop: bool) -> Result<(), ()> {
+    let scope_id = tccx.open_scope(block.node_id);
+    if is_loop {
+        tccx.body.set_scope_as_loop(scope_id);
+    }
     for stmt in block.stmts.iter() {
         let _ = typeck_stmt(tccx, stmt);
     }
@@ -745,12 +896,21 @@ fn always_returns(stmt: &ast::AstStmt) -> Returns {
         AstStmtKind::Return(_) => Returns::always(),
         AstStmtKind::Block(b) => block_always_returns(b),
         AstStmtKind::If(s) => if_always_returns(s),
+        AstStmtKind::Loop(l) => loop_always_returns(l),
 
         AstStmtKind::Expr(_)
         | AstStmtKind::Print(_)
         | AstStmtKind::Decl(_)
-        | AstStmtKind::Assign(_) => Returns::never(),
+        | AstStmtKind::Assign(_)
+        | AstStmtKind::Break(_)
+        | AstStmtKind::Continue(_)
+        // Compiler isn't yet smart enough to check this.
+        | AstStmtKind::While(_) => Returns::never(),
     }
+}
+
+fn loop_always_returns(loop_: &ast::AstLoopStmt) -> Returns {
+    block_always_returns(&loop_.body)
 }
 
 fn block_always_returns(block: &ast::AstBlockStmt) -> Returns {
