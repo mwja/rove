@@ -16,6 +16,7 @@ pub struct Diagnostic {
     pub priority: i32,
     pub labels: Vec<DiagnosticLabel>,
     pub code: Option<usize>,
+    pub help: Option<String>,
 }
 
 impl Diagnostic {
@@ -25,6 +26,7 @@ impl Diagnostic {
             priority: 0,
             labels: Vec::new(),
             code: None,
+            help: None,
         }
     }
 
@@ -38,6 +40,11 @@ impl Diagnostic {
 
     pub fn with_code(mut self, code: Option<usize>) -> Self {
         self.code = code;
+        self
+    }
+
+    pub fn with_help(mut self, help: Option<impl Into<String>>) -> Self {
+        self.help = help.map(|h| h.into());
         self
     }
 
@@ -193,6 +200,7 @@ impl<'map> ReportBuilder<'map> {
             message,
             priority,
             code,
+            help,
         } in &self.diagnostics
         {
             let mut builder = Report::build(
@@ -213,6 +221,11 @@ impl<'map> ReportBuilder<'map> {
             if let Some(code) = code {
                 builder = builder.with_code(*code);
             }
+
+            if let Some(help) = help {
+                builder = builder.with_help(help);
+            }
+
             reports.push(builder.finish());
         }
 

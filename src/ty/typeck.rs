@@ -7,7 +7,7 @@ use crate::{
     ast::{self, AstExpr, AstIdent, AstLetDecl, AstStmtKind},
     defs::{self, FuncSig},
     sourcemap::{DiagnoseWith, report::Diagnostic},
-    ty::res::{LocalId, ParamId, Res},
+    ty::res::{LocalId, OldId, ParamId, Res},
 };
 
 #[derive(Debug, Error)]
@@ -17,7 +17,7 @@ pub enum TypeError {
     #[error("types {0} and {1} are incompatible")]
     IncompatibleTypes(Ty, Ty, NodeId, NodeId),
     #[error("condition for if statement must be an int")]
-    IfConditionNotInt(NodeId, Ty),
+    IfConditionNotValid(NodeId, Ty),
     #[error("it is not possible to perform operations on void values")]
     ExpressionOnVoid(ast::AstBinaryOperator, NodeId),
     #[error("it is not possible to perform operations on functions")]
@@ -41,11 +41,19 @@ pub enum TypeError {
     #[error("not all branches return")]
     NotAllBranchesReturn(NodeId, NodeId, Ty),
     #[error("loop condition not int")]
-    LoopConditionNotInt(NodeId, NodeId, Ty),
+    LoopConditionNotValid(NodeId, NodeId, Ty),
     #[error("break outside of a loop")]
     BreakOutsideLoop(NodeId),
     #[error("continue outside of a loop")]
     ContinueOutsideLoop(NodeId),
+    #[error("cannot use `ret` inside an pre-constraint")]
+    RetInPreConstraint(NodeId, NodeId),
+    #[error("cannot use `old` inside a pre-constraint")]
+    OldInPreConstraint(NodeId, NodeId),
+    #[error("`old` inside constraints requires only one parameter")]
+    MalformedOldInConstraint(NodeId, NodeId),
+    #[error("condition in constraint is not an int")]
+    ConstraintConditionNotValid(NodeId, Ty),
 }
 
 impl TypeError {
@@ -54,7 +62,7 @@ impl TypeError {
         match self {
             UnresolvableType(..) => Some(1001),
             IncompatibleTypes(..) => Some(1002),
-            IfConditionNotInt(..) => Some(1003),
+            IfConditionNotValid(..) => Some(1003),
             ExpressionOnVoid(..) => Some(1004),
             ExpressionOnFunc(..) => Some(1005),
             CannotResolve(..) => Some(1006),
@@ -66,9 +74,13 @@ impl TypeError {
             DidNotExpectReturn(..) => Some(1012),
             DeadCode(..) => Some(1013),
             NotAllBranchesReturn(..) => Some(1014),
-            LoopConditionNotInt(..) => Some(1015),
+            LoopConditionNotValid(..) => Some(1015),
             BreakOutsideLoop(..) => Some(1016),
             ContinueOutsideLoop(..) => Some(1017),
+            RetInPreConstraint(..) => Some(1018),
+            MalformedOldInConstraint(..) => Some(1019),
+            ConstraintConditionNotValid(..) => Some(1020),
+            OldInPreConstraint(..) => Some(1021),
         }
     }
 }
@@ -104,7 +116,7 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
-            IfConditionNotInt(node_id, ty) => {
+            IfConditionNotValid(node_id, ty) => {
                 vec![
                     Diagnostic::new(message)
                         .with_code(self.as_code())
@@ -235,7 +247,7 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
-            LoopConditionNotInt(node_id, condition_node_id, condition_ty) => {
+            LoopConditionNotValid(node_id, condition_node_id, condition_ty) => {
                 vec![
                     Diagnostic::new(message)
                         .with_code(self.as_code())
@@ -265,6 +277,64 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_label_from(recorder, node_id, "continue here"),
                 ]
             }
+            RetInPreConstraint(ret_node_id, enclosing_constraint_node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, ret_node_id, "`ret` here")
+                        .with_label_from(
+                            recorder,
+                            enclosing_constraint_node_id,
+                            "enclosing constraint",
+                        ),
+                ]
+            }
+            MalformedOldInConstraint(node_id, enclosing_constraint_node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "`old` here requires one parameter only",
+                        )
+                        .with_label_from(
+                            recorder,
+                            enclosing_constraint_node_id,
+                            "enclosing constraint",
+                        )
+                        .with_help(Some("`old` inside constraints refers to the language defined access of old values, not a defined function")),
+                ]
+            }
+            ConstraintConditionNotValid(node_id, ty) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("condition here must be an int, got {}", ty),
+                        )
+                        .with_help(Some("")),
+                ]
+            }
+            OldInPreConstraint(node_id, enclosing_constraint_node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "`old` here is not allowed in pre-constraints",
+                        )
+                        .with_label_from(
+                            recorder,
+                            enclosing_constraint_node_id,
+                            "enclosing constraint",
+                        )
+                        .with_help(Some("")),
+                ]
+            }
         }
     }
 }
@@ -273,6 +343,7 @@ impl DiagnoseWith<NodeId> for TypeError {
 pub struct BodyInfo {
     pub node_res: HashMap<ast::NodeId, Res>,
     pub local_tys: Vec<Ty>,
+    pub old_tys: Vec<Ty>,
     pub param_tys: Vec<Ty>,
     pub node_tys: HashMap<ast::NodeId, Ty>,
 
@@ -289,6 +360,7 @@ impl BodyInfo {
         Self {
             node_res: HashMap::new(),
             local_tys: Vec::new(),
+            old_tys: Vec::new(),
             param_tys: Vec::new(),
             node_tys: HashMap::new(),
             scope_locals: HashMap::new(),
@@ -337,18 +409,44 @@ impl BodyInfo {
     pub fn is_scope_loop(&self, scope_id: ScopeId) -> bool {
         self.scope_loops.get(&scope_id).cloned().unwrap_or(false)
     }
+
+    pub fn old_ty(&self, old_id: OldId) -> Option<Ty> {
+        self.old_tys.get(*old_id).cloned()
+    }
 }
 
 /// Exists only within a function and is discarded with the function.
+enum ConstraintType {
+    Pre(NodeId),
+    Post(NodeId),
+}
+
+impl ConstraintType {
+    pub fn node_id(&self) -> NodeId {
+        match self {
+            ConstraintType::Pre(node_id) | ConstraintType::Post(node_id) => *node_id,
+        }
+    }
+
+    fn is_pre(&self) -> bool {
+        matches!(self, ConstraintType::Pre(_))
+    }
+
+    fn is_post(&self) -> bool {
+        matches!(self, ConstraintType::Post(_))
+    }
+}
 
 struct TypeckCtxt<'c> {
     next_id: usize,
     next_param_id: usize,
     next_scope_id: usize,
+    next_old_id: usize,
     tcx: &'c mut TyCtxt,
     scopes: Vec<HashMap<String, Res>>,
     current_scope_ids: Vec<ScopeId>,
     inside_loop: bool,
+    inside_constraint: Option<ConstraintType>,
     body: BodyInfo,
     errors: Vec<TypeError>,
 
@@ -376,6 +474,7 @@ indexable_id!(pub ScopeId);
 impl_next_id!(TypeckCtxt<'c>.next_id -> LocalId);
 impl_next_id!(TypeckCtxt<'c>.next_param_id -> ParamId, next_param_id);
 impl_next_id!(TypeckCtxt<'c>.next_scope_id -> ScopeId, next_scope_id);
+impl_next_id!(TypeckCtxt<'c>.next_old_id -> OldId, next_old_id);
 impl<'c> TypeckCtxt<'c> {
     pub fn new(tcx: &'c mut TyCtxt) -> Self {
         let return_ty = tcx.void_ty();
@@ -386,8 +485,10 @@ impl<'c> TypeckCtxt<'c> {
             next_id: 0,
             next_param_id: 0,
             next_scope_id: 0,
+            next_old_id: 0,
             errors: Vec::new(),
             inside_loop: false,
+            inside_constraint: None,
             func_node_id: ast::NodeId::new(0),
             current_scope_ids: Vec::new(),
             return_node_id: None,
@@ -452,7 +553,7 @@ impl<'c> TypeckCtxt<'c> {
             .rev()
             .find_map(|s| {
                 // prefer locals and params.
-                s.get(name).copied()
+                s.get(name).cloned()
             })
             .or_else(|| {
                 self.tcx
@@ -462,15 +563,17 @@ impl<'c> TypeckCtxt<'c> {
             })
     }
 
-    fn res_ty(&self, res: Res) -> Option<Ty> {
+    fn res_ty(&self, res: &Res) -> Option<Ty> {
         match res {
             Res::Local(local_id) => self.body.local_tys.get(local_id.index()).cloned(),
             Res::Def(def_id) => {
-                let def = self.tcx.defs.def(def_id)?;
+                let def = self.tcx.defs.def(*def_id)?;
                 match &def.kind {
                     defs::DefKind::Function(sig) => Some(self.ty(TyKind::Func(sig.clone()))),
                 }
             }
+            Res::ConstraintOld(res) => self.body.old_tys.get(res.index()).cloned(),
+            Res::ConstraintRet => Some(self.body.return_ty.clone()),
             Res::Param(param_id) => self.body.param_tys.get(param_id.index()).cloned(),
             Res::Err => None,
         }
@@ -524,9 +627,12 @@ pub fn typeck_ast(
                         kind: defs::DefKind::Function(sig),
                     } => {
                         let mut tccx = TypeckCtxt::new_with_func_sig(tcx, ast_func_def, &sig);
+
+                        typeck_pre_constraint(&mut tccx, &ast_func_def.constraints);
                         for stmt in ast_func_def.body.stmts.iter() {
                             let _ = typeck_stmt(&mut tccx, stmt);
                         }
+                        typeck_post_constraint(&mut tccx, &ast_func_def.constraints);
 
                         // will eventually be togglable, but for now we do this always
                         match (
@@ -569,6 +675,56 @@ pub fn typeck_ast(
     }
 
     Ok(results)
+}
+
+fn typeck_pre_constraint(
+    tccx: &mut TypeckCtxt,
+    constraints: &[ast::AstConstraint],
+) -> Result<(), ()> {
+    for constraint in constraints {
+        match constraint {
+            ast::AstConstraint::Require(req_cstrt) => {
+                tccx.inside_constraint = Some(ConstraintType::Pre(req_cstrt.node_id));
+                let ty = typeck_expr(tccx, &req_cstrt.condition).reported(tccx)?;
+                if !ty.is_bool() {
+                    return Err(TypeError::ConstraintConditionNotValid(
+                        req_cstrt.condition.node_id(),
+                        ty,
+                    ))
+                    .reported(tccx)?;
+                }
+                tccx.inside_constraint = None;
+            }
+            // Happens in post_constraint
+            ast::AstConstraint::Ensure(..) => {}
+        }
+    }
+
+    Ok(())
+}
+
+fn typeck_post_constraint(
+    tccx: &mut TypeckCtxt,
+    constraints: &[ast::AstConstraint],
+) -> Result<(), ()> {
+    for constraint in constraints {
+        match constraint {
+            // pre_constraint
+            ast::AstConstraint::Require(..) => {}
+            ast::AstConstraint::Ensure(ens_cstrt) => {
+                tccx.inside_constraint = Some(ConstraintType::Post(ens_cstrt.node_id));
+                let ty = typeck_expr(tccx, &ens_cstrt.condition).reported(tccx)?;
+                if !ty.is_bool() {
+                    return Err(TypeError::ConstraintConditionNotValid(
+                        ens_cstrt.node_id,
+                        ty,
+                    ))
+                    .reported(tccx)?;
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
@@ -630,8 +786,8 @@ fn typeck_gen_loop(
     if let Some(condition) = condition {
         // make sure the condition resolves a int (current placeholder for booleans)
         let ty = typeck_expr(tccx, condition).reported(tccx)?;
-        if ty.kind() != &TyKind::Int {
-            return Err(TypeError::LoopConditionNotInt(
+        if !ty.is_bool() {
+            return Err(TypeError::LoopConditionNotValid(
                 node_id,
                 condition.node_id(),
                 ty,
@@ -704,8 +860,8 @@ fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Res
 
 fn typeck_if(tccx: &mut TypeckCtxt, stmt: &ast::AstIfStmt) -> Result<(), ()> {
     let res = typeck_expr(tccx, &stmt.cond).reported(tccx)?;
-    if res != tccx.tcx.int_ty() {
-        return Err(TypeError::IfConditionNotInt(stmt.cond.node_id(), res)).reported(tccx);
+    if !res.is_bool() {
+        return Err(TypeError::IfConditionNotValid(stmt.cond.node_id(), res)).reported(tccx);
     }
     typeck_block(tccx, &stmt.then, false)?;
     if let Some(else_) = &stmt.else_ {
@@ -749,17 +905,24 @@ fn typeck_decl(tccx: &mut TypeckCtxt, decl: &ast::AstDecl) -> Result<(), TypeErr
 }
 
 fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeError> {
-    let ty = match &expr.kind {
-        ast::AstExprKind::Ident(ast::AstIdent {
-            text: name,
-            node_id,
-        }) => {
+    let constraint_expr_ty = typeck_constraint_expr(tccx, expr)?;
+
+    // probably a prettier way of doing this, surely?
+    let ty = match (constraint_expr_ty, &expr.kind) {
+        (Some(ty), _) => Ok(ty),
+        (
+            None,
+            ast::AstExprKind::Ident(ast::AstIdent {
+                text: name,
+                node_id,
+            }),
+        ) => {
             let res = tccx
                 .resolve_local(name)
                 .ok_or_else(|| TypeError::CannotResolve(name.clone(), *node_id))?;
 
             let ty = tccx
-                .res_ty(res)
+                .res_ty(&res)
                 .ok_or_else(|| TypeError::UnresolvableType(name.clone(), *node_id))?;
 
             // Also store in node_res for codegen.
@@ -767,16 +930,73 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
 
             Ok(ty)
         }
-        ast::AstExprKind::Literal(lit) => match lit.value {
+        (None, ast::AstExprKind::Literal(lit)) => match lit.value {
             ast::AstLiteralKind::Int(_) => Ok(tccx.ty(TyKind::Int)),
             ast::AstLiteralKind::Float(_) => Ok(tccx.ty(TyKind::Float)),
         },
-        ast::AstExprKind::Binary(bin_expr) => typeck_binary_expr(tccx, &bin_expr),
-        ast::AstExprKind::Call(call_expr) => typeck_call_expr(tccx, &call_expr),
+        (None, ast::AstExprKind::Binary(bin_expr)) => typeck_binary_expr(tccx, &bin_expr),
+        (None, ast::AstExprKind::Call(call_expr)) => typeck_call_expr(tccx, &call_expr),
     }?;
 
     tccx.body.set_node_ty(expr.node_id(), ty.clone());
     Ok(ty)
+}
+
+// Constraints have some extra special conditions for the expressions allowed, to avoid
+// disambiguity.
+//
+// This also covers correctly parsing expresions (so `ret` resolves its type as the return type of the constraint),
+// `old` resolves its type as the old type of the passed value.
+fn typeck_constraint_expr(
+    tccx: &mut TypeckCtxt,
+    expr: &ast::AstExpr,
+) -> Result<Option<Ty>, TypeError> {
+    let Some(constraint_type) = tccx.inside_constraint.as_ref() else {
+        return Ok(None);
+    };
+
+    match &expr.kind {
+        ast::AstExprKind::Ident(ident) if ident.is_constraint_kw_ret() => {
+            if constraint_type.is_pre() {
+                return Err(TypeError::RetInPreConstraint(
+                    ident.node_id,
+                    constraint_type.node_id(),
+                ));
+            }
+
+            // Function return type instead
+            tccx.body.set_node_res(ident.node_id, Res::ConstraintRet);
+            return Ok(Some(tccx.body.return_ty.clone()));
+        }
+
+        ast::AstExprKind::Call(call_expr) if call_expr.is_constraint_kw_old() => {
+            if constraint_type.is_pre() {
+                return Err(TypeError::OldInPreConstraint(
+                    expr.node_id(),
+                    constraint_type.node_id(),
+                ));
+            }
+
+            if call_expr.args.len() != 1 {
+                return Err(TypeError::MalformedOldInConstraint(
+                    call_expr.node_id,
+                    constraint_type.node_id(),
+                ));
+            }
+
+            let arg = &call_expr.args[0];
+            let arg_ty = typeck_expr(tccx, arg)?;
+            let old_id = tccx.next_old_id();
+            tccx.body.old_tys.push(arg_ty.clone());
+            tccx.body
+                .set_node_res(call_expr.node_id, Res::ConstraintOld(old_id));
+            return Ok(Some(arg_ty));
+        }
+
+        _ => {}
+    }
+
+    Ok(None)
 }
 
 fn typeck_call_expr(tccx: &mut TypeckCtxt, call_expr: &ast::AstCallExpr) -> Result<Ty, TypeError> {

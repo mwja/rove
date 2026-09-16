@@ -20,6 +20,10 @@ impl Ty {
     pub fn kind(&self) -> &TyKind {
         &self.kind
     }
+
+    pub fn is_bool(&self) -> bool {
+        matches!(*self.kind, TyKind::Int)
+    }
 }
 
 impl Display for Ty {

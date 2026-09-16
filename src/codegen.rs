@@ -8,14 +8,14 @@ use cranelift::{
         cfg_printer::CFGPrinter,
         ir::{
             AbiParam, Block, BlockArg, FuncRef, InstBuilder, SigRef, Signature, SourceLoc,
-            StackSlotData, StackSlotKind, Type, UserExternalName, Value,
+            StackSlotData, StackSlotKind, TrapCode, Type, UserExternalName, Value,
             condcodes::{FloatCC, IntCC},
             types,
         },
         settings::{self, Configurable},
     },
     frontend::{FunctionBuilder, FunctionBuilderContext, Variable},
-    module::{FuncId, Linkage, Module, default_libcall_names},
+    module::{DataDescription, FuncId, Linkage, Module, default_libcall_names},
     object::{ObjectBuilder, ObjectModule},
 };
 use std::{collections::HashMap, io::Write as _, path::PathBuf};
@@ -25,7 +25,7 @@ use crate::{
     defs::{self, Def, DefKind, FuncSig},
     ty::{
         Ty, TyCtxt, TyKind,
-        res::{LocalId, Res},
+        res::{LocalId, OldId, Res},
         typeck::{BodyInfo, ScopeId},
     },
 };
@@ -84,6 +84,63 @@ fn lower_sig(om: &ObjectModule, def_sig: &FuncSig) -> Signature {
     sig
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Runtime {
+    /// rt_println_i64(value:i64)
+    println_i64: FuncId,
+    /// rt_println_f64(value:f64)
+    println_f64: FuncId,
+    /// rt_abort_constraint(kind:u8, tag:*u8, tag_len:u32, fn_name:*u8, fn_name_len:u32, line:u32)
+    abort_constraint: FuncId,
+}
+
+impl Runtime {
+    pub fn from_object(module: &mut ObjectModule) -> Self {
+        Self {
+            println_i64: {
+                let mut printf_sig = module.make_signature();
+
+                printf_sig.params.push(AbiParam::new(types::I64));
+
+                printf_sig.returns.push(AbiParam::new(types::I32));
+
+                module
+                    .declare_function("rt_println_i64", Linkage::Import, &printf_sig)
+                    .expect("unable to declare runtime function")
+            },
+            println_f64: {
+                let mut printf_sig = module.make_signature();
+
+                printf_sig.params.push(AbiParam::new(types::F64));
+
+                printf_sig.returns.push(AbiParam::new(types::I32));
+
+                module
+                    .declare_function("rt_println_f64", Linkage::Import, &printf_sig)
+                    .expect("unable to declare runtime function")
+            },
+            abort_constraint: {
+                let mut abort_sig = module.make_signature();
+
+                abort_sig.params.push(AbiParam::new(types::I8));
+                abort_sig
+                    .params
+                    .push(AbiParam::new(module.target_config().pointer_type()));
+                abort_sig.params.push(AbiParam::new(types::I32));
+                abort_sig
+                    .params
+                    .push(AbiParam::new(module.target_config().pointer_type()));
+                abort_sig.params.push(AbiParam::new(types::I32));
+                abort_sig.params.push(AbiParam::new(types::I32));
+
+                module
+                    .declare_function("rt_abort_constraint", Linkage::Import, &abort_sig)
+                    .expect("unable to declare runtime function")
+            },
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct CodegenOptions {
     /// Emit the raw CLIF to the given path.
@@ -112,27 +169,6 @@ pub fn generate_object(
 
     let object_builder = ObjectBuilder::new(isa, "program", default_libcall_names()).unwrap();
     let mut module = ObjectModule::new(object_builder);
-
-    // preload printf, just in version 0.1
-    let printf_u64_id = {
-        let mut printf_sig = module.make_signature();
-
-        printf_sig.params.push(AbiParam::new(types::I64));
-
-        printf_sig.returns.push(AbiParam::new(types::I32));
-
-        module.declare_function("rt_println_i64", Linkage::Import, &printf_sig)?
-    };
-
-    let printf_f64_id = {
-        let mut printf_sig = module.make_signature();
-
-        printf_sig.params.push(AbiParam::new(types::F64));
-
-        printf_sig.returns.push(AbiParam::new(types::I32));
-
-        module.declare_function("rt_println_f64", Linkage::Import, &printf_sig)?
-    };
 
     let mut table = HashMap::new();
     let mut func_sig = HashMap::new();
@@ -182,6 +218,7 @@ pub fn generate_object(
         None => None,
     };
 
+    let runtime = Runtime::from_object(&mut module);
     let mut ctx = module.make_context();
     let defs = ast.defs;
     for def in defs {
@@ -214,28 +251,51 @@ pub fn generate_object(
         let landing_pad = fbuilder.create_block();
         fbuilder.append_block_param(landing_pad, lower_ty(&mut module, &cx.body.return_ty));
 
+        let success_landing_pad = fbuilder.create_block();
+        fbuilder.append_block_param(
+            success_landing_pad,
+            lower_ty(&mut module, &cx.body.return_ty),
+        );
+
+        // // the abort block just calls the runtime abort and exits, it exists
+        // // to avoid code duplication. it shares the same params as the abort function
+        // // so that the runtime abort call can be shared.
+        // //
+        // // literally copy it one-for-one.
+        // let condition_abort_block = fbuilder.create_block();
+        // for param in &module
+        //     .declarations()
+        //     .get_function_decl(runtime.abort_constraint)
+        //     .signature
+        //     .params
+        // {
+        //     fbuilder.append_block_param(condition_abort_block, param.value_type);
+        // }
+
         // go back to main block.
         fbuilder.switch_to_block(block);
         fbuilder.seal_block(block);
         let codegen = CraneliftCodegen {
+            runtime,
             module: &mut module,
             builder: &mut fbuilder,
-            printf_f64_id,
-            printf_u64_id,
             locals: HashMap::new(),
+            old_values: HashMap::new(),
             cached_functions: HashMap::new(),
             cached_signatures: HashMap::new(),
             entry_block: block,
+            success_landing_pad,
+            block_type: BlockType::Regular,
             landing_pad,
             is_main: func_def.is_main,
             current_scope: None,
             scope_frames: HashMap::new(),
             loops: Vec::new(),
+            fn_name: func_def.name.clone(),
             cx,
         };
 
         codegen.lower(func_def);
-        fbuilder.seal_block(landing_pad);
 
         if let Some(file) = &mut emit_cfg_file {
             writeln!(file, "{}", CFGPrinter::new(fbuilder.func).to_string()).unwrap();
@@ -284,21 +344,27 @@ struct LoopInfo {
     exit: Block,
 }
 
+#[derive(Clone, Copy)]
+enum BlockType {
+    Regular,
+    PostConstraint,
+}
+
 struct CraneliftCodegen<'a, 'o> {
     module: &'o mut ObjectModule,
     builder: &'o mut FunctionBuilder<'a>,
-    printf_u64_id: FuncId,
-    printf_f64_id: FuncId,
+    runtime: Runtime,
     locals: HashMap<LocalId, Variable>,
+    old_values: HashMap<OldId, Value>,
     cached_functions: HashMap<FuncId, FuncRef>,
     cached_signatures: HashMap<FuncSig, SigRef>,
     // Used to retrieve parameters from the entry block (hence function)
     entry_block: Block,
+    success_landing_pad: Block,
     /// The landing pad is the final block of the whole function, errors may be
     /// handled here in the future, etc.
-    ///
-    /// The landing pad takes ONE argument for now, the return type
     landing_pad: Block,
+    block_type: BlockType,
     is_main: bool,
 
     // Scope frames
@@ -306,6 +372,9 @@ struct CraneliftCodegen<'a, 'o> {
     scope_frames: HashMap<ScopeId, ScopeFrame>,
     loops: Vec<LoopInfo>,
     cx: CompilerCtxt<'o>,
+
+    // for debug/errors stuff
+    fn_name: String,
 }
 
 impl<'a, 'o> CraneliftCodegen<'a, 'o> {
@@ -441,8 +510,14 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
 impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower(mut self, def: ast::AstFunctionDef) {
+        // Must pre-lower the expressions for the checks.
+        self.lower_constraint_olds(&def.constraints);
+
+        // Then the require checks (ensure checks happen in the success pad and branch to the landing pad if failing)
+        self.lower_constraints_require(&def.constraints);
         self.lower_block_stmt(def.body);
 
+        self.build_success_pad(&def.constraints);
         // build landing pad
         if self.is_main {
             self.build_main_landing_pad();
@@ -475,7 +550,32 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 .jump(self.landing_pad, [&BlockArg::Value(ret_val)]);
         }
 
+        self.builder.seal_block(self.landing_pad);
         self.builder.switch_to_block(self.landing_pad);
+    }
+
+    // Success landing pad before the full exit pad. Ensure checks are carried
+    // out here.
+    fn build_success_pad(&mut self, constraints: &[ast::AstConstraint]) {
+        if !self.is_current_block_terminated() {
+            let ret_val = self.build_dummy_return_value();
+            self.builder
+                .ins()
+                .jump(self.success_landing_pad, [&BlockArg::Value(ret_val)]);
+        }
+
+        self.builder.seal_block(self.success_landing_pad);
+        self.builder.switch_to_block(self.success_landing_pad);
+        self.lower_constraints_ensure(constraints);
+
+        // I use current_block here as the `ensure` checks MAY branch to other checks (a series of checks will require new
+        // blocks to run brif again), so we might not be in the success_landing_pad.
+        let block_arg = self
+            .builder
+            .block_params(self.builder.current_block().unwrap())[0];
+        self.builder
+            .ins()
+            .jump(self.landing_pad, &[BlockArg::Value(block_arg)]);
     }
 
     /// The main function has a special landing pad that (for now) always returns 0
@@ -492,6 +592,176 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         // we do but later we'll check for recoverable errors, etc.
         let landing_pad_param = self.builder.block_params(self.landing_pad)[0];
         self.builder.ins().return_(&[landing_pad_param]);
+    }
+
+    /// Lowers a constraint, calls the abort function if fails, otherwise passes through all params to new block
+    /// Returns the resultant block. This ends execution if the constraint fails.
+    fn lower_aborting_constraint_param_passthrough(
+        &mut self,
+        constraint: &ast::AstConstraint,
+    ) -> Block {
+        let condition = constraint.condition();
+        let value = self.lower_expr(condition.clone());
+
+        let block = self.builder.current_block().unwrap();
+        let param_types: Vec<Type> = self
+            .builder
+            .func
+            .dfg
+            .block_params(block)
+            .iter()
+            .map(|&val| self.builder.func.dfg.value_type(val))
+            .collect();
+
+        let constraint_abort_block = self.builder.create_block();
+        let constraint_continue_block = self.builder.create_block();
+        // 3. Append the matching types to your new block
+        for ty in param_types {
+            self.builder
+                .append_block_param(constraint_continue_block, ty);
+        }
+        let params = self
+            .builder
+            .block_params(block)
+            .iter()
+            .map(|v| BlockArg::Value(v.clone()))
+            .collect::<Vec<_>>();
+
+        self.builder.ins().brif(
+            value,
+            constraint_continue_block,
+            &params,
+            constraint_abort_block,
+            &[],
+        );
+
+        self.builder.seal_block(constraint_continue_block);
+        self.builder.seal_block(constraint_abort_block);
+        self.builder.switch_to_block(constraint_abort_block);
+        self.lower_constraint_abort(constraint);
+        self.builder.switch_to_block(constraint_continue_block);
+        constraint_continue_block
+    }
+
+    fn lower_constraint_abort(&mut self, constraint: &ast::AstConstraint) {
+        self.loc(&constraint.node_id());
+        // lower func
+        let func = self.get_or_cache_function(self.runtime.abort_constraint);
+
+        // declare names etc in the data part
+        let fn_name = self
+            .module
+            .declare_anonymous_data(true, false)
+            .expect("failed to define anonymous data");
+
+        let tag_name = self
+            .module
+            .declare_anonymous_data(true, false)
+            .expect("failed to define anonymous data");
+
+        let mut fn_name_data_desc = DataDescription::new();
+        fn_name_data_desc.define(self.fn_name.as_bytes().to_vec().into_boxed_slice());
+        self.module
+            .define_data(fn_name, &fn_name_data_desc)
+            .expect("failed to define data");
+
+        let resolved_tag_name = constraint.tag().clone().unwrap_or("unnamed".to_owned());
+        let mut tag_name_data_desc = DataDescription::new();
+        tag_name_data_desc.define(resolved_tag_name.as_bytes().to_vec().into_boxed_slice());
+        self.module
+            .define_data(tag_name, &tag_name_data_desc)
+            .expect("failed to define data");
+
+        // Load ptrs for these in the function
+        let local_fn_name_ref = self.module.declare_data_in_func(fn_name, self.builder.func);
+        let local_tag_name_ref = self
+            .module
+            .declare_data_in_func(tag_name, self.builder.func);
+
+        let local_fn_name = self.builder.ins().symbol_value(
+            self.module.target_config().pointer_type(),
+            local_fn_name_ref,
+        );
+        let local_tag_name = self.builder.ins().symbol_value(
+            self.module.target_config().pointer_type(),
+            local_tag_name_ref,
+        );
+
+        let kind = self.builder.ins().iconst(
+            types::I8,
+            match constraint {
+                ast::AstConstraint::Require(..) => 0,
+                ast::AstConstraint::Ensure(..) => 1,
+            },
+        );
+        let tag_len = self
+            .builder
+            .ins()
+            .iconst(types::I32, resolved_tag_name.len() as i64);
+        let fn_name_len = self
+            .builder
+            .ins()
+            .iconst(types::I32, self.fn_name.len() as i64);
+        let line = self.builder.ins().iconst(types::I32, 0);
+        self.builder.ins().call(
+            func,
+            &[
+                kind,
+                local_tag_name,
+                tag_len,
+                local_fn_name,
+                fn_name_len,
+                line,
+            ],
+        );
+        self.builder.ins().trap(TrapCode::unwrap_user(6));
+    }
+
+    fn lower_constraints_require(&mut self, constraints: &[ast::AstConstraint]) {
+        for constraint in constraints {
+            if matches!(constraint, ast::AstConstraint::Require(_)) {
+                self.lower_aborting_constraint_param_passthrough(constraint);
+            }
+        }
+    }
+
+    fn lower_constraints_ensure(&mut self, constraints: &[ast::AstConstraint]) {
+        for constraint in constraints {
+            if matches!(constraint, ast::AstConstraint::Ensure(_)) {
+                let last_block_type = self.block_type;
+                self.block_type = BlockType::PostConstraint;
+                self.lower_aborting_constraint_param_passthrough(constraint);
+                self.block_type = last_block_type;
+            }
+        }
+    }
+
+    /// Traverse constraints and lower the old(x) values. Actually implementing these checks is elsewhere
+    fn lower_constraint_olds(&mut self, constraints: &[ast::AstConstraint]) {
+        for constraint in constraints {
+            self.lower_constraint_expr_olds(constraint.condition());
+        }
+    }
+
+    fn lower_constraint_expr_olds(&mut self, expr: &ast::AstExpr) {
+        match (self.cx.body.node_res(expr.node_id()), &expr.kind) {
+            (Some(Res::ConstraintOld(old_id)), ast::AstExprKind::Call(call_expr))
+                if call_expr.is_constraint_kw_old() =>
+            {
+                let value = self.lower_expr(*call_expr.args[0].clone());
+                self.old_values.insert(old_id, value);
+            }
+            (_, ast::AstExprKind::Call(call_expr)) => {
+                for arg in call_expr.args.iter() {
+                    self.lower_constraint_expr_olds(&arg);
+                }
+            }
+            (_, ast::AstExprKind::Binary(ast::AstBinaryExpr { left, right, .. })) => {
+                self.lower_constraint_expr_olds(&left);
+                self.lower_constraint_expr_olds(&right);
+            }
+            (_, ast::AstExprKind::Literal(..) | ast::AstExprKind::Ident(..)) => {}
+        }
     }
 
     fn lower_stmt(&mut self, stmt: ast::AstStmt) {
@@ -565,7 +835,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             },
             ExitKind::Return | ExitKind::Error => match parent {
                 Some(p) => self.cleanup_block(p, kind),
-                None => self.landing_pad,
+                // LATER ERROR NEEDS A ERROR_LANDING_PAD.
+                None => self.success_landing_pad,
             },
         }
     }
@@ -850,6 +1121,24 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     }
                 }
             }
+            Res::ConstraintOld(old_id) => self
+                .old_values
+                .get(old_id)
+                .cloned()
+                .expect("unable to get old id (error in compiler)"),
+            Res::ConstraintRet => {
+                // Really depends on the current block, are we in a success pad?
+                if let Some(block) = self.builder.current_block()
+                    && matches!(self.block_type, BlockType::PostConstraint)
+                {
+                    // first block param
+                    let block_arg = self.builder.block_params(block)[0];
+                    return block_arg;
+                }
+                println!("{:?} {:?}", ident, res);
+                // this shouldn't even be possible with typeck..
+                unreachable!();
+            }
             Res::Err => panic!("res::err"),
         }
     }
@@ -945,8 +1234,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let x_ty = self.cx.body.node_ty(print.expr.node_id()).unwrap();
         let x = self.lower_expr(*print.expr);
         let printf_ref = self.get_or_cache_function(match x_ty.kind() {
-            TyKind::Int => self.printf_u64_id,
-            TyKind::Float => self.printf_f64_id,
+            TyKind::Int => self.runtime.println_i64,
+            TyKind::Float => self.runtime.println_f64,
             TyKind::Void => unreachable!(),
             TyKind::Func(_) => unreachable!(),
         });

@@ -4,7 +4,7 @@ use rust_sitter::{Spanned, errors::ParseError};
 
 use crate::{
     ast::{self, NodeId},
-    sourcemap::{SourceFileId, SourceMap, Span, SpanRecorder, report::Diagnostic},
+    sourcemap::{SourceFileId, Span, SpanRecorder, report::Diagnostic},
 };
 
 #[rust_sitter::grammar("rove")]
@@ -41,7 +41,31 @@ mod grammar {
         #[rust_sitter::leaf(text = ")")]
         _rp: (),
         pub return_ty: Option<ReturnDef>,
+        pub constraints: Vec<Spanned<Constraint>>,
         pub body: Spanned<BlockStmt>,
+    }
+
+    pub enum Constraint {
+        Require(RequireConstraint),
+        Ensure(EnsureConstraint),
+    }
+
+    pub struct RequireConstraint {
+        #[rust_sitter::leaf(text = "require")]
+        _r: (),
+        pub tag: Option<Spanned<Ident>>,
+        #[rust_sitter::leaf(text = ":")]
+        _c: (),
+        pub expr: Spanned<Expr>,
+    }
+
+    pub struct EnsureConstraint {
+        #[rust_sitter::leaf(text = "ensure")]
+        _e: (),
+        pub tag: Option<Spanned<Ident>>,
+        #[rust_sitter::leaf(text = ":")]
+        _c: (),
+        pub expr: Spanned<Expr>,
     }
 
     pub struct ArgDef {
@@ -386,7 +410,32 @@ impl<'a> ProgramLowerer<'a> {
                 .map(|arg| self.lower_arg_def(arg))
                 .collect(),
             body: self.lower_block_stmt(func.value.body),
+            constraints: func
+                .value
+                .constraints
+                .into_iter()
+                .map(|c| self.lower_constraint(c))
+                .collect(),
             is_main: func.value.name.text == "main",
+        }
+    }
+
+    fn lower_constraint(&mut self, constraint: Spanned<grammar::Constraint>) -> ast::AstConstraint {
+        match constraint.value {
+            grammar::Constraint::Ensure(grammar::EnsureConstraint { expr, tag, .. }) => {
+                ast::AstConstraint::Ensure(ast::AstEnsureConstraint {
+                    condition: Box::new(self.lower_expr(expr)),
+                    node_id: self.next_id_spanned(constraint.span),
+                    tag: tag.map(|t| t.text.clone()),
+                })
+            }
+            grammar::Constraint::Require(grammar::RequireConstraint { expr, tag, .. }) => {
+                ast::AstConstraint::Require(ast::AstRequireConstraint {
+                    condition: Box::new(self.lower_expr(expr)),
+                    node_id: self.next_id_spanned(constraint.span),
+                    tag: tag.map(|t| t.text.clone()),
+                })
+            }
         }
     }
 

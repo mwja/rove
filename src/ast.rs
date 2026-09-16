@@ -57,23 +57,97 @@ pub struct AstFunctionDef {
     pub return_ty: AstType,
     pub body: AstBlockStmt,
     pub is_main: bool,
+    pub constraints: Vec<AstConstraint>,
+}
+
+#[derive(Debug)]
+pub struct AstConstraintSet {
+    pub requires: Vec<AstRequireConstraint>,
+    pub ensures: Vec<AstEnsureConstraint>,
 }
 
 impl Display for AstFunctionDef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "func {}({}) -> {}",
+            "func {}({}) {} -> {}",
             self.name,
             self.args
                 .iter()
                 .map(|arg| arg.to_string())
                 .collect::<Vec<_>>()
                 .join(", "),
+            self.constraints
+                .iter()
+                .map(|c| c.to_string())
+                .collect::<Vec<_>>()
+                .join(" "),
             self.return_ty
         )?;
         Ok(())
     }
+}
+
+#[derive(Debug, Clone)]
+pub enum AstConstraint {
+    Require(AstRequireConstraint),
+    Ensure(AstEnsureConstraint),
+}
+
+impl AstConstraint {
+    pub fn node_id(&self) -> NodeId {
+        match self {
+            AstConstraint::Require(AstRequireConstraint { node_id, .. })
+            | AstConstraint::Ensure(AstEnsureConstraint { node_id, .. }) => *node_id,
+        }
+    }
+
+    pub fn condition(&self) -> &AstExpr {
+        match self {
+            AstConstraint::Require(AstRequireConstraint { condition, .. })
+            | AstConstraint::Ensure(AstEnsureConstraint { condition, .. }) => condition,
+        }
+    }
+
+    pub fn tag(&self) -> &Option<String> {
+        match self {
+            AstConstraint::Require(AstRequireConstraint { tag, .. })
+            | AstConstraint::Ensure(AstEnsureConstraint { tag, .. }) => tag,
+        }
+    }
+}
+
+impl Display for AstConstraint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AstConstraint::Require(c) => write!(
+                f,
+                "require {}: {}",
+                c.tag.as_deref().unwrap_or(""),
+                c.condition
+            ),
+            AstConstraint::Ensure(c) => write!(
+                f,
+                "ensure {}: {}",
+                c.tag.as_deref().unwrap_or(""),
+                c.condition
+            ),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AstRequireConstraint {
+    pub node_id: NodeId,
+    pub tag: Option<String>,
+    pub condition: Box<AstExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AstEnsureConstraint {
+    pub node_id: NodeId,
+    pub tag: Option<String>,
+    pub condition: Box<AstExpr>,
 }
 
 #[derive(Debug)]
@@ -299,7 +373,7 @@ impl Display for AstAssignStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstExpr {
     pub kind: AstExprKind,
 }
@@ -385,10 +459,16 @@ impl Display for AstLetDecl {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstIdent {
     pub node_id: NodeId,
     pub text: String,
+}
+
+impl AstIdent {
+    pub fn is_constraint_kw_ret(&self) -> bool {
+        self.text == "ret"
+    }
 }
 
 impl Display for AstIdent {
@@ -397,7 +477,7 @@ impl Display for AstIdent {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AstExprKind {
     Binary(AstBinaryExpr),
     Literal(AstLiteral),
@@ -405,11 +485,20 @@ pub enum AstExprKind {
     Call(AstCallExpr),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstCallExpr {
     pub node_id: NodeId,
     pub callee: Box<AstExpr>,
     pub args: Vec<Box<AstExpr>>,
+}
+
+impl AstCallExpr {
+    pub fn is_constraint_kw_old(&self) -> bool {
+        matches!(
+            &self.callee.kind,
+            AstExprKind::Ident(AstIdent { text, .. }) if text == "old"
+        )
+    }
 }
 
 impl Display for AstCallExpr {
@@ -437,7 +526,7 @@ impl Display for AstExprKind {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstBinaryExpr {
     pub node_id: NodeId,
     pub left: Box<AstExpr>,
@@ -483,7 +572,7 @@ impl Display for AstBinaryOperator {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstLiteral {
     pub node_id: NodeId,
     pub value: AstLiteralKind,
@@ -495,7 +584,7 @@ impl Display for AstLiteral {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AstLiteralKind {
     Int(i64),
     Float(f64),
