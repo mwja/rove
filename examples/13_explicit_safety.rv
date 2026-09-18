@@ -1,0 +1,19 @@
+error PurchaseError {
+  StockExhausted
+}
+
+func make_purchase(wallet: int, price: int) -> int
+  require enough_money: wallet >= price // wallet must have enough money to cover the price
+  ensure result_correct: ret == wallet - price // price is deducted from wallet
+{
+  wallet - price
+}
+
+func main()
+{
+  let wallet = 100;
+  let price = 50;
+  wallet = make_purchase(wallet, price);
+
+  print wallet;
+}

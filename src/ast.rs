@@ -4,6 +4,13 @@ indexable_id!(pub NodeId);
 
 pub struct AstProgram {
     pub defs: Vec<AstDef>,
+    pub error_sets: Vec<AstErrorSet>,
+}
+
+pub struct AstErrorSet {
+    pub node_id: NodeId,
+    pub name: String,
+    pub errors: Vec<AstIdent>,
 }
 
 #[derive(Debug)]
@@ -58,12 +65,6 @@ pub struct AstFunctionDef {
     pub body: AstBlockStmt,
     pub is_main: bool,
     pub constraints: Vec<AstConstraint>,
-}
-
-#[derive(Debug)]
-pub struct AstConstraintSet {
-    pub requires: Vec<AstRequireConstraint>,
-    pub ensures: Vec<AstEnsureConstraint>,
 }
 
 impl Display for AstFunctionDef {
@@ -194,6 +195,7 @@ impl AstStmt {
             AstStmtKind::While(while_stmt) => while_stmt.node_id,
             AstStmtKind::Break(break_stmt) => break_stmt.node_id,
             AstStmtKind::Continue(continue_stmt) => continue_stmt.node_id,
+            AstStmtKind::ImplicitReturn(expr) => expr.node_id(),
         }
     }
 
@@ -221,6 +223,7 @@ pub enum AstStmtKind {
     Break(AstBreakStmt),
     Continue(AstContinueStmt),
     Return(AstReturnStmt),
+    ImplicitReturn(AstExpr),
 }
 
 impl Display for AstStmtKind {
@@ -237,6 +240,7 @@ impl Display for AstStmtKind {
             AstStmtKind::While(while_stmt) => write!(f, "{};", while_stmt),
             AstStmtKind::Break(break_stmt) => write!(f, "{};", break_stmt),
             AstStmtKind::Continue(continue_stmt) => write!(f, "{};", continue_stmt),
+            AstStmtKind::ImplicitReturn(expr) => write!(f, "{}", expr),
         }
     }
 }

@@ -4,6 +4,7 @@ use crate::{
     arena::Store,
     ast::NodeId,
     defs::{DefId, Defs, FuncSig},
+    err::{ErrorSetCtxt, ErrorSets},
     ty::typeck::BodyInfo,
 };
 
@@ -78,6 +79,7 @@ pub struct TyCtxt {
     pub bodies: HashMap<DefId, BodyInfo>,
     /// Not initially populated with data until the resolve pass occurs.
     pub defs: Defs,
+    pub errs: ErrorSets,
 }
 
 impl TyCtxt {
@@ -115,6 +117,7 @@ impl TyCtxt {
             arena: RefCell::new(Store::new()),
             bodies: HashMap::new(),
             defs: Defs::default(),
+            errs: ErrorSets::default(),
         }
     }
 

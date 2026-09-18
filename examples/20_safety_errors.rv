@@ -1,0 +1,36 @@
+// We don't yet have objects, but less the `stock` parameter from make_purchase
+// comes from an external system,
+
+error PurchaseError {
+    StockUnavailable,
+    StockFullyReserved
+}
+
+// The PurchaseError part of int!.. is not required but helps ensure if we add any
+// errors later on, we remember to add it for our callers.
+func make_purchase(
+  wallet: int,
+  price: int,
+  stock_remaining: int,
+  reserved_stock: int
+) -> PurchaseError!int
+  check StockUnavailable if stock_remaining <= 0
+  check StockFullyReserved if stock_remaining <= reserved_stock
+  require enough_money wallet >= price // wallet must have enough money to cover the price
+  ensure result_correct: ret == wallet - price // price is deducted from wallet
+{
+  return wallet - price;
+}
+
+func main()
+{
+  let wallet = 100;
+  let price = 50;
+  let final_balance = make_purchase(wallet, price, 10, 10) catch switch {
+      case StockUnavailable => -1
+      case StockFullyReserved {
+        print -500;
+        return;
+      }
+  };
+}

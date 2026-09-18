@@ -25,6 +25,22 @@ mod grammar {
 
     pub enum Def {
         Function(Spanned<FunctionDef>),
+        ErrorSet(Spanned<ErrorSet>),
+    }
+
+    pub struct ErrorSet {
+        #[rust_sitter::leaf(text = "error")]
+        _e: (),
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = "{")]
+        _l: (),
+        #[rust_sitter::delimited(
+            #[rust_sitter::leaf(text = ",")]
+            ()
+        )]
+        pub errors: Vec<Spanned<Ident>>,
+        #[rust_sitter::leaf(text = "}")]
+        _r: (),
     }
 
     pub struct FunctionDef {
@@ -83,6 +99,7 @@ mod grammar {
 
     pub enum Stmt {
         Expr(Spanned<Expr>, #[rust_sitter::leaf(text = ";")] ()),
+        ImplicitReturn(Spanned<Expr>),
         Decl(Spanned<Decl>, #[rust_sitter::leaf(text = ";")] ()),
         Print(Spanned<PrintStmt>, #[rust_sitter::leaf(text = ";")] ()),
         Assign(Spanned<AssignStmt>, #[rust_sitter::leaf(text = ";")] ()),
@@ -379,18 +396,39 @@ impl<'a> ProgramLowerer<'a> {
     }
 
     pub fn lower(mut self, program: grammar::Program) -> ast::AstProgram {
+        let (defs, err_sets): (Vec<_>, Vec<_>) = program
+            .defs
+            .into_iter()
+            .partition(|d| matches!(d, grammar::Def::Function(..)));
         ast::AstProgram {
-            defs: program
-                .defs
+            defs: defs.into_iter().map(|def| self.lower_def(def)).collect(),
+            error_sets: err_sets
                 .into_iter()
-                .map(|def| self.lower_def(def))
+                .map(|def| self.lower_error_set(def))
                 .collect(),
+        }
+    }
+
+    fn lower_error_set(&mut self, def: grammar::Def) -> ast::AstErrorSet {
+        match def {
+            grammar::Def::Function(..) => unreachable!(),
+            grammar::Def::ErrorSet(error_set) => ast::AstErrorSet {
+                node_id: self.next_id_spanned(error_set.span),
+                name: error_set.value.name.text.clone(),
+                errors: error_set
+                    .value
+                    .errors
+                    .into_iter()
+                    .map(|ident| self.lower_ident(ident))
+                    .collect(),
+            },
         }
     }
 
     fn lower_def(&mut self, def: grammar::Def) -> ast::AstDef {
         match def {
             grammar::Def::Function(func) => ast::AstDef::Function(self.lower_function_def(func)),
+            grammar::Def::ErrorSet(..) => unreachable!(),
         }
     }
 
@@ -471,6 +509,9 @@ impl<'a> ProgramLowerer<'a> {
             }
             grammar::Stmt::Block(block) => ast::AstStmtKind::Block(self.lower_block_stmt(block)),
             grammar::Stmt::If(if_stmt) => ast::AstStmtKind::If(self.lower_if_stmt(if_stmt)),
+            grammar::Stmt::ImplicitReturn(expr) => {
+                ast::AstStmtKind::ImplicitReturn(self.lower_expr(expr))
+            }
             grammar::Stmt::Return(return_stmt, _) => {
                 ast::AstStmtKind::Return(self.lower_return_stmt(return_stmt))
             }

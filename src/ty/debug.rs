@@ -74,6 +74,9 @@ fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
         ast::AstStmtKind::Expr(expr) => {
             format!("{}; // {};", expr, annotate_expr(body, expr))
         }
+        ast::AstStmtKind::ImplicitReturn(expr) => {
+            format!("{} // {}", expr, annotate_expr(body, expr))
+        }
         ast::AstStmtKind::Print(print) => {
             format!("{}; // print {};", print, annotate_expr(body, &print.expr))
         }

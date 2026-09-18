@@ -54,6 +54,8 @@ pub enum TypeError {
     MalformedOldInConstraint(NodeId, NodeId),
     #[error("condition in constraint is not an int")]
     ConstraintConditionNotValid(NodeId, Ty),
+    #[error("implicit returns must be the last item in a block")]
+    ImplicitReturnNotLast(NodeId),
 }
 
 impl TypeError {
@@ -81,6 +83,7 @@ impl TypeError {
             MalformedOldInConstraint(..) => Some(1019),
             ConstraintConditionNotValid(..) => Some(1020),
             OldInPreConstraint(..) => Some(1021),
+            ImplicitReturnNotLast(..) => Some(1022),
         }
     }
 }
@@ -335,6 +338,14 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_help(Some("")),
                 ]
             }
+            ImplicitReturnNotLast(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "implicit return here ")
+                        .with_help(Some("")),
+                ]
+            }
         }
     }
 }
@@ -565,16 +576,16 @@ impl<'c> TypeckCtxt<'c> {
 
     fn res_ty(&self, res: &Res) -> Option<Ty> {
         match res {
-            Res::Local(local_id) => self.body.local_tys.get(local_id.index()).cloned(),
+            Res::Local(local_id) => self.body.local_ty(*local_id),
             Res::Def(def_id) => {
                 let def = self.tcx.defs.def(*def_id)?;
                 match &def.kind {
                     defs::DefKind::Function(sig) => Some(self.ty(TyKind::Func(sig.clone()))),
                 }
             }
-            Res::ConstraintOld(res) => self.body.old_tys.get(res.index()).cloned(),
+            Res::ConstraintOld(res) => self.body.old_ty(*res),
             Res::ConstraintRet => Some(self.body.return_ty.clone()),
-            Res::Param(param_id) => self.body.param_tys.get(param_id.index()).cloned(),
+            Res::Param(param_id) => self.body.param_ty(*param_id),
             Res::Err => None,
         }
     }
@@ -628,11 +639,15 @@ pub fn typeck_ast(
                     } => {
                         let mut tccx = TypeckCtxt::new_with_func_sig(tcx, ast_func_def, &sig);
 
-                        typeck_pre_constraint(&mut tccx, &ast_func_def.constraints);
-                        for stmt in ast_func_def.body.stmts.iter() {
-                            let _ = typeck_stmt(&mut tccx, stmt);
+                        let _ = typeck_pre_constraint(&mut tccx, &ast_func_def.constraints);
+                        for (i, stmt) in ast_func_def.body.stmts.iter().enumerate() {
+                            let _ = typeck_stmt(
+                                &mut tccx,
+                                stmt,
+                                Position::from_index(i, ast_func_def.body.stmts.len()),
+                            );
                         }
-                        typeck_post_constraint(&mut tccx, &ast_func_def.constraints);
+                        let _ = typeck_post_constraint(&mut tccx, &ast_func_def.constraints);
 
                         // will eventually be togglable, but for now we do this always
                         match (
@@ -727,7 +742,29 @@ fn typeck_post_constraint(
     Ok(())
 }
 
-fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
+#[derive(Debug, Clone, Copy)]
+enum Position {
+    First,
+    Middle,
+    Last,
+    Only,
+}
+
+impl Position {
+    fn from_index(index: usize, len: usize) -> Self {
+        if len == 1 {
+            Position::Only
+        } else if index == 0 {
+            Position::First
+        } else if index == len - 1 {
+            Position::Last
+        } else {
+            Position::Middle
+        }
+    }
+}
+
+fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt, index: Position) -> Result<(), ()> {
     match &stmt.kind {
         AstStmtKind::Expr(expr) => {
             typeck_expr(tccx, expr).reported(tccx)?;
@@ -756,9 +793,12 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
             }
         }
         AstStmtKind::Return(return_stmt) => typeck_return(tccx, return_stmt).reported(tccx)?,
+        AstStmtKind::ImplicitReturn(expr) => {
+            typeck_implicit_return(tccx, expr, index).reported(tccx)?
+        }
         // Loops are generic enough that both can be handled here.
         AstStmtKind::Loop(loop_stmt) => {
-            typeck_gen_loop(tccx, loop_stmt.node_id, &loop_stmt.body, None);
+            typeck_gen_loop(tccx, loop_stmt.node_id, &loop_stmt.body, None)?;
         }
         AstStmtKind::While(while_stmt) => {
             typeck_gen_loop(
@@ -825,6 +865,38 @@ fn typeck_continue(
     Ok(())
 }
 
+fn typeck_implicit_return(
+    tccx: &mut TypeckCtxt,
+    expr: &ast::AstExpr,
+    index: Position,
+) -> Result<(), TypeError> {
+    let return_ty = typeck_expr(tccx, expr)?;
+
+    if !matches!(index, Position::Last | Position::Only) {
+        return Err(TypeError::ImplicitReturnNotLast(expr.node_id()));
+    }
+
+    match (return_ty.kind(), tccx.body.return_ty.kind()) {
+        (TyKind::Void, TyKind::Void) => Ok(()),
+        (TyKind::Void, _) => Err(TypeError::ExpectedReturn(
+            expr.node_id(),
+            tccx.return_node_id.unwrap(),
+            tccx.body.return_ty.clone(),
+        )),
+        (_, TyKind::Void) => Err(TypeError::DidNotExpectReturn(
+            expr.node_id(),
+            return_ty.clone(),
+        )),
+        (ty, expected) if ty != expected => Err(TypeError::IncompatibleTypes(
+            return_ty.clone(),
+            tccx.body.return_ty.clone(),
+            expr.node_id(),
+            tccx.return_node_id.unwrap(),
+        )),
+        _ => Ok(()),
+    }
+}
+
 fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Result<(), TypeError> {
     let return_ty = return_stmt
         .expr
@@ -858,6 +930,8 @@ fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Res
     }
 }
 
+// fn typeck_implicit_return(tccx: &mut TypeckCtxt, expr: &ast::AstExpr, index)
+
 fn typeck_if(tccx: &mut TypeckCtxt, stmt: &ast::AstIfStmt) -> Result<(), ()> {
     let res = typeck_expr(tccx, &stmt.cond).reported(tccx)?;
     if !res.is_bool() {
@@ -879,8 +953,8 @@ fn typeck_block(tccx: &mut TypeckCtxt, block: &ast::AstBlockStmt, is_loop: bool)
     if is_loop {
         tccx.body.set_scope_as_loop(scope_id);
     }
-    for stmt in block.stmts.iter() {
-        let _ = typeck_stmt(tccx, stmt);
+    for (i, stmt) in block.stmts.iter().enumerate() {
+        let _ = typeck_stmt(tccx, stmt, Position::from_index(i, block.stmts.len()));
     }
     tccx.close_scope();
 
@@ -1113,7 +1187,7 @@ impl Returns {
 /// bool is if always returns, NodeId is dead code paths
 fn always_returns(stmt: &ast::AstStmt) -> Returns {
     match &stmt.kind {
-        AstStmtKind::Return(_) => Returns::always(),
+        AstStmtKind::Return(_) | AstStmtKind::ImplicitReturn(_) => Returns::always(),
         AstStmtKind::Block(b) => block_always_returns(b),
         AstStmtKind::If(s) => if_always_returns(s),
         AstStmtKind::Loop(l) => loop_always_returns(l),

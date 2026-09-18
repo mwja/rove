@@ -12,6 +12,7 @@ mod arena;
 mod ast;
 mod codegen;
 mod defs;
+mod err;
 mod sourcemap;
 mod syntax;
 mod ty;
@@ -37,6 +38,7 @@ pub fn compile(
     let ast = syntax::lower_to_ast(raw, source_file_id, &mut node_to_span);
 
     let mut ty_ctxt = TyCtxt::new();
+    err::resolve(&mut ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
     defs::resolve(&mut ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
     ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;

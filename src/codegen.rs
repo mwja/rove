@@ -775,6 +775,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstStmtKind::Block(block) => self.lower_block_stmt(block),
             ast::AstStmtKind::If(if_) => self.lower_if_stmt(if_),
             ast::AstStmtKind::Return(return_) => self.lower_return_stmt(return_),
+            ast::AstStmtKind::ImplicitReturn(expr) => self.lower_implicit_return(expr),
             ast::AstStmtKind::Loop(loop_) => self.lower_gen_loop(loop_.body, None),
             ast::AstStmtKind::While(while_) => self.lower_gen_loop(while_.body, Some(*while_.cond)),
             ast::AstStmtKind::Break(_) => self.lower_break_stmt(),
@@ -921,6 +922,14 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .map(|expr| self.lower_expr(expr))
             .unwrap_or_else(|| self.build_dummy_return_value());
 
+        let block_arg = BlockArg::Value(v);
+        // jump to landing pad
+        let target = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Return);
+        self.builder.ins().jump(target, [&block_arg]);
+    }
+
+    fn lower_implicit_return(&mut self, expr: ast::AstExpr) {
+        let v = self.lower_expr(expr);
         let block_arg = BlockArg::Value(v);
         // jump to landing pad
         let target = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Return);

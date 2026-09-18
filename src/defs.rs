@@ -6,6 +6,7 @@ use thiserror::Error;
 
 use crate::{
     ast::{self, NodeId},
+    err::ErrorSetId,
     sourcemap::{DiagnoseWith, report::Diagnostic},
     ty::{Ty, TyCtxt},
 };
