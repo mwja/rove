@@ -24,9 +24,9 @@ mod grammar {
         #[rust_sitter::leaf(text = "void")]
         Void,
         ErrorUnion(
-            Box<Spanned<Type>>,
-            #[rust_sitter::leaf(text = "!")] (),
             Ident,
+            #[rust_sitter::leaf(text = "!")] (),
+            Box<Spanned<Type>>,
         ),
     }
 
@@ -517,7 +517,7 @@ impl<'a> ProgramLowerer<'a> {
             Some(grammar::Type::Float) => ast::AstType::Float,
             Some(grammar::Type::Int) => ast::AstType::Int,
             Some(grammar::Type::Void) => ast::AstType::Void,
-            Some(grammar::Type::ErrorUnion(ty, _, ident)) => {
+            Some(grammar::Type::ErrorUnion(ident, _, ty)) => {
                 ast::AstType::ErrorUnion(Box::new(self.lower_type(Some(*ty))), ident.text)
             }
             None => ast::AstType::Void,

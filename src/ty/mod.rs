@@ -88,7 +88,16 @@ impl Display for TyKind {
                     .join(", "),
                 sig.return_ty
             ),
-            TyKind::Fallible(ty, err_set) => write!(f, "{}!{}", ty, err_set),
+            TyKind::Fallible(ty, _) => write!(f, "error!{}", ty),
+        }
+    }
+}
+
+impl Ty {
+    pub fn as_infallible(&self) -> Ty {
+        match self.kind() {
+            TyKind::Fallible(ty, _) => ty.clone(),
+            _ => self.clone(),
         }
     }
 }

@@ -22,6 +22,12 @@ impl_next_id!(ErrorSet.next_error_id -> RawErrorId);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorId(ErrorSetId, RawErrorId);
 
+impl ErrorId {
+    pub fn as_usize(&self) -> usize {
+        self.1.index()
+    }
+}
+
 impl Display for ErrorId {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} in error set {}", self.1.index(), self.0.index())

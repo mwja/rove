@@ -61,15 +61,28 @@ fn func_ty(om: &ObjectModule) -> Type {
     om.target_config().pointer_type()
 }
 
-enum CgValue {
-    Single(Value),
-    Fallible {
-        /// If fallible, this will be non zero.
-        tag: Value,
-        /// The actual value, if tag is zero. This (may) point to garbage
-        /// data if there was an error.
-        value: Value,
-    },
+#[derive(Copy, Clone, Debug)]
+enum Operand {
+    Empty,
+    Scalar(Value),
+    /// (payload, tag). tag != 0 means the call errored — payload may be garbage.
+    Pair(Value, Value),
+}
+
+impl Operand {
+    fn expect_scalar(self, what: &str) -> Value {
+        match self {
+            Operand::Scalar(v) => v,
+            other => unreachable!("{what} must be single-slot, got {other:?}"),
+        }
+    }
+
+    /// commonly required reason for [expect_scalar]
+    fn expect_scalar_usability(self) -> Value {
+        self.expect_scalar(
+            "cannot use a non-scalar (fallible) type for comparison or returns (yet)",
+        )
+    }
 }
 
 fn lower_sig(rcx: ReprCx, def_sig: &FuncSig, is_main: bool) -> Signature {
@@ -286,6 +299,11 @@ pub fn generate_object(
             fbuilder.append_block_param(success_landing_pad, ty);
         }
 
+        let failure_landing_pad = fbuilder.create_block();
+        if let Some(tag_ty) = rcx.repr_of(&cx.body.return_ty).tag_type() {
+            fbuilder.append_block_param(failure_landing_pad, tag_ty);
+        }
+
         // // the abort block just calls the runtime abort and exits, it exists
         // // to avoid code duplication. it shares the same params as the abort function
         // // so that the runtime abort call can be shared.
@@ -314,6 +332,7 @@ pub fn generate_object(
             cached_signatures: HashMap::new(),
             entry_block: block,
             success_landing_pad,
+            failure_landing_pad,
             block_type: BlockType::Regular,
             landing_pad,
             is_main: func_def.is_main,
@@ -361,11 +380,22 @@ pub enum ExitKind {
     Return,
     Error,
 }
+impl ExitKind {
+    const COUNT: usize = 4;
+    fn idx(self) -> usize {
+        match self {
+            ExitKind::Continue => 0,
+            ExitKind::Break => 1,
+            ExitKind::Return => 2,
+            ExitKind::Error => 3,
+        }
+    }
+}
 
 struct ScopeFrame {
     scope: ScopeId,
     parent: Option<ScopeId>,
-    links: HashMap<ExitKind, Block>,
+    links: [Option<Block>; ExitKind::COUNT],
 }
 
 struct LoopInfo {
@@ -385,12 +415,13 @@ struct CraneliftCodegen<'a, 'o> {
     builder: &'o mut FunctionBuilder<'a>,
     runtime: Runtime,
     locals: HashMap<LocalId, Variable>,
-    old_values: HashMap<OldId, Value>,
+    old_values: HashMap<OldId, Operand>,
     cached_functions: HashMap<FuncId, FuncRef>,
     cached_signatures: HashMap<FuncSig, SigRef>,
     // Used to retrieve parameters from the entry block (hence function)
     entry_block: Block,
     success_landing_pad: Block,
+    failure_landing_pad: Block,
     /// The landing pad is the final block of the whole function, errors may be
     /// handled here in the future, etc.
     landing_pad: Block,
@@ -482,7 +513,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .or_insert_with(|| ScopeFrame {
                 scope,
                 parent: self.current_scope,
-                links: HashMap::new(),
+                links: [None; ExitKind::COUNT],
             });
 
         self.current_scope = Some(scope);
@@ -495,18 +526,29 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             let Some(frame) = self.scope_frames.get(&scope) else {
                 return;
             };
-            let links: Vec<(ExitKind, Block)> = frame.links.iter().map(|(k, b)| (*k, *b)).collect();
+            let links: Vec<(ExitKind, Block)> = [
+                ExitKind::Continue,
+                ExitKind::Break,
+                ExitKind::Return,
+                ExitKind::Error,
+            ]
+            .into_iter()
+            .filter_map(|k| frame.links[k.idx()].map(|b| (k, b)))
+            .collect();
             (frame.parent, links)
         };
 
-        // Terminate the open block first, so every switch below is legal.
-        let cont = match self.builder.current_block() {
-            Some(b) if !self.is_block_terminated(b) => {
-                let c = self.builder.create_block();
-                self.builder.ins().jump(c, &[]);
-                Some(c)
+        let cont = if links.is_empty() {
+            None
+        } else {
+            match self.builder.current_block() {
+                Some(b) if !self.is_block_terminated(b) => {
+                    let c = self.builder.create_block();
+                    self.builder.ins().jump(c, &[]);
+                    Some(c)
+                }
+                _ => None,
             }
-            _ => None,
         };
 
         for (kind, block) in &links {
@@ -539,14 +581,16 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
 impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower(mut self, def: ast::AstFunctionDef) {
-        // Must pre-lower the expressions for the checks.
+        // Must pre-lower the expressions for the post-checks.
         self.lower_constraint_olds(&def.constraints);
 
         // Then the require checks (ensure checks happen in the success pad and branch to the landing pad if failing)
         self.lower_constraints_require(&def.constraints);
+        self.lower_constraints_checks(&def.constraints);
         self.lower_block_stmt(def.body);
 
         self.build_success_pad(&def.constraints);
+        self.build_failure_pad();
         // build landing pad
         if self.is_main {
             self.build_main_landing_pad();
@@ -587,6 +631,33 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder.switch_to_block(self.landing_pad);
     }
 
+    fn dead_success_slot(&mut self, repr: Repr) -> Option<Value> {
+        match repr.success_type() {
+            Some(types::F64) => Some(self.builder.ins().f64const(0.0)),
+            Some(ty) => Some(self.builder.ins().iconst(ty, 0)),
+            None => None,
+        }
+    }
+
+    fn build_failure_pad(&mut self) {
+        self.fallthrough_to(self.failure_landing_pad);
+        self.builder.seal_block(self.failure_landing_pad);
+        self.builder.switch_to_block(self.failure_landing_pad);
+
+        let mut args: Vec<BlockArg> = self
+            .builder
+            .block_params(self.failure_landing_pad)
+            .iter()
+            .map(|v| BlockArg::Value(*v))
+            .collect();
+
+        if let Some(val) = self.dead_success_slot(self.rcx.repr_of(&self.cx.body.return_ty)) {
+            args.insert(0, BlockArg::Value(val))
+        }
+
+        self.builder.ins().jump(self.landing_pad, &args);
+    }
+
     // Success landing pad before the full exit pad. Ensure checks are carried
     // out here.
     fn build_success_pad(&mut self, constraints: &[ast::AstConstraint]) {
@@ -598,26 +669,18 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         // I use current_block here as the `ensure` checks MAY branch to other checks (a series of checks will require new
         // blocks to run brif again), so we might not be in the success_landing_pad.
 
-        match self.rcx.repr_of(&self.cx.body.return_ty) {
-            Repr::Empty => {
-                self.builder.ins().jump(self.landing_pad, &[]);
-                return;
-            }
-            Repr::Scalar(_) => {
-                let success_val = self.builder.block_params(self.success_landing_pad)[0];
-                self.builder
-                    .ins()
-                    .jump(self.landing_pad, &[BlockArg::Value(success_val)]);
-            }
-            Repr::Pair(_, _) => {
-                let success_val = self.builder.block_params(self.success_landing_pad)[0];
-                let zero = self.builder.ins().iconst(types::I64, 0);
-                self.builder.ins().jump(
-                    self.landing_pad,
-                    &[BlockArg::Value(success_val), BlockArg::Value(zero)],
-                );
-            }
+        let mut args: Vec<BlockArg> = self
+            .builder
+            .block_params(self.success_landing_pad)
+            .iter()
+            .map(|v| BlockArg::Value(*v))
+            .collect();
+
+        if let Some(tag_ty) = self.rcx.repr_of(&self.cx.body.return_ty).tag_type() {
+            let ok = self.builder.ins().iconst(tag_ty, 0);
+            args.push(BlockArg::Value(ok));
         }
+        self.builder.ins().jump(self.landing_pad, &args);
     }
 
     /// main's Cranelift signature always returns a single i64 (see `lower_sig`);
@@ -641,6 +704,64 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder.ins().return_(&args);
     }
 
+    fn lower_nonaborting_constraint_param_passthrough(
+        &mut self,
+        constraint: &ast::AstConstraint,
+    ) -> Block {
+        let condition = constraint.condition();
+        let value = self
+            .lower_expr(condition.clone())
+            .expect_scalar("constraint must be boolean");
+
+        let block = self.builder.current_block().unwrap();
+        let param_types: Vec<Type> = self
+            .builder
+            .func
+            .dfg
+            .block_params(block)
+            .iter()
+            .map(|&val| self.builder.func.dfg.value_type(val))
+            .collect();
+
+        let constraint_continue_block = self.builder.create_block();
+        for ty in param_types {
+            self.builder
+                .append_block_param(constraint_continue_block, ty);
+        }
+        let params = self
+            .builder
+            .block_params(block)
+            .iter()
+            .map(|v| BlockArg::Value(v.clone()))
+            .collect::<Vec<_>>();
+        // passing a fallible value here is UB. full interopability and use of
+        // fallible types is yet to be achieved.
+
+        // get the usize of the error
+        let Res::Err(err_id) = self.cx.body.node_res(constraint.node_id()).unwrap() else {
+            unreachable!("non error cannot be the res of an error constraint");
+        };
+
+        let err_value = self.builder.ins().iconst(
+            self.rcx
+                .repr_of(&self.cx.body.return_ty)
+                .tag_type()
+                .unwrap(),
+            err_id.as_usize() as i64,
+        );
+        self.builder.ins().brif(
+            value,
+            constraint_continue_block,
+            &params,
+            self.failure_landing_pad,
+            &[BlockArg::Value(err_value)],
+        );
+
+        self.builder.seal_block(constraint_continue_block);
+        self.builder.switch_to_block(constraint_continue_block);
+        constraint_continue_block
+    }
+
     /// Lowers a constraint, calls the abort function if fails, otherwise passes through all params to new block
     /// Returns the resultant block. This ends execution if the constraint fails.
     fn lower_aborting_constraint_param_passthrough(
@@ -648,7 +769,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         constraint: &ast::AstConstraint,
     ) -> Block {
         let condition = constraint.condition();
-        let value = self.lower_expr(condition.clone());
+        let value = self
+            .lower_expr(condition.clone())
+            .expect_scalar("constraint must be boolean");
 
         let block = self.builder.current_block().unwrap();
         let param_types: Vec<Type> = self
@@ -662,7 +785,6 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
         let constraint_abort_block = self.builder.create_block();
         let constraint_continue_block = self.builder.create_block();
-        // 3. Append the matching types to your new block
         for ty in param_types {
             self.builder
                 .append_block_param(constraint_continue_block, ty);
@@ -673,6 +795,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .iter()
             .map(|v| BlockArg::Value(v.clone()))
             .collect::<Vec<_>>();
+        // passing a fallible value here is UB. full interopability and use of
+        // fallible types is yet to be achieved.
 
         self.builder.ins().brif(
             value,
@@ -775,6 +899,14 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         }
     }
 
+    fn lower_constraints_checks(&mut self, constraints: &[ast::AstConstraint]) {
+        for constraint in constraints {
+            if matches!(constraint, ast::AstConstraint::Check(_)) {
+                self.lower_nonaborting_constraint_param_passthrough(constraint);
+            }
+        }
+    }
+
     fn lower_constraints_ensure(&mut self, constraints: &[ast::AstConstraint]) {
         for constraint in constraints {
             if matches!(constraint, ast::AstConstraint::Ensure(_)) {
@@ -855,8 +987,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn cleanup_block(&mut self, scope_id: ScopeId, kind: ExitKind) -> Block {
-        if let Some(b) = self.frame(scope_id).links.get(&kind) {
-            return *b;
+        if let Some(b) = self.frame(scope_id).links[kind.idx()] {
+            return b;
         }
 
         let block = self.builder.create_block();
@@ -864,7 +996,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             self.builder.append_block_param(block, ty);
         }
 
-        self.frame_mut(scope_id).links.insert(kind, block);
+        self.frame_mut(scope_id).links[kind.idx()] = Some(block);
 
         block
     }
@@ -885,8 +1017,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             },
             ExitKind::Return | ExitKind::Error => match parent {
                 Some(p) => self.cleanup_block(p, kind),
-                // LATER ERROR NEEDS A ERROR_LANDING_PAD.
-                None => self.success_landing_pad,
+                None => match kind {
+                    ExitKind::Return => self.success_landing_pad,
+                    ExitKind::Error => self.failure_landing_pad,
+                    _ => unreachable!(),
+                },
             },
         }
     }
@@ -908,7 +1043,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder.switch_to_block(header_block);
         match cond {
             Some(c) => {
-                let v = self.lower_expr(c); // outer scope: frame not pushed yet
+                let v = self
+                    .lower_expr(c)
+                    .expect_scalar("loop condition must be scalar"); // outer scope: frame not pushed yet
                 self.builder.ins().brif(v, body_block, &[], exit_block, &[]);
             }
             None => {
@@ -940,7 +1077,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_return_stmt(&mut self, return_: ast::AstReturnStmt) {
         let args: Vec<BlockArg> = match (return_.expr, self.chain_repr(ExitKind::Return)) {
             (None, Repr::Empty) => vec![],
-            (Some(e), Repr::Scalar(_)) => vec![BlockArg::Value(self.lower_expr(e))],
+            (Some(e), Repr::Scalar(_)) => vec![BlockArg::Value(
+                self.lower_expr(e)
+                    .expect_scalar("cannot return pre-made fallible type (yet)"),
+            )],
             (e, r) => unreachable!("return arity mismatch: expr={}, repr={r:?}", e.is_some()),
         };
         let target = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Return);
@@ -948,7 +1088,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_implicit_return(&mut self, expr: ast::AstExpr) {
-        let v = self.lower_expr(expr);
+        let v = self
+            .lower_expr(expr)
+            .expect_scalar("cannot implicitly return pre-made fallible type (yet)");
         let block_arg = BlockArg::Value(v);
         // jump to landing pad
         let target = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Return);
@@ -1007,7 +1149,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             None
         };
         let merge_block = self.builder.create_block();
-        let cond = self.lower_expr(*if_stmt.cond);
+        let cond = self
+            .lower_expr(*if_stmt.cond)
+            .expect_scalar("cannot return pre-made fallible type (yet)");
         self.builder.ins().brif(
             cond,
             then_block,
@@ -1050,7 +1194,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let target = self
             .lookup_local(&self.cx.body.node_res(assign.node_id).unwrap())
             .unwrap();
-        let value = self.lower_expr(*assign.expr);
+        let value = self
+            .lower_expr(*assign.expr)
+            .expect_scalar("cannot store fallible types in variables (yet)");
         self.builder.def_var(target, value);
     }
 
@@ -1066,7 +1212,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let Res::Local(local_id) = self.cx.body.node_res(let_decl.name.node_id).unwrap() else {
             unreachable!();
         };
-        let value = self.lower_expr(*let_decl.expr);
+        let value = self
+            .lower_expr(*let_decl.expr)
+            .expect_scalar("cannot store fallible types in variables (yet)");
         // for now we only have i64s... so no need to check
         let variable = self.locals.get(&local_id).copied().unwrap();
         self.builder.def_var(variable, value);
@@ -1074,18 +1222,18 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.insert(Res::Local(local_id), variable);
     }
 
-    fn lower_expr(&mut self, expr: ast::AstExpr) -> Value {
+    fn lower_expr(&mut self, expr: ast::AstExpr) -> Operand {
         self.loc(&expr.node_id());
 
         match expr.kind {
-            ast::AstExprKind::Literal(_) => self.lower_lit(expr),
-            ast::AstExprKind::Binary(_) => self.lower_bin_expr(expr),
-            ast::AstExprKind::Ident(ident) => self.lower_ident(ident),
+            ast::AstExprKind::Literal(_) => Operand::Scalar(self.lower_lit(expr)),
+            ast::AstExprKind::Binary(_) => Operand::Scalar(self.lower_bin_expr(expr)),
+            ast::AstExprKind::Ident(ident) => Operand::Scalar(self.lower_ident(ident)),
             ast::AstExprKind::Call(call_expr) => self.lower_call(call_expr),
         }
     }
 
-    fn lower_call(&mut self, expr: ast::AstCallExpr) -> Value {
+    fn lower_call(&mut self, expr: ast::AstCallExpr) -> Operand {
         // Get callee
         let callee_ty = self.cx.body.node_ty(expr.callee.node_id()).unwrap();
         let callee_sig = match callee_ty.kind() {
@@ -1095,7 +1243,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let args = expr
             .args
             .into_iter()
-            .map(|arg| self.lower_expr(*arg))
+            .map(|arg| {
+                self.lower_expr(*arg)
+                    .expect_scalar("cannot yet pass fallible type as parameter")
+            })
             .collect::<Vec<_>>();
 
         let call_inst = match self.try_expr_function_ident(&expr.callee) {
@@ -1107,13 +1258,20 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 let callee = self.lower_expr(*expr.callee);
                 let sig = self.lower_sig_cached(callee_sig.clone());
 
-                self.builder.ins().call_indirect(sig, callee, &args)
+                self.builder.ins().call_indirect(
+                    sig,
+                    callee.expect_scalar("cannot call fallible types"),
+                    &args,
+                )
             }
         };
 
         let results = self.builder.inst_results(call_inst);
-
-        results[0]
+        match self.rcx.repr_of(&callee_sig.return_ty) {
+            Repr::Empty => Operand::Empty,
+            Repr::Scalar(_) => Operand::Scalar(results[0]),
+            Repr::Pair(..) => Operand::Pair(results[0], results[1]),
+        }
     }
 
     /// Checks if the given ident is a direct function reference and returns
@@ -1155,7 +1313,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 .old_values
                 .get(old_id)
                 .cloned()
-                .expect("unable to get old id (error in compiler)"),
+                .expect("unable to get old id (error in compiler)")
+                .expect_scalar("cannot refer to a fallible type as a value"),
             Res::ConstraintRet => {
                 // Really depends on the current block, are we in a success pad?
                 if let Some(block) = self.builder.current_block()
@@ -1178,8 +1337,12 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             unreachable!()
         };
         let x_ty = self.cx.body.node_ty(bin_expr.left.node_id()).unwrap();
-        let x = self.lower_expr(*bin_expr.left);
-        let y = self.lower_expr(*bin_expr.right);
+        let x = self
+            .lower_expr(*bin_expr.left)
+            .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
+        let y = self
+            .lower_expr(*bin_expr.right)
+            .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
 
         let res_ty = self.cx.body.node_ty(bin_expr.node_id).unwrap();
         match bin_expr.operator {
@@ -1265,7 +1428,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_print(&mut self, print: ast::AstPrintStmt) {
         self.loc(&print.node_id);
         let x_ty = self.cx.body.node_ty(print.expr.node_id()).unwrap();
-        let x = self.lower_expr(*print.expr);
+        let x = self
+            .lower_expr(*print.expr)
+            .expect_scalar("cannot print fallible type");
         let printf_ref = self.get_or_cache_function(match x_ty.kind() {
             TyKind::Int => self.runtime.println_i64,
             TyKind::Float => self.runtime.println_f64,

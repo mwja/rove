@@ -64,6 +64,8 @@ pub enum TypeError {
     ErrorInInfallibleFunction(NodeId, NodeId),
     #[error("nested fallible types are not allowed")]
     NestedFallibleType(NodeId),
+    #[error("fallible types may not yet be stored")]
+    FallibleTypesNotYetStored(NodeId),
 }
 
 impl TypeError {
@@ -95,6 +97,7 @@ impl TypeError {
             ErrorNotFoundInSet(..) => Some(1023),
             ErrorInInfallibleFunction(..) => Some(1024),
             NestedFallibleType(..) => Some(1025),
+            FallibleTypesNotYetStored(..) => Some(1026),
         }
     }
 }
@@ -381,6 +384,14 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_code(self.as_code())
                         .with_label_from(recorder, node_id, "nested fallible type here")
                         .with_help(Some("consider collapsing the nested fallible types into a single fallible type")),
+                ]
+            }
+            FallibleTypesNotYetStored(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "expression of fallible type here")
+                        .with_help(Some("storing fallible types is not yet supported")),
                 ]
             }
         }
@@ -874,7 +885,11 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt, index: Position) -> R
                 .reported(tccx)?;
 
             tccx.body.set_node_res(ass.node_id, target);
-            typeck_expr(tccx, &ass.expr).reported(tccx)?;
+            let ty = typeck_expr(tccx, &ass.expr).reported(tccx)?;
+            if ty.is_fallible() {
+                return Err(TypeError::FallibleTypesNotYetStored(ass.expr.node_id()))
+                    .reported(tccx);
+            }
         }
         AstStmtKind::If(stmt) => typeck_if(tccx, stmt)?,
         AstStmtKind::Block(block) => typeck_block(tccx, block, true)?,
@@ -971,7 +986,7 @@ fn typeck_implicit_return(
         return Err(TypeError::ImplicitReturnNotLast(expr.node_id()));
     }
 
-    match (return_ty.kind(), tccx.body.return_ty.kind()) {
+    match (return_ty.kind(), tccx.body.return_ty.as_infallible().kind()) {
         (TyKind::Void, TyKind::Void) => Ok(()),
         (TyKind::Void, _) => Err(TypeError::ExpectedReturn(
             expr.node_id(),
@@ -997,7 +1012,8 @@ fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Res
         .expr
         .as_ref()
         .map(|expr| typeck_expr(tccx, expr))
-        .map_or(Ok(None), |v| v.map(Some))?;
+        .map_or(Ok(None), |v| v.map(Some))?
+        .map(|ty| ty.as_infallible()); // returns always follow success path.
 
     match (&return_ty, tccx.body.return_ty.kind()) {
         // Returns but didn't expect return (non-void return in void context)
@@ -1066,6 +1082,9 @@ fn typeck_decl(tccx: &mut TypeckCtxt, decl: &ast::AstDecl) -> Result<(), TypeErr
             },
         }) => {
             let ty = typeck_expr(tccx, expr)?;
+            if ty.is_fallible() {
+                return Err(TypeError::FallibleTypesNotYetStored(*node_id));
+            }
             tccx.declare_local(*node_id, name, ty);
         }
     };
@@ -1135,7 +1154,8 @@ fn typeck_constraint_expr(
 
             // Function return type instead
             tccx.body.set_node_res(ident.node_id, Res::ConstraintRet);
-            return Ok(Some(tccx.body.return_ty.clone()));
+            // ensure blocks only run on happy paths
+            return Ok(Some(tccx.body.return_ty.clone().as_infallible()));
         }
 
         ast::AstExprKind::Call(call_expr) if call_expr.is_constraint_kw_old() => {

@@ -36,6 +36,21 @@ impl Repr {
             other => unreachable!("{what} must be single-slot, got {other:?}"),
         }
     }
+
+    pub fn tag_type(self) -> Option<Type> {
+        match self {
+            Repr::Empty | Repr::Scalar(_) => None,
+            Repr::Pair(_, tag) => Some(tag),
+        }
+    }
+
+    pub fn success_type(self) -> Option<Type> {
+        match self {
+            Repr::Empty => None,
+            Repr::Scalar(t) => Some(t),
+            Repr::Pair(payload, _) => Some(payload),
+        }
+    }
 }
 
 /// Helper for dealing with codegen represenations of language values.
@@ -61,11 +76,21 @@ impl ReprCx {
             TyKind::Int => Repr::Scalar(types::I64),
             TyKind::Float => Repr::Scalar(types::F64),
             TyKind::Func(_) => Repr::Scalar(self.ptr()),
-            TyKind::Fallible(ty, _) => match self.repr_of(ty) {
-                Repr::Empty => Repr::Scalar(types::I32),
-                Repr::Scalar(t) => Repr::Pair(t, types::I32),
-                Repr::Pair(..) => unreachable!("`!!T` is not representable"),
-            },
+            TyKind::Fallible(ty, _) => {
+                let r = match self.repr_of(ty) {
+                    Repr::Empty => Repr::Scalar(types::I32),
+                    Repr::Scalar(t) => Repr::Pair(t, types::I32),
+                    Repr::Pair(..) => unreachable!("`!!T` is not representable"),
+                };
+                debug_assert_eq!(
+                    self.success_repr_of(ty)
+                        .types()
+                        .chain(r.tag_type())
+                        .collect::<Vec<_>>(),
+                    r.types().collect::<Vec<_>>(),
+                );
+                r
+            }
         }
     }
 
