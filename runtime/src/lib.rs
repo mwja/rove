@@ -11,7 +11,7 @@ pub extern "C" fn rt_println_f64(value: f64) {
 }
 
 #[repr(u8)]
-enum Constraint {
+pub enum Constraint {
     Require = 0,
     Ensure = 1,
 }
@@ -47,4 +47,22 @@ pub extern "C" fn rt_abort_constraint(
         line
     );
     std::process::exit(1);
+}
+
+type RtEntryPoint = unsafe extern "C" fn() -> i64;
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_start(entry_point: RtEntryPoint) -> i32 {
+    let res = unsafe { entry_point() };
+
+    res as i32
+}
+
+unsafe extern "C" {
+    fn __rove_entry() -> i64;
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn main() -> i32 {
+    rt_start(__rove_entry)
 }

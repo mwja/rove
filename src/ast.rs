@@ -18,6 +18,7 @@ pub enum AstType {
     Int,
     Float,
     Void,
+    ErrorUnion(Box<AstType>, String),
 }
 
 impl Display for AstType {
@@ -26,9 +27,12 @@ impl Display for AstType {
             f,
             "{}",
             match self {
-                AstType::Int => "int",
-                AstType::Float => "float",
-                AstType::Void => "void",
+                AstType::Int => "int".to_owned(),
+                AstType::Float => "float".to_owned(),
+                AstType::Void => "void".to_owned(),
+                AstType::ErrorUnion(inner, error_set) => {
+                    format!("{}!{}", inner, error_set)
+                }
             }
         )
     }
@@ -93,27 +97,34 @@ impl Display for AstFunctionDef {
 pub enum AstConstraint {
     Require(AstRequireConstraint),
     Ensure(AstEnsureConstraint),
+    Check(AstCheckConstraint),
 }
 
 impl AstConstraint {
     pub fn node_id(&self) -> NodeId {
         match self {
             AstConstraint::Require(AstRequireConstraint { node_id, .. })
-            | AstConstraint::Ensure(AstEnsureConstraint { node_id, .. }) => *node_id,
+            | AstConstraint::Ensure(AstEnsureConstraint { node_id, .. })
+            | AstConstraint::Check(AstCheckConstraint { node_id, .. }) => *node_id,
         }
     }
 
     pub fn condition(&self) -> &AstExpr {
         match self {
             AstConstraint::Require(AstRequireConstraint { condition, .. })
-            | AstConstraint::Ensure(AstEnsureConstraint { condition, .. }) => condition,
+            | AstConstraint::Ensure(AstEnsureConstraint { condition, .. })
+            | AstConstraint::Check(AstCheckConstraint { condition, .. }) => condition,
         }
     }
 
-    pub fn tag(&self) -> &Option<String> {
+    pub fn tag(&self) -> Option<String> {
         match self {
             AstConstraint::Require(AstRequireConstraint { tag, .. })
-            | AstConstraint::Ensure(AstEnsureConstraint { tag, .. }) => tag,
+            | AstConstraint::Ensure(AstEnsureConstraint { tag, .. }) => tag.clone(),
+            AstConstraint::Check(AstCheckConstraint { error_name, .. }) => {
+                // For check constraints, we treat the error name as the tag
+                Some(error_name.clone())
+            }
         }
     }
 }
@@ -133,6 +144,9 @@ impl Display for AstConstraint {
                 c.tag.as_deref().unwrap_or(""),
                 c.condition
             ),
+            AstConstraint::Check(c) => {
+                write!(f, "check {} if {}", c.error_name, c.condition)
+            }
         }
     }
 }
@@ -148,6 +162,13 @@ pub struct AstRequireConstraint {
 pub struct AstEnsureConstraint {
     pub node_id: NodeId,
     pub tag: Option<String>,
+    pub condition: Box<AstExpr>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AstCheckConstraint {
+    pub node_id: NodeId,
+    pub error_name: String,
     pub condition: Box<AstExpr>,
 }
 
@@ -592,6 +613,22 @@ impl Display for AstLiteral {
 pub enum AstLiteralKind {
     Int(i64),
     Float(f64),
+}
+
+impl AstLiteralKind {
+    pub fn as_int(&self) -> i64 {
+        match self {
+            AstLiteralKind::Int(value) => *value,
+            AstLiteralKind::Float(_) => panic!("Expected int literal, found float"),
+        }
+    }
+
+    pub fn as_float(&self) -> f64 {
+        match self {
+            AstLiteralKind::Int(value) => *value as f64,
+            AstLiteralKind::Float(value) => *value,
+        }
+    }
 }
 
 impl Display for AstLiteralKind {

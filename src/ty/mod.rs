@@ -4,7 +4,7 @@ use crate::{
     arena::Store,
     ast::NodeId,
     defs::{DefId, Defs, FuncSig},
-    err::{ErrorSetCtxt, ErrorSets},
+    err::{ErrorSetCtxt, ErrorSetId, ErrorSets},
     ty::typeck::BodyInfo,
 };
 
@@ -25,6 +25,24 @@ impl Ty {
     pub fn is_bool(&self) -> bool {
         matches!(*self.kind, TyKind::Int)
     }
+
+    pub fn is_fallible(&self) -> bool {
+        matches!(*self.kind, TyKind::Fallible(_, _))
+    }
+
+    pub fn success_ty(&self) -> Option<&Ty> {
+        match &*self.kind {
+            TyKind::Fallible(ty, _) => Some(ty),
+            _ => None,
+        }
+    }
+
+    pub fn error_set(&self) -> Option<ErrorSetId> {
+        match &*self.kind {
+            TyKind::Fallible(_, err_set) => Some(*err_set),
+            _ => None,
+        }
+    }
 }
 
 impl Display for Ty {
@@ -44,6 +62,8 @@ pub enum TyKind {
     Float,
     /// Function
     Func(FuncSig),
+    /// Error union
+    Fallible(Ty, ErrorSetId),
 }
 
 impl From<Ty> for Rc<TyKind> {
@@ -68,6 +88,7 @@ impl Display for TyKind {
                     .join(", "),
                 sig.return_ty
             ),
+            TyKind::Fallible(ty, err_set) => write!(f, "{}!{}", ty, err_set),
         }
     }
 }

@@ -21,6 +21,13 @@ mod grammar {
         Int,
         #[rust_sitter::leaf(text = "float")]
         Float,
+        #[rust_sitter::leaf(text = "void")]
+        Void,
+        ErrorUnion(
+            Box<Spanned<Type>>,
+            #[rust_sitter::leaf(text = "!")] (),
+            Ident,
+        ),
     }
 
     pub enum Def {
@@ -64,6 +71,8 @@ mod grammar {
     pub enum Constraint {
         Require(RequireConstraint),
         Ensure(EnsureConstraint),
+        // check constraints are 'recoverable0
+        Check(CheckConstraint),
     }
 
     pub struct RequireConstraint {
@@ -81,6 +90,17 @@ mod grammar {
         pub tag: Option<Spanned<Ident>>,
         #[rust_sitter::leaf(text = ":")]
         _c: (),
+        pub expr: Spanned<Expr>,
+    }
+
+    pub struct CheckConstraint {
+        #[rust_sitter::leaf(text = "check")]
+        _c: (),
+        pub error_name: Ident,
+        // deliberately uses different syntax to clarify
+        // it is not a runtime failure but is recoverable.
+        #[rust_sitter::leaf(text = "if")]
+        _colon: (),
         pub expr: Spanned<Expr>,
     }
 
@@ -474,6 +494,13 @@ impl<'a> ProgramLowerer<'a> {
                     tag: tag.map(|t| t.text.clone()),
                 })
             }
+            grammar::Constraint::Check(grammar::CheckConstraint {
+                expr, error_name, ..
+            }) => ast::AstConstraint::Check(ast::AstCheckConstraint {
+                condition: Box::new(self.lower_expr(expr)),
+                node_id: self.next_id_spanned(constraint.span),
+                error_name: error_name.text,
+            }),
         }
     }
 
@@ -489,6 +516,10 @@ impl<'a> ProgramLowerer<'a> {
         match ty.and_then(|ty| Some(ty.value)) {
             Some(grammar::Type::Float) => ast::AstType::Float,
             Some(grammar::Type::Int) => ast::AstType::Int,
+            Some(grammar::Type::Void) => ast::AstType::Void,
+            Some(grammar::Type::ErrorUnion(ty, _, ident)) => {
+                ast::AstType::ErrorUnion(Box::new(self.lower_type(Some(*ty))), ident.text)
+            }
             None => ast::AstType::Void,
         }
     }

@@ -8,7 +8,7 @@ use crate::{
     ast::{self, NodeId},
     err::ErrorSetId,
     sourcemap::{DiagnoseWith, report::Diagnostic},
-    ty::{Ty, TyCtxt},
+    ty::{Ty, TyCtxt, TyKind},
 };
 indexable_id!(pub DefId);
 
@@ -133,6 +133,8 @@ impl<'d> DefCtxt<'d> {
 pub enum DefError {
     #[error("duplicate definitions of {0}")]
     DuplicateImpl(String, NodeId, NodeId),
+    #[error("error set not found: {0}")]
+    ErrorSetNotFound(String),
 }
 
 impl DefError {
@@ -140,6 +142,7 @@ impl DefError {
         use DefError::*;
         match self {
             DuplicateImpl(_, _, _) => Some(2001),
+            ErrorSetNotFound(_) => Some(2002),
         }
     }
 }
@@ -163,6 +166,9 @@ impl DiagnoseWith<NodeId> for DefError {
                             "conflicting definition of same name here",
                         ),
                 ]
+            }
+            ErrorSetNotFound(_name) => {
+                vec![Diagnostic::new(message).with_code(self.as_code())]
             }
         }
     }
@@ -260,5 +266,14 @@ fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Result<Ty
         ast::AstType::Float => Ok(tcx.float_ty()),
         ast::AstType::Int => Ok(tcx.int_ty()),
         ast::AstType::Void => Ok(tcx.void_ty()),
+        ast::AstType::ErrorUnion(success_ty, error_set_name) => Ok(tcx.ty(TyKind::Fallible(
+            resolve_type(tcx, dcx, success_ty)?,
+            match tcx.errs.get_set_id_by_name(error_set_name) {
+                None => {
+                    return Err(DefError::ErrorSetNotFound(error_set_name.clone()));
+                }
+                Some(set_id) => set_id,
+            },
+        ))),
     }
 }

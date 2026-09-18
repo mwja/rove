@@ -1,6 +1,9 @@
 //! Handles errors and error sets in Rove. They are used within the type system.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    fmt::Display,
+};
 
 use crate::{
     ast::{self, AstErrorSet, NodeId},
@@ -16,8 +19,14 @@ pub struct ErrorSet {
 
 indexable_id!(pub RawErrorId);
 impl_next_id!(ErrorSet.next_error_id -> RawErrorId);
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ErrorId(ErrorSetId, RawErrorId);
+
+impl Display for ErrorId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} in error set {}", self.1.index(), self.0.index())
+    }
+}
 
 // errerror, not exactly the most readable but okay.
 #[derive(Debug, thiserror::Error)]
@@ -218,6 +227,22 @@ pub struct ErrorSets {
     pub sets: Vec<ErrorSet>,
     pub name_to_error_set_id: HashMap<String, ErrorSetId>,
     pub error_set_to_node_id: HashMap<ErrorSetId, NodeId>,
+}
+
+impl ErrorSets {
+    pub fn get_set(&self, error_set_id: ErrorSetId) -> &ErrorSet {
+        &self.sets[error_set_id.index()]
+    }
+
+    pub fn get_set_by_name(&self, name: &str) -> Option<&ErrorSet> {
+        self.name_to_error_set_id
+            .get(name)
+            .map(|id| self.get_set(*id))
+    }
+
+    pub fn get_set_id_by_name(&self, name: &str) -> Option<ErrorSetId> {
+        self.name_to_error_set_id.get(name).copied()
+    }
 }
 
 /// Like the def pass, but for errors

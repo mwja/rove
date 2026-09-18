@@ -4,7 +4,9 @@ use thiserror::Error;
 
 use super::*;
 use crate::{
-    ast::{self, AstExpr, AstIdent, AstLetDecl, AstStmtKind},
+    ast::{
+        self, AstCheckConstraint, AstExpr, AstIdent, AstLetDecl, AstRequireConstraint, AstStmtKind,
+    },
     defs::{self, FuncSig},
     sourcemap::{DiagnoseWith, report::Diagnostic},
     ty::res::{LocalId, OldId, ParamId, Res},
@@ -27,7 +29,7 @@ pub enum TypeError {
     #[error("cannot call non-function")]
     CannotCallNonFunction(NodeId),
     #[error("incorrect number of arguments")]
-    IncorrectNumberOfArguments(NodeId, usize, NodeId, usize),
+    IncorrectNumberOfArguments(NodeId, usize, usize),
     #[error("incorrect argument type (expected {0} for argument {2}, got {1})")]
     IncorrectArgumentType(Ty, Ty, usize, NodeId),
     #[error("cannot print func or void")]
@@ -56,6 +58,12 @@ pub enum TypeError {
     ConstraintConditionNotValid(NodeId, Ty),
     #[error("implicit returns must be the last item in a block")]
     ImplicitReturnNotLast(NodeId),
+    #[error("error not found in expected error set")]
+    ErrorNotFoundInSet(NodeId, String),
+    #[error("error in infallible function")]
+    ErrorInInfallibleFunction(NodeId, NodeId),
+    #[error("nested fallible types are not allowed")]
+    NestedFallibleType(NodeId),
 }
 
 impl TypeError {
@@ -84,6 +92,9 @@ impl TypeError {
             ConstraintConditionNotValid(..) => Some(1020),
             OldInPreConstraint(..) => Some(1021),
             ImplicitReturnNotLast(..) => Some(1022),
+            ErrorNotFoundInSet(..) => Some(1023),
+            ErrorInInfallibleFunction(..) => Some(1024),
+            NestedFallibleType(..) => Some(1025),
         }
     }
 }
@@ -170,19 +181,17 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
-            IncorrectNumberOfArguments(callee, args, func_node_id, correct_args) => {
+            IncorrectNumberOfArguments(callee, args, correct_args) => {
                 vec![
                     Diagnostic::new(message)
                         .with_code(self.as_code())
                         .with_label_from(
                             recorder,
                             callee,
-                            format!("attempted to call here with {} arguments", args),
-                        )
-                        .with_label_from(
-                            recorder,
-                            func_node_id,
-                            format!("function is defined here with {} arguments", correct_args),
+                            format!(
+                                "attempted to call here with {} arguments, expected {}",
+                                args, correct_args
+                            ),
                         ),
                 ]
             }
@@ -317,8 +326,7 @@ impl DiagnoseWith<NodeId> for TypeError {
                             recorder,
                             node_id,
                             format!("condition here must be an int, got {}", ty),
-                        )
-                        .with_help(Some("")),
+                        ),
                 ]
             }
             OldInPreConstraint(node_id, enclosing_constraint_node_id) => {
@@ -334,16 +342,45 @@ impl DiagnoseWith<NodeId> for TypeError {
                             recorder,
                             enclosing_constraint_node_id,
                             "enclosing constraint",
-                        )
-                        .with_help(Some("")),
+                        ),
                 ]
             }
             ImplicitReturnNotLast(node_id) => {
                 vec![
                     Diagnostic::new(message)
                         .with_code(self.as_code())
-                        .with_label_from(recorder, node_id, "implicit return here ")
-                        .with_help(Some("")),
+                        .with_label_from(recorder, node_id, "implicit return here "),
+                ]
+            }
+            ErrorNotFoundInSet(node_id, name) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("error `{}` not found in expected error set", name),
+                        ),
+                ]
+            }
+            ErrorInInfallibleFunction(func_node_id, fallible_node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, func_node_id, "infallible function defined here")
+                        .with_label_from(
+                            recorder,
+                            fallible_node_id,
+                            "fallible operation used here",
+                        ),
+                ]
+            }
+            NestedFallibleType(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "nested fallible type here")
+                        .with_help(Some("consider collapsing the nested fallible types into a single fallible type")),
                 ]
             }
         }
@@ -586,7 +623,7 @@ impl<'c> TypeckCtxt<'c> {
             Res::ConstraintOld(res) => self.body.old_ty(*res),
             Res::ConstraintRet => Some(self.body.return_ty.clone()),
             Res::Param(param_id) => self.body.param_ty(*param_id),
-            Res::Err => None,
+            Res::Err(..) => None,
         }
     }
 
@@ -638,7 +675,7 @@ pub fn typeck_ast(
                         kind: defs::DefKind::Function(sig),
                     } => {
                         let mut tccx = TypeckCtxt::new_with_func_sig(tcx, ast_func_def, &sig);
-
+                        let _ = typeck_sig(&mut tccx, &sig).reported(&mut tccx);
                         let _ = typeck_pre_constraint(&mut tccx, &ast_func_def.constraints);
                         for (i, stmt) in ast_func_def.body.stmts.iter().enumerate() {
                             let _ = typeck_stmt(
@@ -692,23 +729,35 @@ pub fn typeck_ast(
     Ok(results)
 }
 
+fn typeck_sig(tccx: &mut TypeckCtxt, sig: &FuncSig) -> Result<(), TypeError> {
+    // ensure that we don't return !!T. !!T is (for now) unrepresentable
+    if sig.return_ty.is_fallible() && sig.return_ty.success_ty().unwrap().is_fallible() {
+        return Err(TypeError::NestedFallibleType(tccx.return_node_id.unwrap()));
+    }
+
+    Ok(())
+}
+
 fn typeck_pre_constraint(
     tccx: &mut TypeckCtxt,
     constraints: &[ast::AstConstraint],
 ) -> Result<(), ()> {
     for constraint in constraints {
         match constraint {
-            ast::AstConstraint::Require(req_cstrt) => {
-                tccx.inside_constraint = Some(ConstraintType::Pre(req_cstrt.node_id));
-                let ty = typeck_expr(tccx, &req_cstrt.condition).reported(tccx)?;
-                if !ty.is_bool() {
-                    return Err(TypeError::ConstraintConditionNotValid(
-                        req_cstrt.condition.node_id(),
-                        ty,
-                    ))
+            ast::AstConstraint::Require(AstRequireConstraint {
+                node_id, condition, ..
+            }) => {
+                typeck_constraint_condition(tccx, ConstraintType::Pre(*node_id), condition)
                     .reported(tccx)?;
-                }
-                tccx.inside_constraint = None;
+            }
+            ast::AstConstraint::Check(AstCheckConstraint {
+                node_id,
+                condition,
+                error_name,
+            }) => {
+                typeck_check_constraint_error(tccx, *node_id, error_name).reported(tccx)?;
+                typeck_constraint_condition(tccx, ConstraintType::Pre(*node_id), condition)
+                    .reported(tccx)?;
             }
             // Happens in post_constraint
             ast::AstConstraint::Ensure(..) => {}
@@ -718,6 +767,44 @@ fn typeck_pre_constraint(
     Ok(())
 }
 
+fn typeck_check_constraint_error(
+    tccx: &mut TypeckCtxt,
+    node_id: NodeId,
+    error_name: &str,
+) -> Result<(), TypeError> {
+    typeck_fallible(tccx, node_id)?;
+    // Get the error from the set of expected errors for this function.
+    let set_id = tccx.body.return_ty.error_set().unwrap();
+    let set = tccx.tcx.errs.get_set(set_id);
+    let Some(err_id) = set.get_id(error_name) else {
+        return Err(TypeError::ErrorNotFoundInSet(
+            node_id,
+            error_name.to_owned(),
+        ));
+    };
+
+    tccx.body.set_node_res(node_id, Res::Err(err_id));
+
+    Ok(())
+}
+
+fn typeck_constraint_condition(
+    tccx: &mut TypeckCtxt,
+    type_: ConstraintType,
+    condition: &ast::AstExpr,
+) -> Result<Ty, TypeError> {
+    tccx.inside_constraint = Some(type_);
+    let ty = typeck_expr(tccx, condition)?;
+    if !ty.is_bool() {
+        return Err(TypeError::ConstraintConditionNotValid(
+            condition.node_id(),
+            ty,
+        ));
+    }
+    tccx.inside_constraint = None;
+    Ok(ty)
+}
+
 fn typeck_post_constraint(
     tccx: &mut TypeckCtxt,
     constraints: &[ast::AstConstraint],
@@ -725,20 +812,28 @@ fn typeck_post_constraint(
     for constraint in constraints {
         match constraint {
             // pre_constraint
-            ast::AstConstraint::Require(..) => {}
+            ast::AstConstraint::Require(..) | ast::AstConstraint::Check(..) => {}
             ast::AstConstraint::Ensure(ens_cstrt) => {
-                tccx.inside_constraint = Some(ConstraintType::Post(ens_cstrt.node_id));
-                let ty = typeck_expr(tccx, &ens_cstrt.condition).reported(tccx)?;
-                if !ty.is_bool() {
-                    return Err(TypeError::ConstraintConditionNotValid(
-                        ens_cstrt.node_id,
-                        ty,
-                    ))
-                    .reported(tccx)?;
-                }
+                typeck_constraint_condition(
+                    tccx,
+                    ConstraintType::Post(ens_cstrt.node_id),
+                    &ens_cstrt.condition,
+                )
+                .reported(tccx)?;
             }
         }
     }
+    Ok(())
+}
+
+fn typeck_fallible(tccx: &mut TypeckCtxt, node_id: NodeId) -> Result<(), TypeError> {
+    if !tccx.body.return_ty.is_fallible() {
+        return Err(TypeError::ErrorInInfallibleFunction(
+            tccx.func_node_id,
+            node_id,
+        ));
+    }
+
     Ok(())
 }
 
@@ -1084,7 +1179,6 @@ fn typeck_call_expr(tccx: &mut TypeckCtxt, call_expr: &ast::AstCallExpr) -> Resu
         return Err(TypeError::IncorrectNumberOfArguments(
             call_expr.node_id,
             args.len(),
-            tccx.func_node_id,
             sig.param_tys.len(),
         ));
     }
