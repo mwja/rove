@@ -1,0 +1,21 @@
+enum VDirection {
+    Positive,
+    Negative
+}
+
+func move(v: int, direction: VDirection) -> int {
+    if direction == VDirection::Positive {
+        return v + 1;
+    } else {
+        return v - 1;
+    }
+}
+
+func main() {
+    let v = 0;
+    v = move(v, ::Positive);
+    v = move(v, ::Negative);
+    v = move(v, ::Negative);
+
+    print v;
+}

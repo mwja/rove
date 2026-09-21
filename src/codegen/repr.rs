@@ -76,6 +76,7 @@ impl ReprCx {
             TyKind::Int => Repr::Scalar(types::I64),
             TyKind::Float => Repr::Scalar(types::F64),
             TyKind::Func(_) => Repr::Scalar(self.ptr()),
+            TyKind::Enum(_) => Repr::Scalar(types::I64),
             TyKind::Fallible(ty, _) => {
                 let r = match self.repr_of(ty) {
                     Repr::Empty => Repr::Scalar(types::I32),
@@ -102,6 +103,7 @@ impl ReprCx {
             TyKind::Int => Repr::Scalar(types::I64),
             TyKind::Float => Repr::Scalar(types::F64),
             TyKind::Func(_) => Repr::Scalar(self.ptr()),
+            TyKind::Enum(_) => Repr::Scalar(types::I64),
             TyKind::Fallible(ty, _) => self.repr_of(ty),
         }
     }

@@ -2,10 +2,10 @@ error PurchaseError {
   StockExhausted
 }
 
-func make_purchase(wallet: int, price: int, remaining_stock: int) -> PurchaseError!int
-  check StockExhausted if remaining_stock > 0 // remaining stock must be greater than zero
-  require enough_money: wallet >= price // wallet must have enough money to cover the price
-  ensure result_correct: ret == wallet - price // price is deducted from wallet
+func make_purchase(wallet: int, price: int, remaining_stock: int) throws PurchaseError -> int
+  guard StockExhausted if remaining_stock > 0 // remaining stock must be greater than zero
+  require! enough_money: wallet >= price // wallet must have enough money to cover the price
+  ensure! result_correct: ret == wallet - price // price is deducted from wallet
 {
   wallet - price
 }

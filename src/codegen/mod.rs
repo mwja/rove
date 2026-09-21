@@ -586,7 +586,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
         // Then the require checks (ensure checks happen in the success pad and branch to the landing pad if failing)
         self.lower_constraints_require(&def.constraints);
-        self.lower_constraints_checks(&def.constraints);
+        self.lower_constraints_guards(&def.constraints);
         self.lower_block_stmt(def.body);
 
         self.build_success_pad(&def.constraints);
@@ -863,8 +863,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             match constraint {
                 ast::AstConstraint::Require(..) => 0,
                 ast::AstConstraint::Ensure(..) => 1,
-                ast::AstConstraint::Check(_) => {
-                    unreachable!("check constraints do not cause aborts")
+                ast::AstConstraint::Guard(_) => {
+                    unreachable!("guard constraints do not cause aborts")
                 }
             },
         );
@@ -899,9 +899,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         }
     }
 
-    fn lower_constraints_checks(&mut self, constraints: &[ast::AstConstraint]) {
+    fn lower_constraints_guards(&mut self, constraints: &[ast::AstConstraint]) {
         for constraint in constraints {
-            if matches!(constraint, ast::AstConstraint::Check(_)) {
+            if matches!(constraint, ast::AstConstraint::Guard(_)) {
                 self.lower_nonaborting_constraint_param_passthrough(constraint);
             }
         }
@@ -942,7 +942,13 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.lower_constraint_expr_olds(&left);
                 self.lower_constraint_expr_olds(&right);
             }
-            (_, ast::AstExprKind::Literal(..) | ast::AstExprKind::Ident(..)) => {}
+            (
+                _,
+                ast::AstExprKind::Literal(..)
+                | ast::AstExprKind::Ident(..)
+                | ast::AstExprKind::Path(..)
+                | ast::AstExprKind::ImplicitPath(..),
+            ) => {}
         }
     }
 
@@ -1165,9 +1171,14 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder.switch_to_block(then_block);
         self.builder.seal_block(then_block);
         self.lower_block_stmt(*if_stmt.then);
-        if !self.is_current_block_terminated() {
+        let then_falls_through = !self.is_current_block_terminated();
+        if then_falls_through {
             self.builder.ins().jump(merge_block, &[]);
         }
+
+        // merge_block is only reachable if a branch actually falls through to
+        // it: the implicit "no else" edge, or either arm not terminating.
+        let mut merge_reachable = else_block.is_none() || then_falls_through;
 
         if let Some(else_) = if_stmt.else_ {
             self.builder.switch_to_block(else_block.unwrap());
@@ -1182,11 +1193,17 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             }
             if !self.is_current_block_terminated() {
                 self.builder.ins().jump(merge_block, &[]);
+                merge_reachable = true;
             }
         }
 
         self.builder.switch_to_block(merge_block);
         self.builder.seal_block(merge_block);
+        if !merge_reachable {
+            // Both arms terminate (e.g. both return): this block is dead code
+            // with no predecessors, but Cranelift still requires a terminator.
+            self.builder.ins().trap(TrapCode::unwrap_user(7));
+        }
     }
 
     fn lower_assign(&mut self, assign: ast::AstAssignStmt) {
@@ -1228,8 +1245,74 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         match expr.kind {
             ast::AstExprKind::Literal(_) => Operand::Scalar(self.lower_lit(expr)),
             ast::AstExprKind::Binary(_) => Operand::Scalar(self.lower_bin_expr(expr)),
-            ast::AstExprKind::Ident(ident) => Operand::Scalar(self.lower_ident(ident)),
+            ast::AstExprKind::Ident(ident) => self.lower_ident(ident),
             ast::AstExprKind::Call(call_expr) => self.lower_call(call_expr),
+            ast::AstExprKind::Path(path_expr) => self.lower_path(path_expr),
+            ast::AstExprKind::ImplicitPath(implicit_path_expr) => {
+                self.lower_implicit_path(implicit_path_expr)
+            }
+        }
+    }
+
+    fn lower_path(&mut self, path_expr: ast::AstPathExpr) -> Operand {
+        let res = self.cx.body.node_res(path_expr.node_id).unwrap();
+        self.lower_value_res(res)
+    }
+
+    fn lower_implicit_path(&mut self, implicit_path_expr: ast::AstImplicitPathExpr) -> Operand {
+        let res = self.cx.body.node_res(implicit_path_expr.node_id).unwrap();
+        self.lower_value_res(res)
+    }
+
+    /// Lower a res that is a value (for now only enum variants.)
+    fn lower_value_res(&mut self, res: Res) -> Operand {
+        match res {
+            Res::Local(..) => Operand::Scalar(
+                self.builder.use_var(
+                    self.lookup_local(&res)
+                        .expect("unable to find local variable"),
+                ),
+            ),
+            Res::Param(param_id) => {
+                Operand::Scalar(self.builder.block_params(self.entry_block)[param_id.index()])
+            }
+            Res::Def(def_id) => {
+                let callee = self.module.declare_func_in_func(
+                    self.cx.def_id_to_function_id(def_id).unwrap(),
+                    &mut self.builder.func,
+                );
+                let def = self.cx.tcx.defs.def(def_id).unwrap();
+                match def.kind {
+                    DefKind::Function(_) => {
+                        Operand::Scalar(self.builder.ins().func_addr(func_ty(self.module), callee))
+                    }
+                }
+            }
+            Res::ConstraintOld(old_id) => Operand::Scalar(
+                self.old_values
+                    .get(&old_id)
+                    .cloned()
+                    .expect("unable to get old id (error in compiler)")
+                    .expect_scalar("cannot refer to a fallible type as a value"),
+            ),
+            Res::ConstraintRet => {
+                // Really depends on the current block, are we in a success pad?
+                if let Some(block) = self.builder.current_block()
+                    && matches!(self.block_type, BlockType::PostConstraint)
+                {
+                    // first block param
+                    let block_arg = self.builder.block_params(block)[0];
+                    return Operand::Scalar(block_arg);
+                }
+                // this shouldn't even be possible with typeck..
+                unreachable!();
+            }
+            Res::EnumVariant(enum_variant) => Operand::Scalar(
+                self.builder
+                    .ins()
+                    .iconst(types::I64, enum_variant.as_u32() as i64),
+            ),
+            Res::Enum(..) | Res::Err(..) => panic!("attempted to resolve an err or enum directly."),
         }
     }
 
@@ -1289,47 +1372,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         }
     }
 
-    fn lower_ident(&mut self, ident: ast::AstIdent) -> Value {
-        let res = &self.cx.body.node_res(ident.node_id).unwrap();
-        match res {
-            Res::Local(..) => self.builder.use_var(
-                self.lookup_local(res)
-                    .expect(&format!("unable to find local variable: {}", ident.text)),
-            ),
-            Res::Param(param_id) => self.builder.block_params(self.entry_block)[param_id.index()],
-            Res::Def(def_id) => {
-                let callee = self.module.declare_func_in_func(
-                    self.cx.def_id_to_function_id(*def_id).unwrap(),
-                    &mut self.builder.func,
-                );
-                let def = self.cx.tcx.defs.def(*def_id).unwrap();
-                match def.kind {
-                    DefKind::Function(_) => {
-                        self.builder.ins().func_addr(func_ty(self.module), callee)
-                    }
-                }
-            }
-            Res::ConstraintOld(old_id) => self
-                .old_values
-                .get(old_id)
-                .cloned()
-                .expect("unable to get old id (error in compiler)")
-                .expect_scalar("cannot refer to a fallible type as a value"),
-            Res::ConstraintRet => {
-                // Really depends on the current block, are we in a success pad?
-                if let Some(block) = self.builder.current_block()
-                    && matches!(self.block_type, BlockType::PostConstraint)
-                {
-                    // first block param
-                    let block_arg = self.builder.block_params(block)[0];
-                    return block_arg;
-                }
-                println!("{:?} {:?}", ident, res);
-                // this shouldn't even be possible with typeck..
-                unreachable!();
-            }
-            Res::Err(_) => panic!("res::err"),
-        }
+    fn lower_ident(&mut self, ident: ast::AstIdent) -> Operand {
+        let res = self.cx.body.node_res(ident.node_id).unwrap();
+        self.lower_value_res(res)
     }
 
     fn lower_bin_expr(&mut self, expr: ast::AstExpr) -> Value {
@@ -1350,17 +1395,23 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstBinaryOperator::Add => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().iadd(x, y),
                 TyKind::Float => self.builder.ins().fadd(x, y),
-                TyKind::Void | TyKind::Func(_) | TyKind::Fallible(_, _) => unreachable!(),
+                TyKind::Void | TyKind::Func(_) | TyKind::Fallible(_, _) | TyKind::Enum(..) => {
+                    unreachable!()
+                }
             },
             ast::AstBinaryOperator::Sub => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().isub(x, y),
                 TyKind::Float => self.builder.ins().fsub(x, y),
-                TyKind::Void | TyKind::Func(_) | TyKind::Fallible(_, _) => unreachable!(),
+                TyKind::Void | TyKind::Func(_) | TyKind::Fallible(_, _) | TyKind::Enum(..) => {
+                    unreachable!()
+                }
             },
             ast::AstBinaryOperator::Mul => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().imul(x, y),
                 TyKind::Float => self.builder.ins().fmul(x, y),
-                TyKind::Void | TyKind::Func(_) | TyKind::Fallible(_, _) => unreachable!(),
+                TyKind::Void | TyKind::Func(_) | TyKind::Fallible(_, _) | TyKind::Enum(..) => {
+                    unreachable!()
+                }
             },
             ast::AstBinaryOperator::Div => {
                 // In the future this will be defined in the language itself.
@@ -1402,6 +1453,19 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                         x,
                         y,
                     ),
+                    TyKind::Enum(..) => self.builder.ins().icmp(
+                        match bin_expr.operator {
+                            ast::AstBinaryOperator::Eq => IntCC::Equal,
+                            ast::AstBinaryOperator::Ne => IntCC::NotEqual,
+                            ast::AstBinaryOperator::Gt => IntCC::UnsignedGreaterThan,
+                            ast::AstBinaryOperator::Lt => IntCC::UnsignedLessThan,
+                            ast::AstBinaryOperator::Ge => IntCC::UnsignedGreaterThanOrEqual,
+                            ast::AstBinaryOperator::Le => IntCC::UnsignedLessThanOrEqual,
+                            _ => unreachable!(),
+                        },
+                        x,
+                        y,
+                    ),
                     TyKind::Func(_) => unreachable!(),
                     TyKind::Void => unreachable!(),
                     TyKind::Fallible(_, _) => unreachable!(),
@@ -1432,7 +1496,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .lower_expr(*print.expr)
             .expect_scalar("cannot print fallible type");
         let printf_ref = self.get_or_cache_function(match x_ty.kind() {
-            TyKind::Int => self.runtime.println_i64,
+            TyKind::Int | TyKind::Enum(..) => self.runtime.println_i64,
             TyKind::Float => self.runtime.println_f64,
             TyKind::Void => unreachable!(),
             TyKind::Func(_) => unreachable!(),

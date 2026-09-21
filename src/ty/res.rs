@@ -1,6 +1,10 @@
 use std::fmt::Display;
 
-use crate::{defs::DefId, err::ErrorId};
+use crate::{
+    defs::DefId,
+    enums::{EnumId, EnumVariant},
+    err::ErrorId,
+};
 
 indexable_id!(pub LocalId);
 indexable_id!(pub ParamId);
@@ -16,6 +20,9 @@ pub enum Res {
     // constraint only
     ConstraintOld(OldId),
     ConstraintRet,
+
+    Enum(EnumId),
+    EnumVariant(EnumVariant),
 }
 
 impl Display for Res {
@@ -27,6 +34,8 @@ impl Display for Res {
             Res::ConstraintOld(id) => write!(f, "constraint old {}", id),
             Res::ConstraintRet => write!(f, "constraint ret"),
             Res::Err(id) => write!(f, "error {}", id),
+            Res::Enum(id) => write!(f, "enum {}", id),
+            Res::EnumVariant(id) => write!(f, "enum variant {}", id),
         }
     }
 }

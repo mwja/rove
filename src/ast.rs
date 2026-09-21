@@ -5,6 +5,7 @@ indexable_id!(pub NodeId);
 pub struct AstProgram {
     pub defs: Vec<AstDef>,
     pub error_sets: Vec<AstErrorSet>,
+    pub enums: Vec<AstEnumDef>,
 }
 
 pub struct AstErrorSet {
@@ -13,12 +14,34 @@ pub struct AstErrorSet {
     pub errors: Vec<AstIdent>,
 }
 
+pub struct AstEnumDef {
+    pub node_id: NodeId,
+    pub name: String,
+    pub variants: Vec<AstIdent>,
+}
+
+impl Display for AstEnumDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "enum {} {{ {} }}",
+            self.name,
+            self.variants
+                .iter()
+                .map(|v| v.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
 #[derive(Debug)]
 pub enum AstType {
     Int,
     Float,
     Void,
     ErrorUnion(Box<AstType>, String),
+    Path(AstPath),
 }
 
 impl Display for AstType {
@@ -33,6 +56,7 @@ impl Display for AstType {
                 AstType::ErrorUnion(inner, error_set) => {
                     format!("{}!{}", inner, error_set)
                 }
+                AstType::Path(path) => path.to_string(),
             }
         )
     }
@@ -65,6 +89,8 @@ pub struct AstFunctionDef {
     pub name: String,
     pub args: Vec<AstArgDef>,
     pub return_node_id: Option<NodeId>,
+    // pub throws: Option<String>,
+    // pub throws_node_id: Option<NodeId>,
     pub return_ty: AstType,
     pub body: AstBlockStmt,
     pub is_main: bool,
@@ -87,6 +113,10 @@ impl Display for AstFunctionDef {
                 .map(|c| c.to_string())
                 .collect::<Vec<_>>()
                 .join(" "),
+            // self.throws
+            //     .as_ref()
+            //     .map(|e| format!("throws {}", e))
+            //     .unwrap_or_default(),
             self.return_ty
         )?;
         Ok(())
@@ -97,7 +127,7 @@ impl Display for AstFunctionDef {
 pub enum AstConstraint {
     Require(AstRequireConstraint),
     Ensure(AstEnsureConstraint),
-    Check(AstCheckConstraint),
+    Guard(AstGuardConstraint),
 }
 
 impl AstConstraint {
@@ -105,7 +135,7 @@ impl AstConstraint {
         match self {
             AstConstraint::Require(AstRequireConstraint { node_id, .. })
             | AstConstraint::Ensure(AstEnsureConstraint { node_id, .. })
-            | AstConstraint::Check(AstCheckConstraint { node_id, .. }) => *node_id,
+            | AstConstraint::Guard(AstGuardConstraint { node_id, .. }) => *node_id,
         }
     }
 
@@ -113,7 +143,7 @@ impl AstConstraint {
         match self {
             AstConstraint::Require(AstRequireConstraint { condition, .. })
             | AstConstraint::Ensure(AstEnsureConstraint { condition, .. })
-            | AstConstraint::Check(AstCheckConstraint { condition, .. }) => condition,
+            | AstConstraint::Guard(AstGuardConstraint { condition, .. }) => condition,
         }
     }
 
@@ -121,8 +151,8 @@ impl AstConstraint {
         match self {
             AstConstraint::Require(AstRequireConstraint { tag, .. })
             | AstConstraint::Ensure(AstEnsureConstraint { tag, .. }) => tag.clone(),
-            AstConstraint::Check(AstCheckConstraint { error_name, .. }) => {
-                // For check constraints, we treat the error name as the tag
+            AstConstraint::Guard(AstGuardConstraint { error_name, .. }) => {
+                // For guard constraints, we treat the error name as the tag
                 Some(error_name.clone())
             }
         }
@@ -144,8 +174,8 @@ impl Display for AstConstraint {
                 c.tag.as_deref().unwrap_or(""),
                 c.condition
             ),
-            AstConstraint::Check(c) => {
-                write!(f, "check {} if {}", c.error_name, c.condition)
+            AstConstraint::Guard(c) => {
+                write!(f, "guard {} if {}", c.error_name, c.condition)
             }
         }
     }
@@ -166,7 +196,7 @@ pub struct AstEnsureConstraint {
 }
 
 #[derive(Debug, Clone)]
-pub struct AstCheckConstraint {
+pub struct AstGuardConstraint {
     pub node_id: NodeId,
     pub error_name: String,
     pub condition: Box<AstExpr>,
@@ -412,6 +442,8 @@ impl AstExpr {
             AstExprKind::Binary(bin_expr) => bin_expr.node_id,
             AstExprKind::Ident(ident) => ident.node_id,
             AstExprKind::Call(call) => call.node_id,
+            AstExprKind::Path(field_access) => field_access.node_id,
+            AstExprKind::ImplicitPath(implicit_field_access) => implicit_field_access.node_id, // AstExprKind::ForcedTry(forced_try) => forced_try.node_id,
         }
     }
 }
@@ -508,6 +540,64 @@ pub enum AstExprKind {
     Literal(AstLiteral),
     Ident(AstIdent),
     Call(AstCallExpr),
+    Path(AstPathExpr),
+    ImplicitPath(AstImplicitPathExpr),
+    // ForcedTry(AstForcedTryExpr),
+}
+
+#[derive(Debug, Clone)]
+pub struct AstPathExpr {
+    pub node_id: NodeId,
+    pub base: Box<AstPath>,
+    pub field: AstIdent,
+}
+
+impl Display for AstPathExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}::{}", self.base, self.field)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum AstPath {
+    Path(AstPathExpr),
+    Ident(AstIdent),
+}
+
+impl AstPath {
+    pub fn node_id(&self) -> NodeId {
+        match self {
+            AstPath::Path(path_expr) => path_expr.node_id,
+            AstPath::Ident(ident) => ident.node_id,
+        }
+    }
+}
+
+impl Display for AstPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AstPath::Path(path_expr) => write!(f, "{}", path_expr),
+            AstPath::Ident(ident) => write!(f, "{}", ident),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AstImplicitPathExpr {
+    pub node_id: NodeId,
+    pub path: AstIdent,
+}
+
+#[derive(Debug, Clone)]
+pub struct AstForcedTryExpr {
+    pub node_id: NodeId,
+    pub expr: Box<AstCallExpr>,
+}
+
+impl Display for AstForcedTryExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "try! {}", self.expr)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -547,6 +637,12 @@ impl Display for AstExprKind {
             AstExprKind::Literal(literal) => write!(f, "{}", literal),
             AstExprKind::Ident(ident) => write!(f, "{}", ident),
             AstExprKind::Call(call) => write!(f, "{}", call),
+            AstExprKind::Path(field_access) => {
+                write!(f, "{}::{}", field_access.base, field_access.field)
+            }
+            AstExprKind::ImplicitPath(implicit_field_access) => {
+                write!(f, "::{}", implicit_field_access.path)
+            } // AstExprKind::ForcedTry(forced_try) => write!(f, "{}!", forced_try.expr),
         }
     }
 }

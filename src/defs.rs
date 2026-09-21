@@ -6,9 +6,8 @@ use thiserror::Error;
 
 use crate::{
     ast::{self, NodeId},
-    err::ErrorSetId,
     sourcemap::{DiagnoseWith, report::Diagnostic},
-    ty::{Ty, TyCtxt, TyKind},
+    ty::{Ty, TyCtxt, TyKind, res::Res, typeck::TypeError},
 };
 indexable_id!(pub DefId);
 
@@ -135,6 +134,12 @@ pub enum DefError {
     DuplicateImpl(String, NodeId, NodeId),
     #[error("error set not found: {0}")]
     ErrorSetNotFound(String),
+    #[error("unable to resolve type: {0}")]
+    TypeError(#[from] TypeError),
+    #[error("cannot find any type for the given path: {0}")]
+    PathNotFound(ast::AstPath, NodeId),
+    #[error("the given named type is invalid as a type: {0}")]
+    InvalidNamedType(String, NodeId),
 }
 
 impl DefError {
@@ -143,6 +148,9 @@ impl DefError {
         match self {
             DuplicateImpl(_, _, _) => Some(2001),
             ErrorSetNotFound(_) => Some(2002),
+            TypeError(err) => err.as_code(),
+            PathNotFound(_, _) => Some(2003),
+            InvalidNamedType(_, _) => Some(2004),
         }
     }
 }
@@ -169,6 +177,29 @@ impl DiagnoseWith<NodeId> for DefError {
             }
             ErrorSetNotFound(_name) => {
                 vec![Diagnostic::new(message).with_code(self.as_code())]
+            }
+            TypeError(err) => err
+                .diagnose_with(recorder)
+                .into_iter()
+                .map(|diagnostic| {
+                    diagnostic.with_help(Some(
+                        "this occured while resolving a function's types or parameters",
+                    ))
+                })
+                .collect(),
+            PathNotFound(path, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, format!("path not found: {path}")),
+                ]
+            }
+            InvalidNamedType(name, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, format!("invalid named type: {name}")),
+                ]
             }
         }
     }
@@ -275,5 +306,21 @@ fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Result<Ty
                 Some(set_id) => set_id,
             },
         ))),
+        ast::AstType::Path(path) => {
+            let Some(res) = tcx.resolve_path(path.clone())? else {
+                return Err(DefError::PathNotFound(path.clone(), path.node_id()));
+            };
+
+            match res {
+                Res::Local(..)
+                | Res::ConstraintOld(..)
+                | Res::ConstraintRet
+                | Res::Param(..)
+                | Res::Def(..)
+                | Res::EnumVariant(..)
+                | Res::Err(..) => Err(DefError::InvalidNamedType(path.to_string(), path.node_id())),
+                Res::Enum(enum_id) => Ok(tcx.ty(TyKind::Enum(enum_id))),
+            }
+        }
     }
 }

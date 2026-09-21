@@ -5,7 +5,8 @@ use thiserror::Error;
 use super::*;
 use crate::{
     ast::{
-        self, AstCheckConstraint, AstExpr, AstIdent, AstLetDecl, AstRequireConstraint, AstStmtKind,
+        self, AstExpr, AstGuardConstraint, AstIdent, AstImplicitPathExpr, AstLetDecl, AstPath,
+        AstPathExpr, AstRequireConstraint, AstStmtKind,
     },
     defs::{self, FuncSig},
     sourcemap::{DiagnoseWith, report::Diagnostic},
@@ -66,10 +67,16 @@ pub enum TypeError {
     NestedFallibleType(NodeId),
     #[error("fallible types may not yet be stored")]
     FallibleTypesNotYetStored(NodeId),
+    #[error("the given type can not have namespace members")]
+    TypeHasNoNamespaceMembers(NodeId),
+    #[error(
+        "unable to imply variant with the given information, or the expected type is not an enum"
+    )]
+    CannotImplyVariant(NodeId),
 }
 
 impl TypeError {
-    fn as_code(&self) -> Option<usize> {
+    pub fn as_code(&self) -> Option<usize> {
         use TypeError::*;
         match self {
             UnresolvableType(..) => Some(1001),
@@ -98,6 +105,8 @@ impl TypeError {
             ErrorInInfallibleFunction(..) => Some(1024),
             NestedFallibleType(..) => Some(1025),
             FallibleTypesNotYetStored(..) => Some(1026),
+            TypeHasNoNamespaceMembers(..) => Some(1027),
+            CannotImplyVariant(..) => Some(1028),
         }
     }
 }
@@ -394,6 +403,30 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_help(Some("storing fallible types is not yet supported")),
                 ]
             }
+            TypeHasNoNamespaceMembers(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("this expression attempts to resolve a member of an object that has none"),
+                        )
+                        .with_help(Some("did you mean to target the variant of an enum?")),
+                ]
+            }
+            CannotImplyVariant(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("this expression attempts to imply a variant of an enum, but the type is not an enum"),
+                        )
+                        .with_help(Some("only variants of enums can be implied with the ::variant syntax")),
+                ]
+            }
         }
     }
 }
@@ -496,6 +529,35 @@ impl ConstraintType {
     }
 }
 
+// temp just to hold
+enum Resolvable {
+    Ident(AstIdent),
+    Path(AstPathExpr),
+    ImpliedPath(AstImplicitPathExpr),
+}
+
+pub trait AsResolvable {
+    fn as_resolvable(&self) -> Resolvable;
+}
+
+impl AsResolvable for AstIdent {
+    fn as_resolvable(&self) -> Resolvable {
+        Resolvable::Ident(self.clone())
+    }
+}
+
+impl AsResolvable for AstPathExpr {
+    fn as_resolvable(&self) -> Resolvable {
+        Resolvable::Path(self.clone())
+    }
+}
+
+impl AsResolvable for AstImplicitPathExpr {
+    fn as_resolvable(&self) -> Resolvable {
+        Resolvable::ImpliedPath(self.clone())
+    }
+}
+
 struct TypeckCtxt<'c> {
     next_id: usize,
     next_param_id: usize,
@@ -506,6 +568,8 @@ struct TypeckCtxt<'c> {
     current_scope_ids: Vec<ScopeId>,
     inside_loop: bool,
     inside_constraint: Option<ConstraintType>,
+    inferrable_tys: Vec<Option<Ty>>,
+    // inside_try: bool,
     body: BodyInfo,
     errors: Vec<TypeError>,
 
@@ -529,6 +593,7 @@ impl<T> Reported for Result<T, TypeError> {
         }
     }
 }
+
 indexable_id!(pub ScopeId);
 impl_next_id!(TypeckCtxt<'c>.next_id -> LocalId);
 impl_next_id!(TypeckCtxt<'c>.next_param_id -> ParamId, next_param_id);
@@ -548,10 +613,33 @@ impl<'c> TypeckCtxt<'c> {
             errors: Vec::new(),
             inside_loop: false,
             inside_constraint: None,
+            inferrable_tys: Vec::new(),
             func_node_id: ast::NodeId::new(0),
             current_scope_ids: Vec::new(),
             return_node_id: None,
         }
+    }
+
+    fn is_inferrable_ty(&self) -> bool {
+        self.inferrable_tys.last().is_some()
+    }
+
+    fn inferrable_ty(&self) -> Option<Ty> {
+        self.inferrable_tys.last().cloned().unwrap_or(None)
+    }
+
+    fn begin_inferrable_ty(&mut self, ty: Option<Ty>) -> usize {
+        self.inferrable_tys.push(ty);
+        self.inferrable_tys.len() - 1
+    }
+
+    fn end_inferrable_ty(&mut self, idx: usize) {
+        debug_assert_eq!(
+            idx,
+            self.inferrable_tys.len() - 1,
+            "end_inferrable_ty called out of order"
+        );
+        self.inferrable_tys.pop();
     }
 
     fn new_with_func_sig(
@@ -614,12 +702,7 @@ impl<'c> TypeckCtxt<'c> {
                 // prefer locals and params.
                 s.get(name).cloned()
             })
-            .or_else(|| {
-                self.tcx
-                    .defs
-                    .resolve_name(name)
-                    .map(|def_id| Res::Def(def_id))
-            })
+            .or_else(|| self.tcx.resolve_single_path(name))
     }
 
     fn res_ty(&self, res: &Res) -> Option<Ty> {
@@ -634,6 +717,8 @@ impl<'c> TypeckCtxt<'c> {
             Res::ConstraintOld(res) => self.body.old_ty(*res),
             Res::ConstraintRet => Some(self.body.return_ty.clone()),
             Res::Param(param_id) => self.body.param_ty(*param_id),
+            Res::Enum(enum_id) => Some(self.ty(TyKind::Enum(*enum_id))),
+            Res::EnumVariant(enum_variant) => Some(self.ty(TyKind::Enum(enum_variant.enum_id()))),
             Res::Err(..) => None,
         }
     }
@@ -761,12 +846,12 @@ fn typeck_pre_constraint(
                 typeck_constraint_condition(tccx, ConstraintType::Pre(*node_id), condition)
                     .reported(tccx)?;
             }
-            ast::AstConstraint::Check(AstCheckConstraint {
+            ast::AstConstraint::Guard(AstGuardConstraint {
                 node_id,
                 condition,
                 error_name,
             }) => {
-                typeck_check_constraint_error(tccx, *node_id, error_name).reported(tccx)?;
+                typeck_guard_constraint_error(tccx, *node_id, error_name).reported(tccx)?;
                 typeck_constraint_condition(tccx, ConstraintType::Pre(*node_id), condition)
                     .reported(tccx)?;
             }
@@ -778,7 +863,7 @@ fn typeck_pre_constraint(
     Ok(())
 }
 
-fn typeck_check_constraint_error(
+fn typeck_guard_constraint_error(
     tccx: &mut TypeckCtxt,
     node_id: NodeId,
     error_name: &str,
@@ -823,7 +908,7 @@ fn typeck_post_constraint(
     for constraint in constraints {
         match constraint {
             // pre_constraint
-            ast::AstConstraint::Require(..) | ast::AstConstraint::Check(..) => {}
+            ast::AstConstraint::Require(..) | ast::AstConstraint::Guard(..) => {}
             ast::AstConstraint::Ensure(ens_cstrt) => {
                 typeck_constraint_condition(
                     tccx,
@@ -1124,6 +1209,10 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
         },
         (None, ast::AstExprKind::Binary(bin_expr)) => typeck_binary_expr(tccx, &bin_expr),
         (None, ast::AstExprKind::Call(call_expr)) => typeck_call_expr(tccx, &call_expr),
+        (None, ast::AstExprKind::Path(path_expr)) => typeck_path_expr(tccx, path_expr),
+        (None, ast::AstExprKind::ImplicitPath(impl_path_expr)) => {
+            typeck_implicit_path_expr(tccx, impl_path_expr)
+        }
     }?;
 
     tccx.body.set_node_ty(expr.node_id(), ty.clone());
@@ -1188,6 +1277,41 @@ fn typeck_constraint_expr(
     Ok(None)
 }
 
+fn typeck_path_expr(tccx: &mut TypeckCtxt, path_expr: &ast::AstPathExpr) -> Result<Ty, TypeError> {
+    let res = tccx
+        .tcx
+        .resolve_path_expr(path_expr.clone())?
+        .ok_or_else(|| TypeError::CannotResolve(path_expr.field.text.clone(), path_expr.node_id))?;
+
+    let ty = tccx.res_ty(&res).ok_or_else(|| {
+        TypeError::UnresolvableType(path_expr.field.text.clone(), path_expr.node_id)
+    })?;
+
+    tccx.body.set_node_res(path_expr.node_id, res);
+    Ok(ty)
+}
+
+fn typeck_implicit_path_expr(
+    tccx: &mut TypeckCtxt,
+    impl_path_expr: &ast::AstImplicitPathExpr,
+) -> Result<Ty, TypeError> {
+    let expected = tccx
+        .inferrable_ty()
+        .ok_or_else(|| TypeError::CannotImplyVariant(impl_path_expr.node_id))?;
+
+    let res = tccx
+        .tcx
+        .resolve_implicit_path_expr(impl_path_expr.clone(), expected.clone())?
+        .ok_or_else(|| TypeError::CannotImplyVariant(impl_path_expr.node_id))?;
+
+    let ty = tccx.res_ty(&res).ok_or_else(|| {
+        TypeError::UnresolvableType(impl_path_expr.path.text.clone(), impl_path_expr.node_id)
+    })?;
+
+    tccx.body.set_node_res(impl_path_expr.node_id, res);
+    Ok(ty)
+}
+
 fn typeck_call_expr(tccx: &mut TypeckCtxt, call_expr: &ast::AstCallExpr) -> Result<Ty, TypeError> {
     let func_ty = typeck_expr(tccx, &call_expr.callee)?;
     let TyKind::Func(sig) = func_ty.kind.as_ref() else {
@@ -1205,7 +1329,9 @@ fn typeck_call_expr(tccx: &mut TypeckCtxt, call_expr: &ast::AstCallExpr) -> Resu
 
     // Ensure args match
     for (i, (arg, param_ty)) in args.iter().zip(sig.param_tys.iter()).enumerate() {
+        let ity = tccx.begin_inferrable_ty(Some(param_ty.clone()));
         let arg_ty = typeck_expr(tccx, arg)?;
+        tccx.end_inferrable_ty(ity);
         if arg_ty != *param_ty {
             return Err(TypeError::IncorrectArgumentType(
                 param_ty.clone(),

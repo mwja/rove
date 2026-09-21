@@ -2,10 +2,14 @@ use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
 
 use crate::{
     arena::Store,
-    ast::NodeId,
+    ast::{AstImplicitPathExpr, AstPath, AstPathExpr, NodeId},
     defs::{DefId, Defs, FuncSig},
+    enums::{EnumId, Enums},
     err::{ErrorSetCtxt, ErrorSetId, ErrorSets},
-    ty::typeck::BodyInfo,
+    ty::{
+        res::Res,
+        typeck::{BodyInfo, TypeError},
+    },
 };
 
 pub mod debug;
@@ -64,6 +68,8 @@ pub enum TyKind {
     Func(FuncSig),
     /// Error union
     Fallible(Ty, ErrorSetId),
+    /// Variant of the given enum
+    Enum(EnumId),
 }
 
 impl From<Ty> for Rc<TyKind> {
@@ -88,7 +94,8 @@ impl Display for TyKind {
                     .join(", "),
                 sig.return_ty
             ),
-            TyKind::Fallible(ty, _) => write!(f, "error!{}", ty),
+            TyKind::Fallible(ty, _) => write!(f, "!{}", ty),
+            TyKind::Enum(enum_id) => write!(f, "enum_variant({})", enum_id),
         }
     }
 }
@@ -110,6 +117,7 @@ pub struct TyCtxt {
     /// Not initially populated with data until the resolve pass occurs.
     pub defs: Defs,
     pub errs: ErrorSets,
+    pub enums: Enums,
 }
 
 impl TyCtxt {
@@ -142,12 +150,90 @@ impl TyCtxt {
         self.ty(TyKind::Float)
     }
 
+    pub fn resolve_single_path(&self, name: &str) -> Option<Res> {
+        self.defs
+            .resolve_name(name)
+            .map(|def_id| Res::Def(def_id))
+            .or_else(|| {
+                self.enums
+                    .resolve_name(name)
+                    .map(|enum_id| Res::Enum(enum_id))
+            })
+    }
+
+    pub fn resolve_path(&self, path: AstPath) -> Result<Option<Res>, TypeError> {
+        match path {
+            AstPath::Path(path) => self.resolve_path_expr(path),
+            AstPath::Ident(ident) => Ok(self.resolve_single_path(&ident.text)),
+        }
+    }
+
+    pub fn resolve_path_expr(&self, path: AstPathExpr) -> Result<Option<Res>, TypeError> {
+        let base = self.resolve_path(*path.base)?;
+
+        if base.is_none() {
+            return Ok(None);
+        }
+
+        match base.unwrap() {
+            Res::Local(..)
+            | Res::ConstraintOld(..)
+            | Res::ConstraintRet
+            | Res::Param(..)
+            | Res::Def(..)
+            | Res::EnumVariant(..)
+            | Res::Err(..) => Err(TypeError::TypeHasNoNamespaceMembers(path.node_id)),
+            Res::Enum(enum_id) => {
+                let enum_ = match self.enums.get_enum(enum_id) {
+                    Some(enum_) => enum_,
+                    None => return Ok(None),
+                };
+
+                match enum_.get_variant_by_name(&path.field.text) {
+                    None => Ok(None),
+                    Some(variant) => Ok(Some(Res::EnumVariant(variant))),
+                }
+            }
+        }
+    }
+
+    pub fn resolve_implicit_path_expr(
+        &self,
+        path: AstImplicitPathExpr,
+        expected: Ty,
+    ) -> Result<Option<Res>, TypeError> {
+        let base = match *expected.kind {
+            TyKind::Enum(enum_id) => Res::Enum(enum_id),
+            TyKind::Fallible(..)
+            | TyKind::Float
+            | TyKind::Int
+            | TyKind::Void
+            | TyKind::Func(..) => return Err(TypeError::CannotImplyVariant(path.node_id)),
+        };
+
+        match base {
+            Res::Enum(enum_id) => {
+                let enum_ = match self.enums.get_enum(enum_id) {
+                    Some(enum_) => enum_,
+                    None => return Ok(None),
+                };
+
+                match enum_.get_variant_by_name(&path.path.text) {
+                    None => Ok(None),
+                    Some(variant) => Ok(Some(Res::EnumVariant(variant))),
+                }
+            }
+            _ => Err(TypeError::CannotImplyVariant(path.node_id)),
+        }
+    }
+
     pub fn new() -> Self {
         Self {
             arena: RefCell::new(Store::new()),
             bodies: HashMap::new(),
             defs: Defs::default(),
             errs: ErrorSets::default(),
+            enums: Enums::default(),
         }
     }
 
