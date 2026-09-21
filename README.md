@@ -13,9 +13,28 @@ project - hence the 'aimless' aspect of it.
 Also because it makes me think of romp and raft (both words for groups of otters
 and my first failed attempt at a language was called Otter).
 
+## Steps towards full language-hood
+
+- [x] Type checker
+- [x] Functions
+- [x] If/else
+- [x] Loops
+- [x] Constraints (guard, require, ensure)
+- [x] Enums
+- [x] Errors (about to be reworked into proper `throw` mechanics.)
+- [ ] Heap allocation
+- [ ] Structs
+    - [ ] Field access
+- [ ] ARC memory management
+- [ ] Defer/errdefer
+- [ ] Managed/unmanaged strings
+- [ ] Arrays
+- [ ] Generics
+- [ ] Custom linking with C libs
+
 ## Use
 
-Rove is a very young language. For now it still depends on a Rust-based set of 
+Rove is a very young language. For now it still depends on a Rust-based set of
 runtime helpers. The goal is to eventually weed of this, and even re-write this
 compiler in this language.
 

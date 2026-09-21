@@ -1093,10 +1093,15 @@ fn typeck_implicit_return(
 }
 
 fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Result<(), TypeError> {
+    let ity = tccx.begin_inferrable_ty(Some(tccx.body.return_ty.clone()));
     let return_ty = return_stmt
         .expr
         .as_ref()
-        .map(|expr| typeck_expr(tccx, expr))
+        .map(|expr| {
+            let res = typeck_expr(tccx, expr);
+            tccx.end_inferrable_ty(ity);
+            res
+        })
         .map_or(Ok(None), |v| v.map(Some))?
         .map(|ty| ty.as_infallible()); // returns always follow success path.
 
