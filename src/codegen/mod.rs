@@ -8,8 +8,9 @@ use cranelift::{
     codegen::{
         cfg_printer::CFGPrinter,
         ir::{
-            AbiParam, Block, BlockArg, FuncRef, InstBuilder, SigRef, Signature, SourceLoc,
-            StackSlotData, StackSlotKind, TrapCode, Type, UserExternalName, Value,
+            AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTable, JumpTableData,
+            SigRef, Signature, SourceLoc, StackSlotData, StackSlotKind, TrapCode, Type,
+            UserExternalName, Value,
             condcodes::{FloatCC, IntCC},
             types,
         },
@@ -339,6 +340,7 @@ pub fn generate_object(
             current_scope: None,
             scope_frames: HashMap::new(),
             loops: Vec::new(),
+            switches: Vec::new(),
             fn_name: func_def.name.clone(),
             cx,
             rcx,
@@ -379,15 +381,18 @@ pub enum ExitKind {
     Break,
     Return,
     Error,
+    /// fallthrough for SWITCHES.
+    Fallthrough,
 }
 impl ExitKind {
-    const COUNT: usize = 4;
+    const COUNT: usize = 5;
     fn idx(self) -> usize {
         match self {
             ExitKind::Continue => 0,
             ExitKind::Break => 1,
             ExitKind::Return => 2,
             ExitKind::Error => 3,
+            ExitKind::Fallthrough => 4,
         }
     }
 }
@@ -401,6 +406,14 @@ struct ScopeFrame {
 struct LoopInfo {
     scope: ScopeId,
     header: Block,
+    exit: Block,
+}
+
+struct SwitchInfo {
+    scope: ScopeId,
+    current_block: Block,
+    // index 0 is next block, index 1 is one after next, etc.
+    upcoming_block: Option<Block>,
     exit: Block,
 }
 
@@ -432,6 +445,7 @@ struct CraneliftCodegen<'a, 'o> {
     current_scope: Option<ScopeId>,
     scope_frames: HashMap<ScopeId, ScopeFrame>,
     loops: Vec<LoopInfo>,
+    switches: Vec<SwitchInfo>,
     cx: CompilerCtxt<'o>,
     rcx: ReprCx,
 
@@ -531,6 +545,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 ExitKind::Break,
                 ExitKind::Return,
                 ExitKind::Error,
+                ExitKind::Fallthrough,
             ]
             .into_iter()
             .filter_map(|k| frame.links[k.idx()].map(|b| (k, b)))
@@ -968,7 +983,130 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstStmtKind::While(while_) => self.lower_gen_loop(while_.body, Some(*while_.cond)),
             ast::AstStmtKind::Break(_) => self.lower_break_stmt(),
             ast::AstStmtKind::Continue(_) => self.lower_continue_stmt(),
+            ast::AstStmtKind::Fallthrough(_) => self.lower_fallthrough_stmt(),
+            ast::AstStmtKind::Switch(switch_stmt) => self.lower_switch_stmt(switch_stmt),
         };
+    }
+
+    fn lower_switch_stmt(&mut self, switch_stmt: ast::AstSwitchStmt) {
+        let base_value = self.lower_expr(*switch_stmt.expr.clone());
+
+        let (_, else_, cases) = switch_stmt.consume();
+        let (cases, bodies) = cases
+            .into_iter()
+            .map(|case| (case, self.builder.create_block()))
+            .unzip::<_, _, Vec<_>, Vec<_>>();
+        let else_block = else_.as_ref().map(|_| self.builder.create_block());
+        let exit_block = self.builder.create_block();
+
+        // for each condition, evaluate then jump to the jumping block with the
+        // right index.
+        // it accepts an i32 of the index, as required by br_table.
+        let switch_landing_pad = self.builder.create_block();
+        self.builder
+            .append_block_param(switch_landing_pad, types::I32);
+
+        let jump_table = {
+            let exit_block_call = self.builder.func.dfg.block_call(exit_block, &[]);
+            let else_block_call = else_block.map(|b| self.builder.func.dfg.block_call(b, &[]));
+            let block_calls = bodies
+                .iter()
+                .map(|block| self.builder.func.dfg.block_call(*block, &[]))
+                .collect::<Vec<_>>();
+
+            self.builder.func.create_jump_table(JumpTableData::new(
+                else_block_call.unwrap_or(exit_block_call),
+                &block_calls,
+            ))
+        };
+
+        // an idx we know will trigger the default case
+        let safe_default_idx = self.builder.ins().iconst(types::I32, cases.len() as i64);
+
+        // for each condition, make another block that then branches to the
+        // switch landing pad.
+        let check_blocks = cases
+            .iter()
+            .map(|_| self.builder.create_block())
+            .collect::<Vec<_>>();
+        for (idx, case) in cases.iter().enumerate() {
+            let block = check_blocks[idx];
+            self.fallthrough_to(block);
+            self.builder.switch_to_block(block);
+            let value = self.lower_expr(*case.expr.clone());
+            // check equality, insert a fake astnode for the condition
+            let condition = self.lower_cond_direct(
+                self.cx.body.node_ty(case.expr.node_id()).unwrap(),
+                base_value.expect_scalar("switch target must be scalar"),
+                value.expect_scalar("switch case must be scalar"),
+                self.cx.tcx.int_ty(),
+                ast::AstBinaryOperator::Eq,
+            );
+            let idx_val = self.builder.ins().iconst(types::I32, idx as i64);
+            let (fallback_target, fallback_params) = check_blocks
+                .get(idx + 1)
+                .map(|b| (*b, None))
+                .unwrap_or_else(|| (switch_landing_pad, Some(BlockArg::Value(safe_default_idx))));
+            self.builder.ins().brif(
+                condition,
+                switch_landing_pad,
+                &[BlockArg::Value(idx_val)],
+                fallback_target,
+                fallback_params
+                    .as_ref()
+                    .map(|p| std::slice::from_ref(p))
+                    .unwrap_or(&[]),
+            );
+            self.builder.seal_block(block);
+        }
+
+        // above we fell through to the different blocks, now let's make the switch landing pad.
+        self.fallthrough_to(switch_landing_pad);
+        self.builder.switch_to_block(switch_landing_pad);
+        self.builder.seal_block(switch_landing_pad);
+
+        let idx = self.builder.block_params(switch_landing_pad)[0];
+        self.builder.ins().br_table(idx, jump_table);
+
+        // then for each case_block, we should just execute the statements then
+        // jump to the exit block.
+        for (idx, (body, block)) in cases.into_iter().zip(bodies.iter()).enumerate() {
+            self.builder.switch_to_block(*block);
+            let scope_id = self
+                .cx
+                .body
+                .node_scope(body.body.node_id)
+                .expect("node scope not found");
+            self.switches.push(SwitchInfo {
+                scope: scope_id,
+                current_block: *block,
+                upcoming_block: bodies.get(idx + 1).copied().or(else_block),
+                exit: exit_block,
+            });
+            self.lower_block_stmt(body.body);
+            self.switches.pop();
+            if !self.is_current_block_terminated() {
+                self.builder.ins().jump(exit_block, &[]);
+            }
+            self.builder.seal_block(*block);
+        }
+
+        if let (Some(else_), Some(else_block)) = (else_, else_block) {
+            self.builder.switch_to_block(else_block);
+            self.lower_block_stmt(else_.body);
+            if !self.is_current_block_terminated() {
+                self.builder.ins().jump(exit_block, &[]);
+            }
+            self.builder.seal_block(else_block);
+        }
+
+        self.builder.seal_block(exit_block);
+        self.builder.switch_to_block(exit_block);
+    }
+
+    fn lower_fallthrough_stmt(&mut self) {
+        let dest = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Fallthrough);
+        self.builder.ins().jump(dest, &[]);
     }
 
     fn lower_break_stmt(&mut self) {
@@ -988,7 +1126,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         match kind {
             ExitKind::Return => self.rcx.success_repr_of(&self.cx.body.return_ty),
             ExitKind::Error => Repr::Scalar(types::I32),
-            ExitKind::Continue | ExitKind::Break => Repr::Empty,
+            ExitKind::Continue | ExitKind::Break | ExitKind::Fallthrough => Repr::Empty,
         }
     }
 
@@ -1009,15 +1147,22 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
     fn locate_cleanup_target(&mut self, scope_id: ScopeId, kind: ExitKind) -> Block {
         let parent = self.frame(scope_id).parent;
-        let innermost = self.loops.last();
+        let innermost_loop = self.loops.last();
+        let innermost_switch = self.switches.last();
         match kind {
-            ExitKind::Continue if innermost.is_some_and(|l| l.scope == scope_id) => {
-                innermost.unwrap().header
+            ExitKind::Continue if innermost_loop.is_some_and(|l| l.scope == scope_id) => {
+                innermost_loop.unwrap().header
             }
-            ExitKind::Break if innermost.is_some_and(|l| l.scope == scope_id) => {
-                innermost.unwrap().exit
+            ExitKind::Break if innermost_loop.is_some_and(|l| l.scope == scope_id) => {
+                innermost_loop.unwrap().exit
             }
-            ExitKind::Continue | ExitKind::Break => match parent {
+            ExitKind::Fallthrough if innermost_switch.is_some_and(|s| s.scope == scope_id) => {
+                innermost_switch
+                    .unwrap()
+                    .upcoming_block
+                    .expect("impossible to fallthrough with no next block (typeck checks)")
+            }
+            ExitKind::Continue | ExitKind::Break | ExitKind::Fallthrough => match parent {
                 Some(parent) => self.cleanup_block(parent, kind),
                 None => unreachable!("continue/break outside of loop is rejected by typeck"),
             },
@@ -1377,20 +1522,16 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.lower_value_res(res)
     }
 
-    fn lower_bin_expr(&mut self, expr: ast::AstExpr) -> Value {
-        let ast::AstExprKind::Binary(bin_expr) = expr.kind else {
-            unreachable!()
-        };
-        let x_ty = self.cx.body.node_ty(bin_expr.left.node_id()).unwrap();
-        let x = self
-            .lower_expr(*bin_expr.left)
-            .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
-        let y = self
-            .lower_expr(*bin_expr.right)
-            .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
-
-        let res_ty = self.cx.body.node_ty(bin_expr.node_id).unwrap();
-        match bin_expr.operator {
+    /// Use only if you need to check a condition yourself
+    fn lower_cond_direct(
+        &mut self,
+        x_ty: Ty,
+        x: Value,
+        y: Value,
+        res_ty: Ty,
+        operator: ast::AstBinaryOperator,
+    ) -> Value {
+        match operator {
             // later on we will typecheck this beforehand, as x could be a string.
             ast::AstBinaryOperator::Add => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().iadd(x, y),
@@ -1428,7 +1569,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 // use left hand side type, cmp always returns i8 that we extend after.
                 let res = match x_ty.kind() {
                     TyKind::Int => self.builder.ins().icmp(
-                        match bin_expr.operator {
+                        match operator {
                             ast::AstBinaryOperator::Eq => IntCC::Equal,
                             ast::AstBinaryOperator::Ne => IntCC::NotEqual,
                             ast::AstBinaryOperator::Gt => IntCC::SignedGreaterThan,
@@ -1441,7 +1582,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                         y,
                     ),
                     TyKind::Float => self.builder.ins().fcmp(
-                        match bin_expr.operator {
+                        match operator {
                             ast::AstBinaryOperator::Eq => FloatCC::Equal,
                             ast::AstBinaryOperator::Ne => FloatCC::NotEqual,
                             ast::AstBinaryOperator::Gt => FloatCC::GreaterThan,
@@ -1454,7 +1595,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                         y,
                     ),
                     TyKind::Enum(..) => self.builder.ins().icmp(
-                        match bin_expr.operator {
+                        match operator {
                             ast::AstBinaryOperator::Eq => IntCC::Equal,
                             ast::AstBinaryOperator::Ne => IntCC::NotEqual,
                             ast::AstBinaryOperator::Gt => IntCC::UnsignedGreaterThan,
@@ -1474,6 +1615,22 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.builder.ins().sextend(types::I64, res)
             }
         }
+    }
+
+    fn lower_bin_expr(&mut self, expr: ast::AstExpr) -> Value {
+        let ast::AstExprKind::Binary(bin_expr) = expr.kind else {
+            unreachable!()
+        };
+        let x_ty = self.cx.body.node_ty(bin_expr.left.node_id()).unwrap();
+        let x = self
+            .lower_expr(*bin_expr.left)
+            .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
+        let y = self
+            .lower_expr(*bin_expr.right)
+            .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
+
+        let res_ty = self.cx.body.node_ty(bin_expr.node_id).unwrap();
+        self.lower_cond_direct(x_ty, x, y, res_ty, bin_expr.operator)
     }
 
     fn lower_lit(&mut self, expr: ast::AstExpr) -> Value {

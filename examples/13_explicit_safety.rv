@@ -1,9 +1,9 @@
-error PurchaseError {
-  StockExhausted
+enum PurchaseError {
+  exhausted
 }
 
 func make_purchase(wallet: int, price: int, remaining_stock: int) throws PurchaseError -> int
-  guard StockExhausted if remaining_stock > 0 // remaining stock must be greater than zero
+  guard ::exhausted if remaining_stock > 0 // remaining stock must be greater than zero
   require! enough_money: wallet >= price // wallet must have enough money to cover the price
   ensure! result_correct: ret == wallet - price // price is deducted from wallet
 {

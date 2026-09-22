@@ -159,7 +159,45 @@ mod grammar {
             #[rust_sitter::leaf(text = "continue")] Spanned<()>,
             #[rust_sitter::leaf(text = ";")] (),
         ),
+        Fallthrough(
+            #[rust_sitter::leaf(text = "fallthrough")] Spanned<()>,
+            #[rust_sitter::leaf(text = ";")] (),
+        ),
+        Switch(Spanned<SwitchStmt>),
         Return(Spanned<ReturnStmt>, #[rust_sitter::leaf(text = ";")] ()),
+    }
+
+    pub struct SwitchStmt {
+        #[rust_sitter::leaf(text = "switch")]
+        pub _switch: (),
+        pub expr: Box<Spanned<Expr>>,
+        #[rust_sitter::leaf(text = "{")]
+        pub _l: (),
+        pub cases: Vec<Spanned<SwitchCase>>,
+        #[rust_sitter::leaf(text = "}")]
+        pub _r: (),
+    }
+
+    pub enum SwitchCase {
+        Case(Spanned<Case>),
+        Else(Spanned<ElseCase>),
+    }
+
+    pub struct Case {
+        #[rust_sitter::leaf(text = "case")]
+        _case: (),
+        pub expr: Box<Spanned<Expr>>,
+        #[rust_sitter::leaf(text = "=>")]
+        _bar: (),
+        pub body: Spanned<BlockStmt>,
+    }
+
+    pub struct ElseCase {
+        #[rust_sitter::leaf(text = "else")]
+        pub _else: (),
+        #[rust_sitter::leaf(text = "=>")]
+        _bar: (),
+        pub body: Spanned<BlockStmt>,
     }
 
     pub struct ReturnStmt {
@@ -647,8 +685,43 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Stmt::Loop(loop_) => ast::AstStmtKind::Loop(self.lower_loop_stmt(loop_)),
             grammar::Stmt::While(while_) => ast::AstStmtKind::While(self.lower_while_stmt(while_)),
             grammar::Stmt::Break(v, _) => ast::AstStmtKind::Break(self.lower_break_stmt(v)),
+            grammar::Stmt::Fallthrough(v, _) => {
+                ast::AstStmtKind::Fallthrough(self.lower_fallthrough_stmt(v))
+            }
             grammar::Stmt::Continue(v, _) => {
                 ast::AstStmtKind::Continue(self.lower_continue_stmt(v))
+            }
+            grammar::Stmt::Switch(switch) => {
+                ast::AstStmtKind::Switch(self.lower_switch_stmt(switch))
+            }
+        }
+    }
+
+    fn lower_switch_stmt(&mut self, switch: Spanned<grammar::SwitchStmt>) -> ast::AstSwitchStmt {
+        ast::AstSwitchStmt {
+            node_id: self.next_id_spanned(switch.span),
+            expr: Box::new(self.lower_expr(*switch.value.expr)),
+            cases: switch
+                .value
+                .cases
+                .into_iter()
+                .map(|case| self.lower_switch_case(case))
+                .collect(),
+        }
+    }
+
+    fn lower_switch_case(&mut self, case: Spanned<grammar::SwitchCase>) -> ast::AstSwitchCase {
+        match case.value {
+            grammar::SwitchCase::Case(case) => ast::AstSwitchCase::Case(ast::AstSwitchCaseItem {
+                node_id: self.next_id_spanned(case.span),
+                expr: Box::new(self.lower_expr(*case.value.expr)),
+                body: self.lower_block_stmt(case.value.body),
+            }),
+            grammar::SwitchCase::Else(else_case) => {
+                ast::AstSwitchCase::Else(ast::AstSwitchElseCase {
+                    node_id: self.next_id_spanned(else_case.span),
+                    body: self.lower_block_stmt(else_case.value.body),
+                })
             }
         }
     }
@@ -665,6 +738,12 @@ impl<'a> ProgramLowerer<'a> {
             node_id: self.next_id_spanned(while_stmt.span),
             cond: Box::new(self.lower_expr(*while_stmt.value.cond)),
             body: self.lower_block_stmt(while_stmt.value.body),
+        }
+    }
+
+    fn lower_fallthrough_stmt(&mut self, fallthrough_stmt: Spanned<()>) -> ast::AstFallthroughStmt {
+        ast::AstFallthroughStmt {
+            node_id: self.next_id_spanned(fallthrough_stmt.span),
         }
     }
 

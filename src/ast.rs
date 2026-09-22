@@ -246,7 +246,9 @@ impl AstStmt {
             AstStmtKind::While(while_stmt) => while_stmt.node_id,
             AstStmtKind::Break(break_stmt) => break_stmt.node_id,
             AstStmtKind::Continue(continue_stmt) => continue_stmt.node_id,
+            AstStmtKind::Fallthrough(fallthrough_stmt) => fallthrough_stmt.node_id,
             AstStmtKind::ImplicitReturn(expr) => expr.node_id(),
+            AstStmtKind::Switch(switch_stmt) => switch_stmt.node_id,
         }
     }
 
@@ -273,8 +275,10 @@ pub enum AstStmtKind {
     While(AstWhileStmt),
     Break(AstBreakStmt),
     Continue(AstContinueStmt),
+    Fallthrough(AstFallthroughStmt),
     Return(AstReturnStmt),
     ImplicitReturn(AstExpr),
+    Switch(AstSwitchStmt),
 }
 
 impl Display for AstStmtKind {
@@ -291,8 +295,137 @@ impl Display for AstStmtKind {
             AstStmtKind::While(while_stmt) => write!(f, "{};", while_stmt),
             AstStmtKind::Break(break_stmt) => write!(f, "{};", break_stmt),
             AstStmtKind::Continue(continue_stmt) => write!(f, "{};", continue_stmt),
+            AstStmtKind::Fallthrough(fallthrough_stmt) => write!(f, "{};", fallthrough_stmt),
             AstStmtKind::ImplicitReturn(expr) => write!(f, "{}", expr),
+            AstStmtKind::Switch(switch_stmt) => write!(f, "{}", switch_stmt),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct AstSwitchStmt {
+    pub node_id: NodeId,
+    pub expr: Box<AstExpr>,
+    pub cases: Vec<AstSwitchCase>,
+}
+
+impl AstSwitchStmt {
+    pub fn has_else(&self) -> bool {
+        self.cases
+            .iter()
+            .any(|case| matches!(case, AstSwitchCase::Else(_)))
+    }
+
+    pub fn else_case(&self) -> Option<&AstSwitchElseCase> {
+        self.cases.iter().find_map(|case| {
+            if let AstSwitchCase::Else(else_case) = case {
+                Some(else_case)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// Iterates only the real cases.
+    pub fn cases(&self) -> impl Iterator<Item = &AstSwitchCaseItem> {
+        self.cases.iter().filter_map(|case| {
+            if let AstSwitchCase::Case(case_item) = case {
+                Some(case_item)
+            } else {
+                None
+            }
+        })
+    }
+
+    pub fn consume(
+        self,
+    ) -> (
+        Box<AstExpr>,
+        Option<AstSwitchElseCase>,
+        Vec<AstSwitchCaseItem>,
+    ) {
+        let mut else_case = None;
+        let mut cases = Vec::new();
+
+        for case in self.cases {
+            match case {
+                AstSwitchCase::Case(case_item) => cases.push(case_item),
+                AstSwitchCase::Else(else_case_item) => {
+                    if else_case.is_some() {
+                        panic!("Multiple else cases in switch statement");
+                    }
+                    else_case = Some(else_case_item);
+                }
+            }
+        }
+
+        (self.expr, else_case, cases)
+    }
+}
+
+impl Display for AstSwitchStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(f, "switch {} {{", self.expr)?;
+        for case in &self.cases {
+            writeln!(f, "    {}", case)?;
+        }
+        write!(f, "}}")
+    }
+}
+
+#[derive(Debug)]
+pub enum AstSwitchCase {
+    Case(AstSwitchCaseItem),
+    Else(AstSwitchElseCase),
+}
+
+impl AstSwitchCase {
+    pub fn node_id(&self) -> NodeId {
+        match self {
+            AstSwitchCase::Case(case) => case.node_id,
+            AstSwitchCase::Else(else_case) => else_case.node_id,
+        }
+    }
+
+    pub fn body(&self) -> &AstBlockStmt {
+        match self {
+            AstSwitchCase::Case(case) => &case.body,
+            AstSwitchCase::Else(else_case) => &else_case.body,
+        }
+    }
+}
+
+impl Display for AstSwitchCase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AstSwitchCase::Case(case) => write!(f, "{}", case),
+            AstSwitchCase::Else(else_case) => write!(f, "{}", else_case),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct AstSwitchCaseItem {
+    pub node_id: NodeId,
+    pub expr: Box<AstExpr>,
+    pub body: AstBlockStmt,
+}
+
+impl Display for AstSwitchCaseItem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "case {}: {}", self.expr, self.body)
+    }
+}
+
+#[derive(Debug)]
+pub struct AstSwitchElseCase {
+    pub node_id: NodeId,
+    pub body: AstBlockStmt,
+}
+
+impl Display for AstSwitchElseCase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "else: {}", self.body)
     }
 }
 
@@ -329,6 +462,17 @@ pub struct AstBreakStmt {
 impl Display for AstBreakStmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "break")
+    }
+}
+
+#[derive(Debug)]
+pub struct AstFallthroughStmt {
+    pub node_id: NodeId,
+}
+
+impl Display for AstFallthroughStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "fallthrough")
     }
 }
 

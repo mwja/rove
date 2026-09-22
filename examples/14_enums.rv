@@ -13,7 +13,8 @@ func move(v: int, direction: VDirection) -> int {
 
 enum Boolean {
     false,
-    true
+    true,
+    maybe
 }
 
 func xor(left: Boolean, right: Boolean) -> Boolean {
@@ -33,6 +34,40 @@ func main() {
     let should_be_1 = xor(::true, ::false);
     let should_be_1_again = xor(::false, ::true);
     let should_be_0_again = xor(::false, ::false);
+
+    switch should_be_1 {
+        case ::false => {
+          print 0-100;
+        }
+
+        case ::true => {
+          print 100;
+          fallthrough;
+        }
+
+        else => {
+          print 6000;
+        }
+    }
+
+    switch v {
+        case 0 => {
+          print 0-101;
+        }
+
+        case 1 => {
+          print 0-102;
+          fallthrough;
+        }
+
+        case 0-1 => {
+          print 0-104;
+        }
+
+        else => {
+          print 0-103;
+        }
+    }
 
     print should_be_0;
     print should_be_1;

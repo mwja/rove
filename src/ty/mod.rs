@@ -30,8 +30,16 @@ impl Ty {
         matches!(*self.kind, TyKind::Int)
     }
 
+    pub fn is_enum(&self) -> bool {
+        matches!(*self.kind, TyKind::Enum(_))
+    }
+
     pub fn is_fallible(&self) -> bool {
         matches!(*self.kind, TyKind::Fallible(_, _))
+    }
+
+    pub fn has_value(&self) -> bool {
+        !matches!(*self.kind, TyKind::Void)
     }
 
     pub fn success_ty(&self) -> Option<&Ty> {

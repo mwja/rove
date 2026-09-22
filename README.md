@@ -21,7 +21,8 @@ and my first failed attempt at a language was called Otter).
 - [x] Loops
 - [x] Constraints (guard, require, ensure)
 - [x] Enums
-- [x] Errors (about to be reworked into proper `throw` mechanics.)
+- [x] Switch
+- [x] Errors (about to be reworked into proper `throw` mechanics once switches are available)
 - [ ] Heap allocation
 - [ ] Structs
     - [ ] Field access

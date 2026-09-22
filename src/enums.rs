@@ -63,6 +63,13 @@ impl Enum {
             .map(|i| EnumIndex(i as u32))
     }
 
+    pub fn variants(&self) -> impl Iterator<Item = EnumVariant> {
+        self.variants
+            .iter()
+            .enumerate()
+            .map(move |(i, _)| EnumVariant::new(self.id, EnumIndex(i as u32)))
+    }
+
     pub fn get_variant_by_name(&self, name: &str) -> Option<EnumVariant> {
         self.variant_index(name)
             .map(|index| EnumVariant::new(self.id, index))
@@ -71,6 +78,13 @@ impl Enum {
     pub fn get_variant_by_name_as_u32(&self, name: &str) -> Option<u32> {
         self.get_variant_by_name(name)
             .map(|variant| variant.as_u32())
+    }
+
+    pub fn name_of_variant(&self, variant: EnumVariant) -> Option<&str> {
+        if variant.enum_id() != self.id {
+            return None;
+        }
+        self.variant_name(variant.index())
     }
 }
 

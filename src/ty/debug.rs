@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use super::Ty;
 use crate::{
-    ast,
+    ast::{self, AstSwitchCase, AstSwitchCaseItem, AstSwitchElseCase},
     ty::{TyCtxt, typeck::BodyInfo},
 };
 
@@ -95,6 +95,45 @@ fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
         ast::AstStmtKind::While(while_stmt) => display_while(body, while_stmt),
         ast::AstStmtKind::Break(break_stmt) => display_break(body, break_stmt),
         ast::AstStmtKind::Continue(continue_stmt) => display_continue(body, continue_stmt),
+        ast::AstStmtKind::Fallthrough(fallthrough_stmt) => {
+            display_fallthrough(body, fallthrough_stmt)
+        }
+        ast::AstStmtKind::Switch(switch_stmt) => display_switch(body, switch_stmt),
+    }
+}
+
+fn display_switch(body: &BodyInfo, switch_stmt: &ast::AstSwitchStmt) -> String {
+    let mut out = format!(
+        "switch {} {{ // switch {} {{\n",
+        switch_stmt.expr,
+        annotate_expr(body, &switch_stmt.expr)
+    );
+    for case in &switch_stmt.cases {
+        out.push_str(display_switch_case(body, case).as_str());
+    }
+    out.push('}');
+    out
+}
+
+fn display_switch_case(body: &BodyInfo, case: &ast::AstSwitchCase) -> String {
+    match case {
+        ast::AstSwitchCase::Case(AstSwitchCaseItem {
+            body: block_body,
+            expr,
+            ..
+        }) => {
+            let mut out = format!("case {}: // case {}:\n", expr, annotate_expr(body, expr));
+            out.push_str(&display_block(body, block_body));
+
+            out
+        }
+        ast::AstSwitchCase::Else(AstSwitchElseCase {
+            body: block_body, ..
+        }) => {
+            let mut out = format!("default: // default:\n");
+            out.push_str(&display_block(body, block_body));
+            out
+        }
     }
 }
 
@@ -113,6 +152,10 @@ fn display_loop(body: &BodyInfo, loop_stmt: &ast::AstLoopStmt) -> String {
 
 fn display_break(body: &BodyInfo, break_stmt: &ast::AstBreakStmt) -> String {
     break_stmt.to_string()
+}
+
+fn display_fallthrough(body: &BodyInfo, fallthrough_stmt: &ast::AstFallthroughStmt) -> String {
+    fallthrough_stmt.to_string()
 }
 
 fn display_continue(body: &BodyInfo, continue_stmt: &ast::AstContinueStmt) -> String {

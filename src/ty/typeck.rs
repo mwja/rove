@@ -6,7 +6,8 @@ use super::*;
 use crate::{
     ast::{
         self, AstExpr, AstGuardConstraint, AstIdent, AstImplicitPathExpr, AstLetDecl, AstPath,
-        AstPathExpr, AstRequireConstraint, AstStmtKind,
+        AstPathExpr, AstRequireConstraint, AstStmtKind, AstSwitchCase, AstSwitchCaseItem,
+        AstSwitchElseCase,
     },
     defs::{self, FuncSig},
     sourcemap::{DiagnoseWith, report::Diagnostic},
@@ -73,6 +74,20 @@ pub enum TypeError {
         "unable to imply variant with the given information, or the expected type is not an enum"
     )]
     CannotImplyVariant(NodeId),
+    #[error("switch branches must be exhaustive")]
+    NonExhaustiveSwitch(NodeId, Ty, Option<String>),
+    #[error("switch targets must have a value")]
+    SwitchTargetNotValue(NodeId, Ty),
+    #[error("only one else block is permitted")]
+    SeveralElseBranches(NodeId, Vec<NodeId>),
+    #[error("the same variant is targeted several times")]
+    DuplicateVariantInSwitch(NodeId, NodeId, Vec<NodeId>, String),
+    #[error("fallthrough is only permitted inside non-else cases of switch statements")]
+    FallthroughOutsideCase(NodeId),
+    #[error("this fallthrough has nothing to fall through to")]
+    FallthroughWithNothingToFallThroughTo(NodeId),
+    #[error("the else branch of a switch must be the last branch")]
+    ElseNotLast(NodeId),
 }
 
 impl TypeError {
@@ -107,6 +122,13 @@ impl TypeError {
             FallibleTypesNotYetStored(..) => Some(1026),
             TypeHasNoNamespaceMembers(..) => Some(1027),
             CannotImplyVariant(..) => Some(1028),
+            NonExhaustiveSwitch(..) => Some(1029),
+            SwitchTargetNotValue(..) => Some(1030),
+            SeveralElseBranches(..) => Some(1031),
+            DuplicateVariantInSwitch(..) => Some(1032),
+            FallthroughOutsideCase(..) => Some(1033),
+            FallthroughWithNothingToFallThroughTo(..) => Some(1034),
+            ElseNotLast(..) => Some(1035),
         }
     }
 }
@@ -427,6 +449,112 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_help(Some("only variants of enums can be implied with the ::variant syntax")),
                 ]
             }
+            NonExhaustiveSwitch(node_id, ty, missing_variant) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("this switch statement is not exhaustive"),
+                        )
+                        .with_help(Some(if !ty.is_enum() {
+                            "`switch`s on anything other than enums must have an `else` branch"
+                                .to_string()
+                        } else {
+                            format!(
+                                "you appear to be missing the `{}` variant",
+                                missing_variant.as_deref().unwrap_or("")
+                            )
+                        })),
+                ]
+            }
+            SwitchTargetNotValue(node_id, ty) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("this {ty} does not carry a value"),
+                        )
+                        .with_help(Some("are you trying to switch on a void value?")),
+                ]
+            }
+            SeveralElseBranches(node_id, else_node_ids) => {
+                let mut diag = Diagnostic::new(message)
+                    .with_code(self.as_code())
+                    .with_label_from(recorder, node_id, "first `else` branch here");
+
+                for else_node_id in else_node_ids {
+                    diag = diag.with_label_from(
+                        recorder,
+                        else_node_id,
+                        "additional `else` branch here",
+                    );
+                }
+                vec![diag]
+            }
+            DuplicateVariantInSwitch(enclosing_switch, original_case_id, cases, name) => {
+                let mut diag = Diagnostic::new(message)
+                    .with_code(self.as_code())
+                    .with_label_from(
+                        recorder,
+                        enclosing_switch,
+                        format!("matched `{name}` several times in this switch statement"),
+                    )
+                    .with_label_from(
+                        recorder,
+                        original_case_id,
+                        format!("first matched `{name}` here"),
+                    );
+
+                for case_node_id in cases {
+                    diag = diag.with_label_from(
+                        recorder,
+                        case_node_id,
+                        format!("...matched `{name}` here again"),
+                    );
+                }
+
+                diag = diag.with_help(Some(
+                    "switch statements must match each variant at most once",
+                ));
+                vec![diag]
+            }
+            FallthroughOutsideCase(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "fallthrough is only permitted inside non-else cases of switch statements",
+                        ),
+                ]
+            }
+            FallthroughWithNothingToFallThroughTo(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "this fallthrough has nothing to fall through to",
+                        ),
+                ]
+            }
+            ElseNotLast(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "the else branch of a switch must be the last branch",
+                        ),
+                ]
+            }
         }
     }
 }
@@ -529,32 +657,17 @@ impl ConstraintType {
     }
 }
 
-// temp just to hold
-enum Resolvable {
-    Ident(AstIdent),
-    Path(AstPathExpr),
-    ImpliedPath(AstImplicitPathExpr),
+enum SwitchCaseType {
+    Case,
+    Else,
 }
 
-pub trait AsResolvable {
-    fn as_resolvable(&self) -> Resolvable;
-}
-
-impl AsResolvable for AstIdent {
-    fn as_resolvable(&self) -> Resolvable {
-        Resolvable::Ident(self.clone())
-    }
-}
-
-impl AsResolvable for AstPathExpr {
-    fn as_resolvable(&self) -> Resolvable {
-        Resolvable::Path(self.clone())
-    }
-}
-
-impl AsResolvable for AstImplicitPathExpr {
-    fn as_resolvable(&self) -> Resolvable {
-        Resolvable::ImpliedPath(self.clone())
+impl From<&ast::AstSwitchCase> for SwitchCaseType {
+    fn from(case: &ast::AstSwitchCase) -> Self {
+        match case {
+            ast::AstSwitchCase::Case(_) => SwitchCaseType::Case,
+            ast::AstSwitchCase::Else(_) => SwitchCaseType::Else,
+        }
     }
 }
 
@@ -567,6 +680,8 @@ struct TypeckCtxt<'c> {
     scopes: Vec<HashMap<String, Res>>,
     current_scope_ids: Vec<ScopeId>,
     inside_loop: bool,
+    inside_switch_case: Option<SwitchCaseType>,
+    inside_fallthroughable_case: bool,
     inside_constraint: Option<ConstraintType>,
     inferrable_tys: Vec<Option<Ty>>,
     // inside_try: bool,
@@ -612,6 +727,8 @@ impl<'c> TypeckCtxt<'c> {
             next_old_id: 0,
             errors: Vec::new(),
             inside_loop: false,
+            inside_switch_case: None,
+            inside_fallthroughable_case: false,
             inside_constraint: None,
             inferrable_tys: Vec::new(),
             func_node_id: ast::NodeId::new(0),
@@ -640,6 +757,10 @@ impl<'c> TypeckCtxt<'c> {
             "end_inferrable_ty called out of order"
         );
         self.inferrable_tys.pop();
+    }
+
+    fn is_inside_case(&self) -> bool {
+        matches!(self.inside_switch_case, Some(SwitchCaseType::Case))
     }
 
     fn new_with_func_sig(
@@ -1007,7 +1128,163 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt, index: Position) -> R
         AstStmtKind::Continue(continue_stmt) => {
             typeck_continue(tccx, continue_stmt).reported(tccx)?
         }
+        AstStmtKind::Switch(switch_stmt) => {
+            typeck_switch(tccx, switch_stmt)?;
+        }
+        AstStmtKind::Fallthrough(fallthrough_stmt) => {
+            typeck_fallthrough(tccx, fallthrough_stmt).reported(tccx)?;
+        }
     };
+
+    Ok(())
+}
+
+fn typeck_fallthrough(
+    tccx: &mut TypeckCtxt,
+    fallthrough_stmt: &ast::AstFallthroughStmt,
+) -> Result<(), TypeError> {
+    if !tccx.is_inside_case() {
+        return Err(TypeError::FallthroughOutsideCase(fallthrough_stmt.node_id));
+    }
+    if !tccx.inside_fallthroughable_case {
+        return Err(TypeError::FallthroughWithNothingToFallThroughTo(
+            fallthrough_stmt.node_id,
+        ));
+    }
+
+    Ok(())
+}
+
+fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Result<(), ()> {
+    let switch_ty = typeck_expr(tccx, &switch_stmt.expr).reported(tccx)?;
+
+    let cases_len = switch_stmt.cases.len();
+    for (i, case) in switch_stmt.cases.iter().enumerate() {
+        let old_switch_case = tccx.inside_switch_case.take();
+        let old_fallthroughable_case = tccx.inside_fallthroughable_case;
+        tccx.inside_switch_case = Some(case.into());
+        tccx.inside_fallthroughable_case =
+            i < cases_len - 1 && matches!(case, AstSwitchCase::Case(_));
+        if let AstSwitchCase::Case(case) = case {
+            let ity = tccx.begin_inferrable_ty(Some(switch_ty.clone()));
+            let case_ty = typeck_expr(tccx, &case.expr).reported(tccx);
+            tccx.end_inferrable_ty(ity);
+            let case_ty = case_ty?;
+
+            if switch_ty != case_ty {
+                return Err(TypeError::IncompatibleTypes(
+                    case_ty,
+                    switch_ty.clone(),
+                    case.expr.node_id(),
+                    switch_stmt.node_id,
+                ))
+                .reported(tccx);
+            }
+        }
+
+        typeck_block(tccx, &case.body(), true)?;
+        tccx.inside_switch_case = old_switch_case;
+        tccx.inside_fallthroughable_case = old_fallthroughable_case;
+    }
+
+    // do we have several elses? or is the else not last
+    let mut else_node_ids = Vec::new();
+    for (i, case) in switch_stmt.cases.iter().enumerate() {
+        if let AstSwitchCase::Else(else_case) = case {
+            if i != cases_len - 1 {
+                return Err(TypeError::ElseNotLast(else_case.node_id)).reported(tccx);
+            }
+            else_node_ids.push(else_case.node_id);
+        }
+    }
+
+    if else_node_ids.len() > 1 {
+        let (start, others) = else_node_ids.split_first().unwrap();
+        return Err(TypeError::SeveralElseBranches(*start, others.to_vec())).reported(tccx);
+    }
+
+    // We must have an else if we don't match all variants of the enum, or the ty
+    // is not an enum.
+    if !switch_ty.is_enum() && !switch_stmt.has_else() {
+        return Err(TypeError::NonExhaustiveSwitch(
+            switch_stmt.node_id,
+            switch_ty.clone(),
+            None,
+        ))
+        .reported(tccx);
+    }
+
+    if switch_ty.is_enum() {
+        // collect all variants of the enum and check that they are all covered
+        // by the cases.
+        let TyKind::Enum(enum_id) = switch_ty.kind() else {
+            unreachable!("switch_ty.is_enum() should guarantee this");
+        };
+        let enum_ = tccx
+            .tcx
+            .enums
+            .get_enum(*enum_id)
+            .expect("enum provided by type should exist");
+
+        let case_node_ids = switch_stmt
+            .cases()
+            .map(|case| case.expr.node_id())
+            .collect::<Vec<_>>();
+
+        let found_variants = switch_stmt
+            .cases()
+            .map(|case| {
+                // make sure we cover all variants
+                let Res::EnumVariant(enum_variant) = tccx
+                    .body
+                    .node_res(case.expr.node_id())
+                    .expect("case of enum must be enum variant")
+                else {
+                    unreachable!("case of enum must be enum variant")
+                };
+                enum_variant
+            })
+            .collect::<Vec<_>>();
+
+        let real_variants = enum_.variants().collect::<Vec<_>>();
+        for real_variant in real_variants.iter() {
+            if !found_variants.contains(real_variant) && !switch_stmt.has_else() {
+                return Err(TypeError::NonExhaustiveSwitch(
+                    switch_stmt.node_id,
+                    switch_ty.clone(),
+                    enum_.name_of_variant(*real_variant).map(|s| s.to_string()),
+                ))
+                .reported(tccx);
+            }
+
+            // also make sure we have no duplicates
+            let matches = found_variants
+                .iter()
+                .enumerate()
+                .filter_map(|(i, v)| {
+                    if v == real_variant {
+                        Some((v, case_node_ids[i]))
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Vec<_>>();
+
+            if matches.len() > 1 {
+                let (first, others) = matches.split_first().unwrap();
+                return Err(TypeError::DuplicateVariantInSwitch(
+                    switch_stmt.node_id,
+                    first.1,
+                    others.into_iter().map(|(_, node_id)| *node_id).collect(),
+                    enum_
+                        .name_of_variant(*first.0)
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string()),
+                ))
+                .reported(tccx)?;
+            }
+        }
+    }
 
     Ok(())
 }
@@ -1335,8 +1612,9 @@ fn typeck_call_expr(tccx: &mut TypeckCtxt, call_expr: &ast::AstCallExpr) -> Resu
     // Ensure args match
     for (i, (arg, param_ty)) in args.iter().zip(sig.param_tys.iter()).enumerate() {
         let ity = tccx.begin_inferrable_ty(Some(param_ty.clone()));
-        let arg_ty = typeck_expr(tccx, arg)?;
+        let arg_ty = typeck_expr(tccx, arg);
         tccx.end_inferrable_ty(ity);
+        let arg_ty = arg_ty?;
         if arg_ty != *param_ty {
             return Err(TypeError::IncorrectArgumentType(
                 param_ty.clone(),
@@ -1436,6 +1714,7 @@ fn always_returns(stmt: &ast::AstStmt) -> Returns {
         AstStmtKind::Block(b) => block_always_returns(b),
         AstStmtKind::If(s) => if_always_returns(s),
         AstStmtKind::Loop(l) => loop_always_returns(l),
+        AstStmtKind::Switch(s) => switch_always_returns(s),
 
         AstStmtKind::Expr(_)
         | AstStmtKind::Print(_)
@@ -1443,9 +1722,25 @@ fn always_returns(stmt: &ast::AstStmt) -> Returns {
         | AstStmtKind::Assign(_)
         | AstStmtKind::Break(_)
         | AstStmtKind::Continue(_)
+        | AstStmtKind::Fallthrough(_)
         // Compiler isn't yet smart enough to check this.
         | AstStmtKind::While(_) => Returns::never(),
     }
+}
+
+fn switch_always_returns(switch_: &ast::AstSwitchStmt) -> Returns {
+    let mut returns = Returns::always();
+    for case in switch_.cases.iter() {
+        let (AstSwitchCase::Case(AstSwitchCaseItem { body, .. })
+        | AstSwitchCase::Else(AstSwitchElseCase { body, .. })) = case;
+
+        // typeck requires switches to be exhaustive, so if all blocks return
+        // then it will. it is impossible (in theory) to encounter a switch
+        // and never enter one of its branches
+        returns = returns.and(block_always_returns(body));
+    }
+
+    returns
 }
 
 fn loop_always_returns(loop_: &ast::AstLoopStmt) -> Returns {
