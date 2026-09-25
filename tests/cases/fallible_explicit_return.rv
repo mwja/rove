@@ -1,17 +1,16 @@
-// A function returning E!T may return a plain T with an explicit return,
+// A function that throws may return a plain value with an explicit return,
 // just as it can with an implicit one.
 // Expected output: 1
-error PurchaseError {
+enum PurchaseError {
     OutOfStock
 }
 
-func buy(stock: int) -> PurchaseError!int
-    guard OutOfStock if stock > 0
+func buy(stock: int) throws PurchaseError -> int
+    guard ::OutOfStock if stock > 0
 {
     return stock;
 }
 
 func main() {
-    buy(1);
-    print 1;
+    print try! buy(1);
 }

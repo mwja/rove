@@ -9,11 +9,6 @@ enum Colour {
 
 enum Single { Only, }
 
-error PurchaseError {
-    OutOfStock,
-    NoMoney,
-}
-
 func add3(
     a: int,
     b: int,

@@ -35,7 +35,8 @@ impl EnumVariant {
     }
 
     pub fn as_u32(&self) -> u32 {
-        self.1.0
+        // +1 as 0 means success. later errors will be ptrs to an allocation or nullptr if no error.
+        self.1.0 + 1
     }
 }
 

@@ -23,17 +23,11 @@ mod grammar {
         Float,
         #[rust_sitter::leaf(text = "void")]
         Void,
-        ErrorUnion(
-            Ident,
-            #[rust_sitter::leaf(text = "!")] (),
-            Box<Spanned<Type>>,
-        ),
         Path(Box<Spanned<Path>>),
     }
 
     pub enum Def {
         Function(Spanned<FunctionDef>),
-        ErrorSet(Spanned<ErrorSet>),
         Enum(Spanned<EnumDef>),
     }
 
@@ -44,17 +38,6 @@ mod grammar {
         #[rust_sitter::leaf(text = "{")]
         _l: (),
         pub variants: Option<IdentList>,
-        #[rust_sitter::leaf(text = "}")]
-        _r: (),
-    }
-
-    pub struct ErrorSet {
-        #[rust_sitter::leaf(text = "error")]
-        _e: (),
-        pub name: Spanned<Ident>,
-        #[rust_sitter::leaf(text = "{")]
-        _l: (),
-        pub errors: Option<IdentList>,
         #[rust_sitter::leaf(text = "}")]
         _r: (),
     }
@@ -113,7 +96,7 @@ mod grammar {
     pub struct ThrowsDef {
         #[rust_sitter::leaf(text = "throws")]
         _t: (),
-        pub error_name: Spanned<Ident>,
+        pub error_type: Spanned<Type>,
     }
 
     pub enum Constraint {
@@ -144,7 +127,7 @@ mod grammar {
     pub struct GuardConstraint {
         #[rust_sitter::leaf(text = "guard")]
         _c: (),
-        pub error_name: Ident,
+        pub error: Spanned<Expr>,
         // deliberately uses different syntax to clarify
         // it is not a runtime failure but is recoverable.
         #[rust_sitter::leaf(text = "if")]
@@ -313,7 +296,7 @@ mod grammar {
         #[rust_sitter::prec_left(98)]
         Throw(Spanned<ThrowExpr>),
         // TryElse(Spanned<TryElseExpr>),
-        // ForcedTry(Spanned<ForcedTryExpr>),
+        ForcedTry(Spanned<ForcedTryExpr>),
     }
 
     #[rust_sitter::prec_left(98)]
@@ -337,13 +320,13 @@ mod grammar {
         Ident(Spanned<Ident>),
     }
 
-    // try! dangerousfunc()
-    // #[rust_sitter::prec_right(0)]
-    // pub struct ForcedTryExpr {
-    //     #[rust_sitter::leaf(text = "try!")]
-    //     _try: (),
-    //     pub expr: Box<Spanned<CallExpr>>,
-    // }
+    // try! dangerousfunc() => exits the same way as
+    #[rust_sitter::prec_right(0)]
+    pub struct ForcedTryExpr {
+        #[rust_sitter::leaf(text = "try!")]
+        _try: (),
+        pub expr: Box<Spanned<CallExpr>>,
+    }
 
     // // let a = try dangerousfunc() else 0
     // #[rust_sitter::prec_right(0)]
@@ -609,22 +592,16 @@ impl<'a> ProgramLowerer<'a> {
 
     pub fn lower(mut self, program: grammar::Program) -> Result<ast::AstProgram, Vec<Diagnostic>> {
         let mut defs = Vec::new();
-        let mut error_sets = Vec::new();
         let mut enums = Vec::new();
 
         for def in program.defs {
             match def {
                 grammar::Def::Function(..) => defs.push(def),
-                grammar::Def::ErrorSet(..) => error_sets.push(def),
                 grammar::Def::Enum(..) => enums.push(def),
             }
         }
         let program = ast::AstProgram {
             defs: defs.into_iter().map(|def| self.lower_def(def)).collect(),
-            error_sets: error_sets
-                .into_iter()
-                .map(|def| self.lower_error_set(def))
-                .collect(),
             enums: enums
                 .into_iter()
                 .map(|def| self.lower_enum_def(def))
@@ -652,32 +629,12 @@ impl<'a> ProgramLowerer<'a> {
                     .map(|ident| self.lower_ident(ident))
                     .collect(),
             },
-            grammar::Def::ErrorSet(..) => unreachable!(),
-        }
-    }
-
-    fn lower_error_set(&mut self, def: grammar::Def) -> ast::AstErrorSet {
-        match def {
-            grammar::Def::Function(..) => unreachable!(),
-            grammar::Def::ErrorSet(error_set) => ast::AstErrorSet {
-                node_id: self.next_id_spanned(error_set.span),
-                name: error_set.value.name.text.clone(),
-                errors: error_set
-                    .value
-                    .errors
-                    .flatten_list()
-                    .into_iter()
-                    .map(|ident| self.lower_ident(ident))
-                    .collect(),
-            },
-            grammar::Def::Enum(..) => unreachable!(),
         }
     }
 
     fn lower_def(&mut self, def: grammar::Def) -> ast::AstDef {
         match def {
             grammar::Def::Function(func) => ast::AstDef::Function(self.lower_function_def(func)),
-            grammar::Def::ErrorSet(..) => unreachable!(),
             grammar::Def::Enum(..) => unreachable!(),
         }
     }
@@ -687,19 +644,20 @@ impl<'a> ProgramLowerer<'a> {
             node_id: self.next_id_spanned(func.span),
             name: func.value.name.text.clone(),
             return_node_id: func
+                .value
                 .return_ty
                 .as_ref()
                 .map(|r| self.next_id_spanned(r.ty.span)),
-            throws: func
+            throws_node_id: func
                 .value
                 .throws
                 .as_ref()
-                .map(|t| t.error_name.text.clone()),
-            throws_node_id: func
+                .map(|t| self.next_id_spanned(t.error_type.span)),
+            throws: func
+                .value
                 .throws
-                .as_ref()
-                .map(|t| self.next_id_spanned(t.error_name.span)),
-            return_ty: self.lower_type(func.value.return_ty.and_then(|rty| Some(rty.ty))),
+                .map(|throws| self.lower_type(Some(throws.error_type))),
+            return_ty: self.lower_type(func.value.return_ty.map(|rty| rty.ty)),
             args: func
                 .value
                 .args
@@ -734,13 +692,13 @@ impl<'a> ProgramLowerer<'a> {
                     tag: tag.map(|t| t.text.clone()),
                 })
             }
-            grammar::Constraint::Guard(grammar::GuardConstraint {
-                expr, error_name, ..
-            }) => ast::AstConstraint::Guard(ast::AstGuardConstraint {
-                condition: Box::new(self.lower_expr(expr)),
-                node_id: self.next_id_spanned(constraint.span),
-                error_name: error_name.text,
-            }),
+            grammar::Constraint::Guard(grammar::GuardConstraint { expr, error, .. }) => {
+                ast::AstConstraint::Guard(ast::AstGuardConstraint {
+                    condition: Box::new(self.lower_expr(expr)),
+                    node_id: self.next_id_spanned(constraint.span),
+                    error: self.lower_expr(error),
+                })
+            }
         }
     }
 
@@ -753,13 +711,10 @@ impl<'a> ProgramLowerer<'a> {
     }
 
     fn lower_type(&mut self, ty: Option<Spanned<grammar::Type>>) -> ast::AstType {
-        match ty.and_then(|ty| Some(ty.value)) {
+        match ty.map(|ty| ty.value) {
             Some(grammar::Type::Float) => ast::AstType::Float,
             Some(grammar::Type::Int) => ast::AstType::Int,
             Some(grammar::Type::Void) => ast::AstType::Void,
-            Some(grammar::Type::ErrorUnion(ident, _, ty)) => {
-                ast::AstType::ErrorUnion(Box::new(self.lower_type(Some(*ty))), ident.text)
-            }
             Some(grammar::Type::Path(path)) => ast::AstType::Path(self.lower_path(path.value)),
             None => ast::AstType::Void,
         }
@@ -963,9 +918,9 @@ impl<'a> ProgramLowerer<'a> {
                     path: self.lower_ident(field.value.field),
                 }),
             },
-            // grammar::Expr::ForcedTry(forced_try) => {
-            //     ast::AstExprKind::ForcedTry(self.lower_forced_try(forced_try))
-            // }
+            grammar::Expr::ForcedTry(forced_try) => {
+                ast::AstExprKind::ForcedTry(self.lower_forced_try(forced_try))
+            }
             grammar::Expr::Throw(_) => {
                 todo!("lowering of throw expressions is not yet implemented")
             }
@@ -997,15 +952,15 @@ impl<'a> ProgramLowerer<'a> {
             }
         }
     }
-    // fn lower_forced_try(
-    //     &mut self,
-    //     forced_try: Spanned<grammar::ForcedTryExpr>,
-    // ) -> ast::AstForcedTryExpr {
-    //     ast::AstForcedTryExpr {
-    //         node_id: self.next_id_spanned(forced_try.span),
-    //         expr: Box::new(self.lower_call(*forced_try.value.expr)),
-    //     }
-    // }
+    fn lower_forced_try(
+        &mut self,
+        forced_try: Spanned<grammar::ForcedTryExpr>,
+    ) -> ast::AstForcedTryExpr {
+        ast::AstForcedTryExpr {
+            node_id: self.next_id_spanned(forced_try.span),
+            call_expr: Box::new(self.lower_call(*forced_try.value.expr)),
+        }
+    }
 
     fn lower_call(&mut self, call: Spanned<grammar::CallExpr>) -> ast::AstCallExpr {
         ast::AstCallExpr {

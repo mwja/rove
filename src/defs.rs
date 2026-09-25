@@ -51,6 +51,7 @@ pub enum DefKind {
 pub struct FuncSig {
     pub param_tys: Vec<Ty>,
     pub return_ty: Ty,
+    pub throws_ty: Option<Ty>,
 }
 
 pub struct DefCtxt<'d> {
@@ -133,8 +134,6 @@ impl<'d> DefCtxt<'d> {
 pub enum DefError {
     #[error("duplicate definitions of {0}")]
     DuplicateImpl(String, NodeId, NodeId),
-    #[error("error set not found: {0}")]
-    ErrorSetNotFound(String),
     #[error("unable to resolve type: {0}")]
     TypeError(#[from] TypeError),
     #[error("cannot find any type for the given path: {0}")]
@@ -148,7 +147,6 @@ impl DefError {
         use DefError::*;
         match self {
             DuplicateImpl(_, _, _) => Some(2001),
-            ErrorSetNotFound(_) => Some(2002),
             TypeError(err) => err.as_code(),
             PathNotFound(_, _) => Some(2003),
             InvalidNamedType(_, _) => Some(2004),
@@ -175,9 +173,6 @@ impl DiagnoseWith<NodeId> for DefError {
                         )
                         .with_label_from(recorder, original_node, "original definition here"),
                 ]
-            }
-            ErrorSetNotFound(_name) => {
-                vec![Diagnostic::new(message).with_code(self.as_code())]
             }
             TypeError(err) => err
                 .diagnose_with(recorder)
@@ -277,10 +272,16 @@ fn resolve_func(
         .iter()
         .map(|p| resolve_type(tcx, dcx, &p.ty))
         .collect::<Result<Vec<_>, DefError>>()?;
+    let throws_ty = func
+        .throws
+        .as_ref()
+        .map(|name| resolve_type(tcx, dcx, &name))
+        .transpose()?;
 
     let sig = FuncSig {
         return_ty,
         param_tys,
+        throws_ty,
     };
 
     dcx.define(
@@ -299,15 +300,6 @@ fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Result<Ty
         ast::AstType::Float => Ok(tcx.float_ty()),
         ast::AstType::Int => Ok(tcx.int_ty()),
         ast::AstType::Void => Ok(tcx.void_ty()),
-        ast::AstType::ErrorUnion(success_ty, error_set_name) => Ok(tcx.ty(TyKind::Fallible(
-            resolve_type(tcx, dcx, success_ty)?,
-            match tcx.errs.get_set_id_by_name(error_set_name) {
-                None => {
-                    return Err(DefError::ErrorSetNotFound(error_set_name.clone()));
-                }
-                Some(set_id) => set_id,
-            },
-        ))),
         ast::AstType::Path(path) => {
             let Some(res) = tcx.resolve_path(path.clone())? else {
                 return Err(DefError::PathNotFound(path.clone(), path.node_id()));
@@ -319,8 +311,9 @@ fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Result<Ty
                 | Res::ConstraintRet
                 | Res::Param(..)
                 | Res::Def(..)
-                | Res::EnumVariant(..)
-                | Res::Err(..) => Err(DefError::InvalidNamedType(path.to_string(), path.node_id())),
+                | Res::EnumVariant(..) => {
+                    Err(DefError::InvalidNamedType(path.to_string(), path.node_id()))
+                }
                 Res::Enum(enum_id) => Ok(tcx.ty(TyKind::Enum(enum_id))),
             }
         }

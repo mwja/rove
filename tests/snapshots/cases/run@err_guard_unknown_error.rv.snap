@@ -1,12 +1,15 @@
 ---
 source: tests/snapshots.rs
+assertion_line: 78
 input_file: tests/cases/err_guard_unknown_error.rv
 ---
 compile error:
-[1023] Error: error not found in expected error set
-   ╭─[ tests/cases/err_guard_unknown_error.rv:7:5 ]
+[1028] Error: unable to imply variant with the given information, or the expected type is not an enum
+   ╭─[ tests/cases/err_guard_unknown_error.rv:7:11 ]
    │
- 7 │     guard Missing if stock > 0
-   │     ─────────────┬────────────  
-   │                  ╰────────────── error `Missing` not found in expected error set
+ 7 │     guard ::Missing if stock > 0
+   │           ────┬────  
+   │               ╰────── this expression attempts to imply a variant of an enum, but the type is not an enum
+   │ 
+   │ Help: only variants of enums can be implied with the ::variant syntax
 ───╯

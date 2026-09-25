@@ -15,7 +15,6 @@ mod ast;
 mod codegen;
 mod defs;
 mod enums;
-mod err;
 mod sourcemap;
 mod syntax;
 mod ty;
@@ -70,7 +69,6 @@ pub fn compile(
 
     ty_ctxt.enums =
         enums::resolve(&ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
-    err::resolve(&mut ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
     defs::resolve(&mut ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
     ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)

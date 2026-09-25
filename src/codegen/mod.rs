@@ -24,7 +24,7 @@ use cranelift::{
 use std::{collections::HashMap, io::Write as _, path::PathBuf};
 
 use crate::{
-    ast::{self, AstDef, NodeId},
+    ast::{self, AstDef, AstForcedTryExpr, NodeId},
     codegen::repr::{Repr, ReprCx},
     defs::{self, Def, DefKind, FuncSig},
     ty::{
@@ -99,8 +99,11 @@ fn lower_sig(rcx: ReprCx, def_sig: &FuncSig, is_main: bool) -> Signature {
         // narrows to i32 and supplies 0 for a void main.
         sig.returns.push(AbiParam::new(types::I64));
     } else {
-        sig.returns
-            .extend(rcx.repr_of(&def_sig.return_ty).types().map(AbiParam::new));
+        sig.returns.extend(
+            rcx.fn_return_repr(&def_sig.return_ty, def_sig.throws_ty.as_ref())
+                .types()
+                .map(AbiParam::new),
+        );
     }
 
     sig
@@ -114,6 +117,8 @@ struct Runtime {
     println_f64: FuncId,
     /// rt_abort_constraint(kind:u8, tag:*u8, tag_len:u32, fn_name:*u8, fn_name_len:u32, line:u32) -> !
     abort_constraint: FuncId,
+    /// rt_abort_forced_try(fn_name:*u8, fn_name_len:u32, line:u32) -> !
+    abort_forced_try: FuncId,
     /// rt_start(ptr) -> i32
     start: FuncId,
 }
@@ -159,6 +164,19 @@ impl Runtime {
 
                 module
                     .declare_function("rt_abort_constraint", Linkage::Import, &abort_sig)
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
+            },
+            abort_forced_try: {
+                let mut abort_sig = module.make_signature();
+
+                abort_sig
+                    .params
+                    .push(AbiParam::new(module.target_config().pointer_type()));
+                abort_sig.params.push(AbiParam::new(types::I32));
+                abort_sig.params.push(AbiParam::new(types::I32));
+
+                module
+                    .declare_function("rt_abort_forced_try", Linkage::Import, &abort_sig)
                     .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
             },
             start: {
@@ -314,7 +332,10 @@ pub fn generate_object(
         fbuilder.append_block_params_for_function_params(block);
 
         let landing_pad = fbuilder.create_block();
-        for ty in rcx.repr_of(&cx.body.return_ty).types() {
+        for ty in rcx
+            .fn_return_repr(&cx.body.return_ty, cx.body.throws_ty.as_ref())
+            .types()
+        {
             fbuilder.append_block_param(landing_pad, ty);
         }
 
@@ -324,8 +345,11 @@ pub fn generate_object(
         }
 
         let failure_landing_pad = fbuilder.create_block();
-        if let Some(tag_ty) = rcx.repr_of(&cx.body.return_ty).tag_type() {
-            fbuilder.append_block_param(failure_landing_pad, tag_ty);
+        if let Some(throws_ty) = &cx.body.throws_ty {
+            let err_ty = rcx
+                .repr_of(throws_ty)
+                .expect_scalar("only scalars may be thrown");
+            fbuilder.append_block_param(failure_landing_pad, err_ty);
         }
 
         // // the abort block just calls the runtime abort and exits, it exists
@@ -721,8 +745,12 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .map(|v| BlockArg::Value(*v))
             .collect();
 
-        if let Some(tag_ty) = self.rcx.repr_of(&self.cx.body.return_ty).tag_type() {
-            let ok = self.builder.ins().iconst(tag_ty, 0);
+        if let Some(throws_ty) = &self.cx.body.throws_ty {
+            let err_ty = self
+                .rcx
+                .repr_of(throws_ty)
+                .expect_scalar("only scalars may be thrown");
+            let ok = self.builder.ins().iconst(err_ty, 0);
             args.push(BlockArg::Value(ok));
         }
         self.builder.ins().jump(self.landing_pad, &args);
@@ -785,23 +813,12 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         // passing a fallible value here is UB. full interopability and use of
         // fallible types is yet to be achieved.
 
-        // get the usize of the error
-        let Res::Err(err_id) = self
-            .cx
-            .body
-            .node_res(constraint.node_id())
-            .unwrap_or_else(|| bug!("a constraint has no resolution"))
-        else {
-            unreachable!("non error cannot be the res of an error constraint");
+        let ast::AstConstraint::Guard(guard) = constraint else {
+            unreachable!("only guard constraints are non-aborting");
         };
-
-        let err_value = self.builder.ins().iconst(
-            self.rcx
-                .repr_of(&self.cx.body.return_ty)
-                .tag_type()
-                .unwrap_or_else(|| bug!("a fallible return type has no tag type")),
-            err_id.as_usize() as i64,
-        );
+        let err_value = self
+            .lower_expr(guard.error.clone())
+            .expect_scalar("only scalars may be thrown");
         self.builder.ins().brif(
             value,
             constraint_continue_block,
@@ -981,18 +998,27 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         }
     }
 
-    fn lower_constraint_expr_olds(&mut self, expr: &ast::AstExpr) {
-        match (self.cx.body.node_res(expr.node_id()), &expr.kind) {
-            (Some(Res::ConstraintOld(old_id)), ast::AstExprKind::Call(call_expr))
-                if call_expr.is_constraint_kw_old() =>
-            {
+    fn lower_constraint_call_expr_olds(&mut self, call_expr: &ast::AstCallExpr) {
+        match (self.cx.body.node_res(call_expr.node_id), call_expr) {
+            (Some(Res::ConstraintOld(old_id)), call_expr) if call_expr.is_constraint_kw_old() => {
                 let value = self.lower_expr(*call_expr.args[0].clone());
                 self.old_values.insert(old_id, value);
             }
-            (_, ast::AstExprKind::Call(call_expr)) => {
+            (_, call_expr) => {
                 for arg in call_expr.args.iter() {
                     self.lower_constraint_expr_olds(&arg);
                 }
+            }
+        }
+    }
+
+    fn lower_constraint_expr_olds(&mut self, expr: &ast::AstExpr) {
+        match (self.cx.body.node_res(expr.node_id()), &expr.kind) {
+            (_, ast::AstExprKind::Call(call_expr)) => {
+                self.lower_constraint_call_expr_olds(call_expr);
+            }
+            (_, ast::AstExprKind::ForcedTry(ast::AstForcedTryExpr { call_expr, .. })) => {
+                self.lower_constraint_call_expr_olds(call_expr.as_ref());
             }
             (_, ast::AstExprKind::Binary(ast::AstBinaryExpr { left, right, .. })) => {
                 self.lower_constraint_expr_olds(&left);
@@ -1182,7 +1208,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn chain_repr(&self, kind: ExitKind) -> Repr {
         match kind {
             ExitKind::Return => self.rcx.success_repr_of(&self.cx.body.return_ty),
-            ExitKind::Error => Repr::Scalar(types::I32),
+            ExitKind::Error => self
+                .rcx
+                .repr_of(&self.cx.body.throws_ty.clone().unwrap_or_else(|| {
+                    bug!("attempted to exit scope as an error despite throws_ty not existing")
+                })),
             ExitKind::Continue | ExitKind::Break | ExitKind::Fallthrough => Repr::Empty,
         }
     }
@@ -1495,7 +1525,78 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstExprKind::ImplicitPath(implicit_path_expr) => {
                 self.lower_implicit_path(implicit_path_expr)
             }
+            ast::AstExprKind::ForcedTry(forced_try_expr) => self.lower_forced_try(forced_try_expr),
         }
+    }
+
+    fn lower_forced_try(&mut self, forced_try_expr: AstForcedTryExpr) -> Operand {
+        let (success, error_val) = match self.lower_call(*forced_try_expr.call_expr.clone()) {
+            Operand::Pair(success_val, error_val) => (Operand::Scalar(success_val), error_val),
+            Operand::Scalar(error_val) => (Operand::Empty, error_val),
+            Operand::Empty => bug!("call expression inside a try! has no error slot"),
+        };
+
+        self.loc(&forced_try_expr.node_id);
+        // For now, errors that are 0 are not errors
+        // if the error is 0, branch to an next block. otherwise, abort.
+        let zero = self.builder.ins().iconst(types::I64, 0);
+        let is_zero = self.lower_cond_direct(
+            self.cx.tcx.int_ty(),
+            error_val,
+            zero,
+            self.cx.tcx.int_ty(),
+            ast::AstBinaryOperator::Eq,
+        );
+
+        let continue_block = self.builder.create_block();
+        let failure_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(is_zero, continue_block, &[], failure_block, &[]);
+
+        self.builder.switch_to_block(failure_block);
+        self.lower_forced_try_abort(&forced_try_expr);
+        self.builder.seal_block(continue_block);
+        self.builder.seal_block(failure_block);
+        self.builder.switch_to_block(continue_block);
+
+        success
+    }
+
+    fn lower_forced_try_abort(&mut self, forced_try_expr: &AstForcedTryExpr) {
+        self.loc(&forced_try_expr.node_id);
+        // lower func
+        let func = self.get_or_cache_function(self.runtime.abort_forced_try);
+
+        // declare names etc in the data part
+        let fn_name = self
+            .module
+            .declare_anonymous_data(true, false)
+            .unwrap_or_else(|e| bug!("unable to declare anonymous data: {e}"));
+
+        let mut fn_name_data_desc = DataDescription::new();
+        fn_name_data_desc.define(self.fn_name.as_bytes().to_vec().into_boxed_slice());
+        self.module
+            .define_data(fn_name, &fn_name_data_desc)
+            .unwrap_or_else(|e| bug!("unable to define data: {e}"));
+
+        // Load ptrs for these in the function
+        let local_fn_name_ref = self.module.declare_data_in_func(fn_name, self.builder.func);
+
+        let local_fn_name = self.builder.ins().symbol_value(
+            self.module.target_config().pointer_type(),
+            local_fn_name_ref,
+        );
+
+        let fn_name_len = self
+            .builder
+            .ins()
+            .iconst(types::I32, self.fn_name.len() as i64);
+        let line = self.builder.ins().iconst(types::I32, 0);
+        self.builder
+            .ins()
+            .call(func, &[local_fn_name, fn_name_len, line]);
+        self.builder.ins().trap(TrapCode::unwrap_user(6));
     }
 
     fn lower_path(&mut self, path_expr: ast::AstPathExpr) -> Operand {
@@ -1570,12 +1671,17 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     .ins()
                     .iconst(types::I64, enum_variant.as_u32() as i64),
             ),
-            Res::Enum(..) | Res::Err(..) => panic!("attempted to resolve an err or enum directly."),
+            Res::Enum(..) => panic!("attempted to resolve an enum directly."),
         }
     }
 
     fn lower_call(&mut self, expr: ast::AstCallExpr) -> Operand {
         // Get callee
+        let expr_ty = self
+            .cx
+            .body
+            .node_ty(expr.node_id)
+            .unwrap_or_else(|| bug!("call expression has no type"));
         let callee_ty = self
             .cx
             .body
@@ -1612,7 +1718,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         };
 
         let results = self.builder.inst_results(call_inst);
-        match self.rcx.repr_of(&callee_sig.return_ty) {
+        match self.rcx.repr_of(&expr_ty) {
             Repr::Empty => Operand::Empty,
             Repr::Scalar(_) => Operand::Scalar(results[0]),
             Repr::Pair(..) => Operand::Pair(results[0], results[1]),
@@ -1661,21 +1767,21 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstBinaryOperator::Add => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().iadd(x, y),
                 TyKind::Float => self.builder.ins().fadd(x, y),
-                TyKind::Void | TyKind::Func(_) | TyKind::Fallible(_, _) | TyKind::Enum(..) => {
+                TyKind::Void | TyKind::Func(_) | TyKind::FullFallible(_, _) | TyKind::Enum(..) => {
                     unreachable!()
                 }
             },
             ast::AstBinaryOperator::Sub => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().isub(x, y),
                 TyKind::Float => self.builder.ins().fsub(x, y),
-                TyKind::Void | TyKind::Func(_) | TyKind::Fallible(_, _) | TyKind::Enum(..) => {
+                TyKind::Void | TyKind::Func(_) | TyKind::FullFallible(_, _) | TyKind::Enum(..) => {
                     unreachable!()
                 }
             },
             ast::AstBinaryOperator::Mul => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().imul(x, y),
                 TyKind::Float => self.builder.ins().fmul(x, y),
-                TyKind::Void | TyKind::Func(_) | TyKind::Fallible(_, _) | TyKind::Enum(..) => {
+                TyKind::Void | TyKind::Func(_) | TyKind::FullFallible(_, _) | TyKind::Enum(..) => {
                     unreachable!()
                 }
             },
@@ -1739,7 +1845,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     ),
                     TyKind::Func(_) => unreachable!(),
                     TyKind::Void => unreachable!(),
-                    TyKind::Fallible(_, _) => unreachable!(),
+                    TyKind::FullFallible(_, _) => unreachable!(),
                 };
 
                 self.builder.ins().sextend(types::I64, res)
@@ -1798,12 +1904,18 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let x = self
             .lower_expr(*print.expr)
             .expect_scalar("cannot print fallible type");
+        // enum values are stored as index + 1 (0 is reserved for "no error"),
+        // but print the variant's index.
+        let x = match x_ty.kind() {
+            TyKind::Enum(..) => self.builder.ins().iadd_imm(x, -1),
+            _ => x,
+        };
         let printf_ref = self.get_or_cache_function(match x_ty.kind() {
             TyKind::Int | TyKind::Enum(..) => self.runtime.println_i64,
             TyKind::Float => self.runtime.println_f64,
             TyKind::Void => unreachable!(),
             TyKind::Func(_) => unreachable!(),
-            TyKind::Fallible(_, _) => unreachable!(),
+            TyKind::FullFallible(_, _) => unreachable!(),
         });
         let _call = self.builder.ins().call(printf_ref, &[x]);
     }

@@ -1,0 +1,11 @@
+---
+source: tests/snapshots.rs
+assertion_line: 78
+input_file: tests/cases/throws_enum.rv
+---
+exit: Some(1)
+--- stdout
+70
+10
+--- stderr
+fatal: try! performed on a function that errored, on function main: line=0

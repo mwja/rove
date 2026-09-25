@@ -4,14 +4,7 @@ indexable_id!(pub NodeId);
 
 pub struct AstProgram {
     pub defs: Vec<AstDef>,
-    pub error_sets: Vec<AstErrorSet>,
     pub enums: Vec<AstEnumDef>,
-}
-
-pub struct AstErrorSet {
-    pub node_id: NodeId,
-    pub name: String,
-    pub errors: Vec<AstIdent>,
 }
 
 pub struct AstEnumDef {
@@ -40,7 +33,6 @@ pub enum AstType {
     Int,
     Float,
     Void,
-    ErrorUnion(Box<AstType>, String),
     Path(AstPath),
 }
 
@@ -53,9 +45,6 @@ impl Display for AstType {
                 AstType::Int => "int".to_owned(),
                 AstType::Float => "float".to_owned(),
                 AstType::Void => "void".to_owned(),
-                AstType::ErrorUnion(inner, error_set) => {
-                    format!("{}!{}", inner, error_set)
-                }
                 AstType::Path(path) => path.to_string(),
             }
         )
@@ -89,7 +78,7 @@ pub struct AstFunctionDef {
     pub name: String,
     pub args: Vec<AstArgDef>,
     pub return_node_id: Option<NodeId>,
-    pub throws: Option<String>,
+    pub throws: Option<AstType>,
     pub throws_node_id: Option<NodeId>,
     pub return_ty: AstType,
     pub body: AstBlockStmt,
@@ -151,10 +140,7 @@ impl AstConstraint {
         match self {
             AstConstraint::Require(AstRequireConstraint { tag, .. })
             | AstConstraint::Ensure(AstEnsureConstraint { tag, .. }) => tag.clone(),
-            AstConstraint::Guard(AstGuardConstraint { error_name, .. }) => {
-                // For guard constraints, we treat the error name as the tag
-                Some(error_name.clone())
-            }
+            AstConstraint::Guard(AstGuardConstraint { .. }) => None,
         }
     }
 }
@@ -175,7 +161,7 @@ impl Display for AstConstraint {
                 c.condition
             ),
             AstConstraint::Guard(c) => {
-                write!(f, "guard {} if {}", c.error_name, c.condition)
+                write!(f, "guard {} if {}", c.error, c.condition)
             }
         }
     }
@@ -198,7 +184,7 @@ pub struct AstEnsureConstraint {
 #[derive(Debug, Clone)]
 pub struct AstGuardConstraint {
     pub node_id: NodeId,
-    pub error_name: String,
+    pub error: AstExpr,
     pub condition: Box<AstExpr>,
 }
 
@@ -603,6 +589,7 @@ impl AstExpr {
             AstExprKind::Call(call) => call.node_id,
             AstExprKind::Path(field_access) => field_access.node_id,
             AstExprKind::ImplicitPath(implicit_field_access) => implicit_field_access.node_id, // AstExprKind::ForcedTry(forced_try) => forced_try.node_id,
+            AstExprKind::ForcedTry(forced_try) => forced_try.node_id,
         }
     }
 }
@@ -701,7 +688,7 @@ pub enum AstExprKind {
     Call(AstCallExpr),
     Path(AstPathExpr),
     ImplicitPath(AstImplicitPathExpr),
-    // ForcedTry(AstForcedTryExpr),
+    ForcedTry(AstForcedTryExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -750,12 +737,12 @@ pub struct AstImplicitPathExpr {
 #[derive(Debug, Clone)]
 pub struct AstForcedTryExpr {
     pub node_id: NodeId,
-    pub expr: Box<AstCallExpr>,
+    pub call_expr: Box<AstCallExpr>,
 }
 
 impl Display for AstForcedTryExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "try! {}", self.expr)
+        write!(f, "try! {}", self.call_expr)
     }
 }
 
@@ -801,7 +788,8 @@ impl Display for AstExprKind {
             }
             AstExprKind::ImplicitPath(implicit_field_access) => {
                 write!(f, "::{}", implicit_field_access.path)
-            } // AstExprKind::ForcedTry(forced_try) => write!(f, "{}!", forced_try.expr),
+            }
+            AstExprKind::ForcedTry(forced_try) => write!(f, "{}!", forced_try.call_expr),
         }
     }
 }

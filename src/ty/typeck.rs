@@ -5,9 +5,9 @@ use thiserror::Error;
 use super::*;
 use crate::{
     ast::{
-        self, AstExpr, AstGuardConstraint, AstIdent, AstImplicitPathExpr, AstLetDecl, AstPath,
-        AstPathExpr, AstRequireConstraint, AstStmtKind, AstSwitchCase, AstSwitchCaseItem,
-        AstSwitchElseCase,
+        self, AstExpr, AstForcedTryExpr, AstGuardConstraint, AstIdent, AstImplicitPathExpr,
+        AstLetDecl, AstPath, AstPathExpr, AstRequireConstraint, AstStmtKind, AstSwitchCase,
+        AstSwitchCaseItem, AstSwitchElseCase,
     },
     defs::{self, FuncSig},
     sourcemap::{DiagnoseWith, report::Diagnostic},
@@ -60,12 +60,12 @@ pub enum TypeError {
     ConstraintConditionNotValid(NodeId, Ty),
     #[error("implicit returns must be the last item in a block")]
     ImplicitReturnNotLast(NodeId),
-    #[error("error not found in expected error set")]
-    ErrorNotFoundInSet(NodeId, String),
+    #[error("guard error does not match the thrown type (expected {1}, got {2})")]
+    GuardErrorWrongType(NodeId, Ty, Ty),
     #[error("error in infallible function")]
     ErrorInInfallibleFunction(NodeId, NodeId),
-    #[error("nested fallible types are not allowed")]
-    NestedFallibleType(NodeId),
+    #[error("only enums may be thrown (got {1})")]
+    InvalidThrowsType(NodeId, Ty),
     #[error("fallible types may not yet be stored")]
     FallibleTypesNotYetStored(NodeId),
     #[error("the given type can not have namespace members")]
@@ -88,6 +88,12 @@ pub enum TypeError {
     FallthroughWithNothingToFallThroughTo(NodeId),
     #[error("the else branch of a switch must be the last branch")]
     ElseNotLast(NodeId),
+    #[error("a function that throws must have its error handled directly with try! or try/catch")]
+    DangerousUseThrowingFunction(NodeId, Ty, Ty),
+    #[error("a fallible function may not contain a non-scalar return")]
+    NonScalarFallible(NodeId, Ty),
+    #[error("try! used on a call that cannot throw")]
+    TryOnNonThrowingCall(NodeId),
 }
 
 impl TypeError {
@@ -116,9 +122,9 @@ impl TypeError {
             ConstraintConditionNotValid(..) => Some(1020),
             OldInPreConstraint(..) => Some(1021),
             ImplicitReturnNotLast(..) => Some(1022),
-            ErrorNotFoundInSet(..) => Some(1023),
+            GuardErrorWrongType(..) => Some(1023),
             ErrorInInfallibleFunction(..) => Some(1024),
-            NestedFallibleType(..) => Some(1025),
+            InvalidThrowsType(..) => Some(1025),
             FallibleTypesNotYetStored(..) => Some(1026),
             TypeHasNoNamespaceMembers(..) => Some(1027),
             CannotImplyVariant(..) => Some(1028),
@@ -129,6 +135,9 @@ impl TypeError {
             FallthroughOutsideCase(..) => Some(1033),
             FallthroughWithNothingToFallThroughTo(..) => Some(1034),
             ElseNotLast(..) => Some(1035),
+            DangerousUseThrowingFunction(..) => Some(1036),
+            NonScalarFallible(..) => Some(1037),
+            TryOnNonThrowingCall(..) => Some(1038),
         }
     }
 }
@@ -386,14 +395,14 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_label_from(recorder, node_id, "implicit return here "),
                 ]
             }
-            ErrorNotFoundInSet(node_id, name) => {
+            GuardErrorWrongType(node_id, expected, _) => {
                 vec![
                     Diagnostic::new(message)
                         .with_code(self.as_code())
                         .with_label_from(
                             recorder,
                             node_id,
-                            format!("error `{}` not found in expected error set", name),
+                            format!("this function throws {expected}"),
                         ),
                 ]
             }
@@ -409,13 +418,12 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
-            NestedFallibleType(node_id) => {
-                vec![Diagnostic::new(message)
-                    .with_code(self.as_code())
-                    .with_label_from(recorder, node_id, "nested fallible type here")
-                    .with_help(Some(
-                        "consider collapsing the nested fallible types into a single fallible type",
-                    ))]
+            InvalidThrowsType(node_id, _) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "thrown type here"),
+                ]
             }
             FallibleTypesNotYetStored(node_id) => {
                 vec![
@@ -553,6 +561,30 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
+            DangerousUseThrowingFunction(node_id, returns_ty, throws_ty) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "this call attempts to get the value of a throwing function without handling that error")
+                        .with_help(Some(format!("this function returns {returns_ty} but throws {throws_ty}. you need to handle the latter.")))
+                ]
+            }
+            TryOnNonThrowingCall(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "this call never throws")
+                        .with_help(Some("remove the try!")),
+                ]
+            }
+            NonScalarFallible(node_id, returns_ty) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, format!("this function throws, but also wants to return a {}", returns_ty))
+                        .with_help(Some("this may be a bug in the compiler as you generally can't manually specify non scalars."))
+                ]
+            }
         }
     }
 }
@@ -571,10 +603,11 @@ pub struct BodyInfo {
     pub scope_loops: HashMap<ScopeId, bool>,
     pub node_scopes: HashMap<ast::NodeId, ScopeId>,
     pub return_ty: Ty,
+    pub throws_ty: Option<Ty>,
 }
 
 impl BodyInfo {
-    pub fn new_with_return_ty(return_ty: Ty) -> Self {
+    pub fn new_with_return_ty(return_ty: Ty, throws_ty: Option<Ty>) -> Self {
         Self {
             node_res: HashMap::new(),
             local_tys: Vec::new(),
@@ -585,6 +618,7 @@ impl BodyInfo {
             scope_loops: HashMap::new(),
             node_scopes: HashMap::new(),
             return_ty,
+            throws_ty,
         }
     }
 
@@ -681,6 +715,7 @@ struct TypeckCtxt<'c> {
     inside_switch_case: Option<SwitchCaseType>,
     inside_fallthroughable_case: bool,
     inside_constraint: Option<ConstraintType>,
+    permit_calls_to_throwing_funcs: bool,
     inferrable_tys: Vec<Option<Ty>>,
     // inside_try: bool,
     body: BodyInfo,
@@ -689,6 +724,7 @@ struct TypeckCtxt<'c> {
     // Node IDs for diagnostics
     func_node_id: ast::NodeId,
     return_node_id: Option<ast::NodeId>,
+    throws_node_id: Option<ast::NodeId>,
 }
 
 trait Reported {
@@ -718,7 +754,7 @@ impl<'c> TypeckCtxt<'c> {
         Self {
             tcx,
             scopes: Vec::new(),
-            body: BodyInfo::new_with_return_ty(return_ty),
+            body: BodyInfo::new_with_return_ty(return_ty, None),
             next_id: 0,
             next_param_id: 0,
             next_scope_id: 0,
@@ -728,10 +764,12 @@ impl<'c> TypeckCtxt<'c> {
             inside_switch_case: None,
             inside_fallthroughable_case: false,
             inside_constraint: None,
+            permit_calls_to_throwing_funcs: false,
             inferrable_tys: Vec::new(),
             func_node_id: ast::NodeId::new(0),
             current_scope_ids: Vec::new(),
             return_node_id: None,
+            throws_node_id: None,
         }
     }
 
@@ -775,8 +813,10 @@ impl<'c> TypeckCtxt<'c> {
 
         // Replace return type.
         tccx.body.return_ty = sig.return_ty.clone();
+        tccx.body.throws_ty = sig.throws_ty.clone();
         tccx.func_node_id = def.node_id;
         tccx.return_node_id = def.return_node_id;
+        tccx.throws_node_id = def.throws_node_id;
         tccx
     }
 
@@ -843,7 +883,6 @@ impl<'c> TypeckCtxt<'c> {
             Res::Param(param_id) => self.body.param_ty(*param_id),
             Res::Enum(enum_id) => Some(self.ty(TyKind::Enum(*enum_id))),
             Res::EnumVariant(enum_variant) => Some(self.ty(TyKind::Enum(enum_variant.enum_id()))),
-            Res::Err(..) => None,
         }
     }
 
@@ -962,18 +1001,14 @@ pub fn typeck_ast(
 }
 
 fn typeck_sig(tccx: &mut TypeckCtxt, sig: &FuncSig) -> Result<(), TypeError> {
-    // ensure that we don't return !!T. !!T is (for now) unrepresentable
-    if sig.return_ty.is_fallible()
-        && sig
-            .return_ty
-            .success_ty()
-            .unwrap_or_else(|| bug!("a fallible return type has no success type"))
-            .is_fallible()
+    // thrown values travel in a single integer slot, so only enums for now.
+    if let Some(throws_ty) = &sig.throws_ty
+        && !throws_ty.is_enum()
     {
-        return Err(TypeError::NestedFallibleType(
-            tccx.return_node_id.unwrap_or_else(|| {
-                bug!("a function with a return type has no return type node id")
-            }),
+        return Err(TypeError::InvalidThrowsType(
+            tccx.throws_node_id
+                .unwrap_or_else(|| bug!("a function that throws has no throws node id")),
+            throws_ty.clone(),
         ));
     }
 
@@ -995,9 +1030,9 @@ fn typeck_pre_constraint(
             ast::AstConstraint::Guard(AstGuardConstraint {
                 node_id,
                 condition,
-                error_name,
+                error,
             }) => {
-                typeck_guard_constraint_error(tccx, *node_id, error_name).reported(tccx)?;
+                typeck_guard_constraint_error(tccx, *node_id, error).reported(tccx)?;
                 typeck_constraint_condition(tccx, ConstraintType::Pre(*node_id), condition)
                     .reported(tccx)?;
             }
@@ -1012,24 +1047,27 @@ fn typeck_pre_constraint(
 fn typeck_guard_constraint_error(
     tccx: &mut TypeckCtxt,
     node_id: NodeId,
-    error_name: &str,
+    error: &AstExpr,
 ) -> Result<(), TypeError> {
     typeck_fallible(tccx, node_id)?;
-    // Get the error from the set of expected errors for this function.
-    let set_id = tccx
+    let throws_ty = tccx
         .body
-        .return_ty
-        .error_set()
-        .unwrap_or_else(|| bug!("a fallible function has no error set"));
-    let set = tccx.tcx.errs.get_set(set_id);
-    let Some(err_id) = set.get_id(error_name) else {
-        return Err(TypeError::ErrorNotFoundInSet(
-            node_id,
-            error_name.to_owned(),
-        ));
-    };
+        .throws_ty
+        .clone()
+        .unwrap_or_else(|| bug!("a fallible function has no throws type"));
 
-    tccx.body.set_node_res(node_id, Res::Err(err_id));
+    let ity = tccx.begin_inferrable_ty(Some(throws_ty.clone()));
+    let error_ty = typeck_expr(tccx, error);
+    tccx.end_inferrable_ty(ity);
+    let error_ty = error_ty?;
+
+    if error_ty != throws_ty {
+        return Err(TypeError::GuardErrorWrongType(
+            error.node_id(),
+            throws_ty,
+            error_ty,
+        ));
+    }
 
     Ok(())
 }
@@ -1073,7 +1111,7 @@ fn typeck_post_constraint(
 }
 
 fn typeck_fallible(tccx: &mut TypeckCtxt, node_id: NodeId) -> Result<(), TypeError> {
-    if !tccx.body.return_ty.is_fallible() {
+    if tccx.body.throws_ty.is_none() {
         return Err(TypeError::ErrorInInfallibleFunction(
             tccx.func_node_id,
             node_id,
@@ -1376,7 +1414,7 @@ fn typeck_implicit_return(
     expr: &ast::AstExpr,
     index: Position,
 ) -> Result<(), TypeError> {
-    let ity = tccx.begin_inferrable_ty(Some(tccx.body.return_ty.as_infallible()));
+    let ity = tccx.begin_inferrable_ty(Some(tccx.body.return_ty.clone()));
     let return_ty = typeck_expr(tccx, expr);
     tccx.end_inferrable_ty(ity);
     let return_ty = return_ty?;
@@ -1385,7 +1423,7 @@ fn typeck_implicit_return(
         return Err(TypeError::ImplicitReturnNotLast(expr.node_id()));
     }
 
-    match (return_ty.kind(), tccx.body.return_ty.as_infallible().kind()) {
+    match (return_ty.kind(), tccx.body.return_ty.kind()) {
         (TyKind::Void, TyKind::Void) => Ok(()),
         (TyKind::Void, _) => Err(TypeError::ExpectedReturn(
             expr.node_id(),
@@ -1420,7 +1458,7 @@ fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Res
             res
         })
         .map_or(Ok(None), |v| v.map(Some))?
-        .map(|ty| ty.as_infallible()); // returns always follow success path.
+        .map(|ty| ty); // returns always follow success path.
 
     match (&return_ty, tccx.body.return_ty.kind()) {
         // Returns but didn't expect return (non-void return in void context)
@@ -1538,10 +1576,34 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
         (None, ast::AstExprKind::ImplicitPath(impl_path_expr)) => {
             typeck_implicit_path_expr(tccx, impl_path_expr)
         }
+        (None, ast::AstExprKind::ForcedTry(forced_try_expr)) => {
+            typeck_forced_try_expr(tccx, forced_try_expr)
+        }
     }?;
 
     tccx.body.set_node_ty(expr.node_id(), ty.clone());
     Ok(ty)
+}
+
+fn typeck_forced_try_expr(
+    tccx: &mut TypeckCtxt,
+    forced_try_expr: &AstForcedTryExpr,
+) -> Result<Ty, TypeError> {
+    let old_switch = tccx.permit_calls_to_throwing_funcs;
+    tccx.permit_calls_to_throwing_funcs = true;
+    // Get the inner call expr, let typeck resolve that then just copy that out
+    let ty = typeck_call_expr(tccx, &forced_try_expr.call_expr);
+    tccx.permit_calls_to_throwing_funcs = old_switch;
+    let ty = ty?;
+
+    // the call itself carries the full (success, thrown) type, the try! only the success.
+    let TyKind::FullFallible(success_ty, _) = ty.kind() else {
+        return Err(TypeError::TryOnNonThrowingCall(forced_try_expr.node_id));
+    };
+    let success_ty = success_ty.clone();
+    tccx.body
+        .set_node_ty(forced_try_expr.call_expr.node_id, ty.clone());
+    Ok(success_ty)
 }
 
 // Constraints have some extra special conditions for the expressions allowed, to avoid
@@ -1569,7 +1631,7 @@ fn typeck_constraint_expr(
             // Function return type instead
             tccx.body.set_node_res(ident.node_id, Res::ConstraintRet);
             // ensure blocks only run on happy paths
-            return Ok(Some(tccx.body.return_ty.clone().as_infallible()));
+            return Ok(Some(tccx.body.return_ty.clone()));
         }
 
         ast::AstExprKind::Call(call_expr) if call_expr.is_constraint_kw_old() => {
@@ -1668,8 +1730,32 @@ fn typeck_call_expr(tccx: &mut TypeckCtxt, call_expr: &ast::AstCallExpr) -> Resu
         }
     }
 
-    // Return return type
-    Ok(sig.return_ty.clone())
+    if !tccx.permit_calls_to_throwing_funcs
+        && let Some(ref throws_ty) = sig.throws_ty
+    {
+        return Err(TypeError::DangerousUseThrowingFunction(
+            call_expr.node_id,
+            sig.return_ty.clone(),
+            throws_ty.clone(),
+        ));
+    }
+
+    match sig.throws_ty {
+        None => Ok(sig.return_ty.clone()),
+        Some(ref throws_ty) => {
+            if !throws_ty.is_scalar() {
+                return Err(TypeError::NonScalarFallible(
+                    call_expr.node_id,
+                    sig.return_ty.clone(),
+                ));
+            }
+
+            Ok(tccx.ty(TyKind::FullFallible(
+                sig.return_ty.clone(),
+                throws_ty.clone(),
+            )))
+        }
+    }
 }
 
 fn typeck_binary_expr(

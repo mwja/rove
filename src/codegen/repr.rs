@@ -9,7 +9,7 @@ use crate::ty::{Ty, TyKind};
 pub enum Repr {
     Empty,            // void
     Scalar(Type),     // i64, f64, fn ptr, and (Phase 9) every struct
-    Pair(Type, Type), // !T as (payload, tag)
+    Pair(Type, Type), // throwing T as (payload, thrown)
 }
 
 impl Repr {
@@ -77,21 +77,7 @@ impl ReprCx {
             TyKind::Float => Repr::Scalar(types::F64),
             TyKind::Func(_) => Repr::Scalar(self.ptr()),
             TyKind::Enum(_) => Repr::Scalar(types::I64),
-            TyKind::Fallible(ty, _) => {
-                let r = match self.repr_of(ty) {
-                    Repr::Empty => Repr::Scalar(types::I32),
-                    Repr::Scalar(t) => Repr::Pair(t, types::I32),
-                    Repr::Pair(..) => unreachable!("`!!T` is not representable"),
-                };
-                debug_assert_eq!(
-                    self.success_repr_of(ty)
-                        .types()
-                        .chain(r.tag_type())
-                        .collect::<Vec<_>>(),
-                    r.types().collect::<Vec<_>>(),
-                );
-                r
-            }
+            TyKind::FullFallible(ty, throws_ty) => self.fn_return_repr(ty, Some(throws_ty)),
         }
     }
 
@@ -104,11 +90,27 @@ impl ReprCx {
             TyKind::Float => Repr::Scalar(types::F64),
             TyKind::Func(_) => Repr::Scalar(self.ptr()),
             TyKind::Enum(_) => Repr::Scalar(types::I64),
-            TyKind::Fallible(ty, _) => self.repr_of(ty),
+            TyKind::FullFallible(ty, _) => self.repr_of(ty),
         }
     }
 
-    pub fn error_repr(&self) -> Repr {
-        Repr::Scalar(types::I32)
+    /// The repr a function actually returns: its success value, followed by
+    /// the thrown value if it throws (0 means no error).
+    pub fn fn_return_repr(self, return_ty: &Ty, throws_ty: Option<&Ty>) -> Repr {
+        let ret = self.repr_of(return_ty);
+        let Some(throws_ty) = throws_ty else {
+            return ret;
+        };
+        let err = self
+            .repr_of(throws_ty)
+            .expect_scalar("only scalars may be thrown");
+
+        match ret {
+            Repr::Empty => Repr::Scalar(err),
+            Repr::Scalar(left) => Repr::Pair(left, err),
+            Repr::Pair(_, _) => {
+                bug!("full fallible functions cannot have a fallible return type")
+            }
+        }
     }
 }

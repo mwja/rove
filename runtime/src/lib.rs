@@ -49,6 +49,20 @@ pub extern "C" fn rt_abort_constraint(
     std::process::exit(1);
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_abort_forced_try(fn_name: *const u8, fn_name_len: u32, line: u32) {
+    let fn_name = unsafe {
+        let slice = std::slice::from_raw_parts(fn_name, fn_name_len as usize);
+        String::from_utf8_lossy(slice)
+    };
+
+    eprintln!(
+        "fatal: try! performed on a function that errored, on function {}: line={}",
+        fn_name, line
+    );
+    std::process::exit(1);
+}
+
 type RtEntryPoint = unsafe extern "C" fn() -> i64;
 
 #[unsafe(no_mangle)]

@@ -1,0 +1,23 @@
+// A function can throw an enum. `guard` throws the given variant when its
+// condition is false, and `try!` aborts the program if the call threw.
+// Expected output: 70, 10, then a fatal try! abort in main (exit 1).
+enum PurchaseFailure {
+    NoUnits,
+    InsufficientFunds
+}
+
+/// Returns new wallet total
+func purchase(cost: int, units: int, wallet: int) throws PurchaseFailure -> int
+    guard ::NoUnits if units > 0
+    guard PurchaseFailure::InsufficientFunds if wallet >= cost * units
+    ensure! cost_deducted: ret == wallet - cost * units
+{
+    return wallet - cost * units;
+}
+
+func main() {
+    let wallet = try! purchase(10, 3, 100);
+    print wallet;
+    print try! purchase(20, 3, wallet);
+    print try! purchase(50, 1, 10);
+}

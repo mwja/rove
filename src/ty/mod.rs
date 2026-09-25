@@ -5,7 +5,6 @@ use crate::{
     ast::{AstImplicitPathExpr, AstPath, AstPathExpr, NodeId},
     defs::{DefId, Defs, FuncSig},
     enums::{EnumId, Enums},
-    err::{ErrorSetCtxt, ErrorSetId, ErrorSets},
     ty::{
         res::Res,
         typeck::{BodyInfo, TypeError},
@@ -35,25 +34,15 @@ impl Ty {
     }
 
     pub fn is_fallible(&self) -> bool {
-        matches!(*self.kind, TyKind::Fallible(_, _))
+        matches!(*self.kind, TyKind::FullFallible(..))
+    }
+
+    pub fn is_scalar(&self) -> bool {
+        !matches!(*self.kind, TyKind::FullFallible(..))
     }
 
     pub fn has_value(&self) -> bool {
         !matches!(*self.kind, TyKind::Void)
-    }
-
-    pub fn success_ty(&self) -> Option<&Ty> {
-        match &*self.kind {
-            TyKind::Fallible(ty, _) => Some(ty),
-            _ => None,
-        }
-    }
-
-    pub fn error_set(&self) -> Option<ErrorSetId> {
-        match &*self.kind {
-            TyKind::Fallible(_, err_set) => Some(*err_set),
-            _ => None,
-        }
     }
 }
 
@@ -74,8 +63,8 @@ pub enum TyKind {
     Float,
     /// Function
     Func(FuncSig),
-    /// Error union
-    Fallible(Ty, ErrorSetId),
+    /// Result of calling a throwing function: (success type, thrown type).
+    FullFallible(Ty, Ty),
     /// Variant of the given enum
     Enum(EnumId),
 }
@@ -102,17 +91,8 @@ impl Display for TyKind {
                     .join(", "),
                 sig.return_ty
             ),
-            TyKind::Fallible(ty, _) => write!(f, "!{}", ty),
+            TyKind::FullFallible(ty, throws_ty) => write!(f, "{} (throws {})", ty, throws_ty),
             TyKind::Enum(enum_id) => write!(f, "enum_variant({})", enum_id),
-        }
-    }
-}
-
-impl Ty {
-    pub fn as_infallible(&self) -> Ty {
-        match self.kind() {
-            TyKind::Fallible(ty, _) => ty.clone(),
-            _ => self.clone(),
         }
     }
 }
@@ -124,7 +104,6 @@ pub struct TyCtxt {
     pub bodies: HashMap<DefId, BodyInfo>,
     /// Not initially populated with data until the resolve pass occurs.
     pub defs: Defs,
-    pub errs: ErrorSets,
     pub enums: Enums,
 }
 
@@ -189,8 +168,7 @@ impl TyCtxt {
             | Res::ConstraintRet
             | Res::Param(..)
             | Res::Def(..)
-            | Res::EnumVariant(..)
-            | Res::Err(..) => Err(TypeError::TypeHasNoNamespaceMembers(path.node_id)),
+            | Res::EnumVariant(..) => Err(TypeError::TypeHasNoNamespaceMembers(path.node_id)),
             Res::Enum(enum_id) => {
                 let enum_ = match self.enums.get_enum(enum_id) {
                     Some(enum_) => enum_,
@@ -212,7 +190,7 @@ impl TyCtxt {
     ) -> Result<Option<Res>, TypeError> {
         let base = match *expected.kind {
             TyKind::Enum(enum_id) => Res::Enum(enum_id),
-            TyKind::Fallible(..)
+            TyKind::FullFallible(..)
             | TyKind::Float
             | TyKind::Int
             | TyKind::Void
@@ -240,7 +218,6 @@ impl TyCtxt {
             arena: RefCell::new(Store::new()),
             bodies: HashMap::new(),
             defs: Defs::default(),
-            errs: ErrorSets::default(),
             enums: Enums::default(),
         }
     }

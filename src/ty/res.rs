@@ -3,7 +3,6 @@ use std::fmt::Display;
 use crate::{
     defs::DefId,
     enums::{EnumId, EnumVariant},
-    err::ErrorId,
 };
 
 indexable_id!(pub LocalId);
@@ -15,7 +14,6 @@ pub enum Res {
     Local(LocalId),
     Param(ParamId),
     Def(DefId),
-    Err(ErrorId),
 
     // constraint only
     ConstraintOld(OldId),
@@ -33,7 +31,6 @@ impl Display for Res {
             Res::Def(id) => write!(f, "def {}", id),
             Res::ConstraintOld(id) => write!(f, "constraint old {}", id),
             Res::ConstraintRet => write!(f, "constraint ret"),
-            Res::Err(id) => write!(f, "error {}", id),
             Res::Enum(id) => write!(f, "enum {}", id),
             Res::EnumVariant(id) => write!(f, "enum variant {}", id),
         }
