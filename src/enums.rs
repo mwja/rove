@@ -1,6 +1,9 @@
 use std::{collections::HashMap, fmt::Display};
 
-use crate::ast::{self, NodeId};
+use crate::{
+    ast::{self, NodeId},
+    sourcemap::{DiagnoseWith, SpanRecorder, report::Diagnostic},
+};
 
 indexable_id!(pub EnumId);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,13 +135,70 @@ impl Enums {
 
 impl_next_id!(Enums.next_id -> EnumId);
 
-pub fn resolve(ast: &ast::AstProgram) -> Enums {
+#[derive(Debug, thiserror::Error)]
+pub enum EnumError {
+    #[error("duplicate definitions of enum {0}")]
+    DuplicateEnum(String, NodeId, NodeId),
+    #[error("duplicate variant {0} in enum")]
+    DuplicateVariant(String, NodeId, NodeId),
+}
+
+impl EnumError {
+    fn as_code(&self) -> usize {
+        match self {
+            EnumError::DuplicateEnum(..) => 4001,
+            EnumError::DuplicateVariant(..) => 4002,
+        }
+    }
+}
+
+impl DiagnoseWith<NodeId> for EnumError {
+    fn diagnose_with(&self, recorder: &mut SpanRecorder<NodeId>) -> Vec<Diagnostic> {
+        let (original, duplicate) = match self {
+            EnumError::DuplicateEnum(_, original, duplicate)
+            | EnumError::DuplicateVariant(_, original, duplicate) => (original, duplicate),
+        };
+        vec![
+            Diagnostic::new(self.to_string())
+                .with_code(Some(self.as_code()))
+                .with_label_from(recorder, original, "original definition here")
+                .with_label_from(recorder, duplicate, "duplicate definition here"),
+        ]
+    }
+}
+
+pub fn resolve(ast: &ast::AstProgram) -> Result<Enums, Vec<EnumError>> {
     let mut enums = Enums::new();
+    let mut errors = Vec::new();
+    let mut seen_enums: HashMap<&str, NodeId> = HashMap::new();
     for enum_def in ast.enums.iter() {
-        let name = enum_def.name.clone();
+        if let Some(original) = seen_enums.insert(&enum_def.name, enum_def.node_id) {
+            errors.push(EnumError::DuplicateEnum(
+                enum_def.name.clone(),
+                original,
+                enum_def.node_id,
+            ));
+            continue;
+        }
+
+        let mut seen_variants: HashMap<&str, NodeId> = HashMap::new();
+        for variant in enum_def.variants.iter() {
+            if let Some(original) = seen_variants.insert(&variant.text, variant.node_id) {
+                errors.push(EnumError::DuplicateVariant(
+                    variant.text.clone(),
+                    original,
+                    variant.node_id,
+                ));
+            }
+        }
+
         let variants = enum_def.variants.iter().map(|v| v.text.clone()).collect();
-        enums.add_enum(enum_def.node_id, name, variants);
+        enums.add_enum(enum_def.node_id, enum_def.name.clone(), variants);
     }
 
-    enums
+    if errors.is_empty() {
+        Ok(enums)
+    } else {
+        Err(errors)
+    }
 }

@@ -1,0 +1,17 @@
+// A function returning E!T may return a plain T with an explicit return,
+// just as it can with an implicit one.
+// Expected output: 1
+error PurchaseError {
+    OutOfStock
+}
+
+func buy(stock: int) -> PurchaseError!int
+    guard OutOfStock if stock > 0
+{
+    return stock;
+}
+
+func main() {
+    buy(1);
+    print 1;
+}

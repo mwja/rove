@@ -22,7 +22,14 @@ and my first failed attempt at a language was called Otter).
 - [x] Constraints (guard, require, ensure)
 - [x] Enums
 - [x] Switch
-- [x] Errors (about to be reworked into proper `throw` mechanics once switches are available)
+- [x] Errors
+- [ ] `throws X`, `throw`, enum errors and removing the error union types (`error!T`)
+- [ ] `try! x()`, `try x() else y` and `try x() else e { ... /* must exit function here */ }`
+- [ ] `guard` inside the function body
+  - [ ] e.g. `guard x > 0 else { return 0 }`, or `guard ::BiggerThanZero if x > 0 `
+- [ ] Fix float division (int/int should produce an int, truncated. not a float)
+- [ ] Unary operators
+- [ ] `&&` and `||` with shortcircuiting.
 - [ ] Heap allocation
 - [ ] Structs
     - [ ] Field access
@@ -42,32 +49,118 @@ compiler in this language.
 It is not meant to be used yet, or maybe ever in the future. This is a slower,
 more deliberate attempt at developing a compiled language; I have spent days
 to weeks trying to build an entire language and ended up with nothing to show
-for it.
+for it. There are no tutorials or guides yet (waiting for heap allocation and strings first)
 
-## Examples
+## Debug artifacts
 
-To run any of the examples, you can do
-
-```sh
-# Uses the .rs wrapper to compile and run the example
-cargo run --example 7_basic_func && ./examples/7_basic_func
-```
-
-You can also run any test directly on the Rove file
+Pass `--emit` with a comma-separated list to write debug artifacts next to the
+input file:
 
 ```sh
-cargo run -- ./examples/7_basic_func.rv && ./examples/7_basic_func
+cargo run -- main.rv --emit ast,typed,clif,opt-clif,cfg,obj
 ```
 
-For now, it generates a few artifacts, namely
+- `ast` - `__file.rv.ast`, the parsed AST
+- `typed` - `__file.rv.typed`, the AST with type annotations
+- `clif` - `__file.rv.clif`, the unoptimized Cranelift IR
+- `opt-clif` - `__file.rv.opt.clif`, the optimized Cranelift IR
+- `cfg` - `__file.rv.cfg`, a DOT graph of the Cranelift control flow
+- `obj` - `__file.rv.o`, the object file (otherwise deleted after linking)
 
-- `file.rv.o` - The object file
-- `file.rv.typed` - The AST typed notation of the code
-- `file.rv.clif` - The (unoptimized) Cranelift representation
-- `file.rv.opt.clif` - The (optimized) Cranelift representation
-- `file.rv.cfg` - The DOT graph of the cranelift IR.
+## Testing
 
-This is for debugging and will likely be toned down as development moves on.
+Every `.rv` file in `tests/cases/` is compiled and run as a snapshot test with
+[insta](https://insta.rs). A snapshot records either the program's exit code,
+stdout and stderr, or the compiler diagnostics if it fails to compile.
+
+```sh
+cargo test --test snapshots
+```
+
+When output changes, the test fails and shows a diff. To review and accept or
+reject the changes, install the CLI once and run review:
+
+```sh
+cargo install cargo-insta
+cargo insta review
+```
+
+To add a test, drop a new `.rv` file into `tests/cases/` (prefix it with `err_`
+if it is meant to fail), run `cargo insta test --review`, and accept the new
+snapshot. Snapshots live in `tests/snapshots/` and should be committed.
+
+## Design principles
+
+The language is evolving and being made, but I will list 'decisions' as I reach
+the point I need to make one.
+
+### Danger is highlighted with `!`
+
+Anything that can cause a program to crash must be marked with `!`, such as 
+`require!`, `ensure!` or otherwise. It's not yet decided if _callees_ must also
+obey this rule (so any function with `require!`/`ensure!` must be called with `!`
+as well). A hypothetical example:
+
+```swift
+// NOT RUNNABLE CODE - EXAMPLE
+func divide(a: int, b: int) -> int
+  require! non_zero_divisor: b != 0
+{
+  return a / b
+}
+
+func main() -> int
+{
+  // without the transitive `!` rule
+  let x = divide(1, 0);
+  // with it
+  let x = divide!(1, 0)
+}
+```
+
+If it was transitive, functions could also alternatively prove their own safety
+with a `safe` keyword, which would allow them to be called without `!`:
+
+```swift
+// NOT RUNNABLE CODE - EXAMPLE
+func divide(a: int, b: int) -> int
+  require! non_zero_divisor: b != 0
+{
+  return a / b
+}
+
+func half(a: int) -> int
+  safe
+{
+  // SAFETY: divide fails if b is 0, but we know b is 2.
+  return divide!(a, 2)
+}
+
+func main() -> int
+{
+  let x = divide!(2, 2); // must use `!` because divide is unsafe
+  let x = half(2); // no `!` needed, because half is safe
+}
+```
+
+### Enums may be capitalized or non-capitalized, depending on their function
+
+If an enums purpose is a flag, you may use a lowercase name. If it represents
+something else, it should be capitalized.
+
+```swift
+enum Color {
+  Red,
+  Green,
+  Blue
+}
+
+enum Alignment {
+  left,
+  center,
+  right
+}
+```
 
 ## Windows
 

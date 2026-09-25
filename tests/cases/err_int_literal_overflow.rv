@@ -1,0 +1,4 @@
+// An integer literal that doesn't fit in 64 bits is a compile error, not a crash.
+func main() {
+    print 9223372036854775808;
+}

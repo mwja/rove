@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/enums.rv
+---
+exit: Some(0)
+--- stdout
+1
+0
+1
+1
+0
+2

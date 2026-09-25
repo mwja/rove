@@ -1,0 +1,34 @@
+// Each function below contains one type error; all should be reported.
+func takes_int(digit: int) {
+    print digit;
+}
+
+func wrong_argument_type() {
+    takes_int(1.0);
+}
+
+func wrong_argument_count() {
+    takes_int(1, 2);
+}
+
+func float_condition() {
+    if 1.0 {}
+}
+
+func unexpected_return_value() {
+    return 1.0;
+}
+
+func wrong_return_type() -> float {
+    return 1;
+}
+
+func undefined_name() {
+    print nope;
+}
+
+func assign_undeclared() {
+    nope = 1;
+}
+
+func main() {}

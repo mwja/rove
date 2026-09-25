@@ -1,0 +1,18 @@
+// Inner blocks may shadow outer names; the outer binding is restored after.
+// Expected output: 1, 2, 3, 4, 2, 1
+func main() {
+    let a = 1;
+    print a;
+    {
+        let a = 2;
+        print a;
+        {
+            let a = 3;
+            print a;
+            a = 4;
+            print a;
+        }
+        print a;
+    }
+    print a;
+}

@@ -1,0 +1,4 @@
+// A lone `.` is not a float literal; this is a parse error.
+func main() {
+    let a = .;
+}

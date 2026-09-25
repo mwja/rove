@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_guard_unknown_error.rv
+---
+compile error:
+[1023] Error: error not found in expected error set
+   ╭─[ tests/cases/err_guard_unknown_error.rv:7:5 ]
+   │
+ 7 │     guard Missing if stock > 0
+   │     ─────────────┬────────────  
+   │                  ╰────────────── error `Missing` not found in expected error set
+───╯

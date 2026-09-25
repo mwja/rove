@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/comments.rv
+---
+exit: Some(0)
+--- stdout
+1
+2
+3

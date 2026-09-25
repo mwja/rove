@@ -1,0 +1,14 @@
+// A failing require! aborts the program with exit code 1, reporting the
+// constraint's tag, function and source line.
+// Expected: prints 1, then aborts on the second call (99 is never printed)
+func positive(x: int) -> int
+    require! is_positive: x > 0
+{
+    return x;
+}
+
+func main() {
+    print positive(1);
+    print positive(0);
+    print 99;
+}

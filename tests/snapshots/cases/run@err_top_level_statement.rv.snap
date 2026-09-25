@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_top_level_statement.rv
+---
+compile error:
+Error: failed to parse
+   ╭─[ tests/cases/err_top_level_statement.rv:2:1 ]
+   │
+ 2 │ print 1;
+   │ ────┬───  
+   │     ╰───── error occured here
+───╯

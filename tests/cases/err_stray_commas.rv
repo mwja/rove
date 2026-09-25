@@ -1,0 +1,7 @@
+// A comma must follow an item: empty lists with just a comma, and doubled
+// commas, are parse errors.
+func f(,) {}
+
+enum E { A,, B }
+
+func main() {}

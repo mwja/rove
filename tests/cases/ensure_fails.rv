@@ -1,0 +1,12 @@
+// A failing ensure! aborts the program with exit code 1 after the body runs.
+// Expected: prints 2, then aborts on the second call
+func double(x: int) -> int
+    ensure! doubled: ret == x * 2
+{
+    return x + 1;
+}
+
+func main() {
+    print double(1);
+    print double(2);
+}

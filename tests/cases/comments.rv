@@ -1,0 +1,15 @@
+// Line comments, block comments (single and multi-line) and a trailing line
+// comment with no final newline should all be ignored.
+// Expected output: 1, 2, 3
+
+/* a block comment before any definitions */
+func main() {
+    print 1; // after a statement
+    /* inline */ print 2; /* between */
+    /*
+     * a multi-line block comment
+     * containing * and / characters
+     */
+    print 3;
+    /**/
+} // no newline after this comment

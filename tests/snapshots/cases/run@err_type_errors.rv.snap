@@ -1,0 +1,60 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_type_errors.rv
+---
+compile error:
+[1009] Error: incorrect argument type (expected int for argument 0, got float)
+   ╭─[ tests/cases/err_type_errors.rv:7:15 ]
+   │
+ 7 │     takes_int(1.0);
+   │               ─┬─  
+   │                ╰─── incorrect argument of type float passed here
+───╯
+[1008] Error: incorrect number of arguments
+    ╭─[ tests/cases/err_type_errors.rv:11:5 ]
+    │
+ 11 │     takes_int(1, 2);
+    │     ───────┬───────  
+    │            ╰───────── attempted to call here with 2 arguments, expected 1
+────╯
+[1003] Error: condition for if statement must be an int
+    ╭─[ tests/cases/err_type_errors.rv:15:8 ]
+    │
+ 15 │     if 1.0 {}
+    │        ─┬─  
+    │         ╰─── condition of type float is here
+────╯
+[1012] Error: did not expect return value
+    ╭─[ tests/cases/err_type_errors.rv:19:5 ]
+    │
+ 19 │     return 1.0;
+    │     ─────┬────  
+    │          ╰────── did not expect return value (found value of type float)
+────╯
+[1002] Error: types int and float are incompatible
+    ╭─[ tests/cases/err_type_errors.rv:23:5 ]
+    │
+ 23 │     return 1;
+    │     ────┬───  
+    │         ╰───── this value has type int
+    │
+    ├─[ tests/cases/err_type_errors.rv:22:29 ]
+    │
+ 22 │ func wrong_return_type() -> float {
+    │                             ──┬──  
+    │                               ╰──── but this value has type float
+────╯
+[1006] Error: cannot resolve name nope
+    ╭─[ tests/cases/err_type_errors.rv:27:11 ]
+    │
+ 27 │     print nope;
+    │           ──┬─  
+    │             ╰─── name is here
+────╯
+[1006] Error: cannot resolve name nope
+    ╭─[ tests/cases/err_type_errors.rv:31:5 ]
+    │
+ 31 │     nope = 1;
+    │     ──┬─  
+    │       ╰─── name is here
+────╯

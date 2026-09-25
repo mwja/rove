@@ -1,0 +1,20 @@
+---
+source: tests/snapshots.rs
+assertion_line: 78
+input_file: tests/cases/err_stray_commas.rv
+---
+compile error:
+Error: failed to parse
+   ╭─[ tests/cases/err_stray_commas.rv:3:8 ]
+   │
+ 3 │ func f(,) {}
+   │        ┬  
+   │        ╰── error occured here
+───╯
+Error: failed to parse
+   ╭─[ tests/cases/err_stray_commas.rv:5:12 ]
+   │
+ 5 │ enum E { A,, B }
+   │            │ 
+   │            ╰─ expected Ident_text here
+───╯

@@ -1,0 +1,10 @@
+---
+source: tests/snapshots.rs
+assertion_line: 78
+input_file: tests/cases/trailing_commas.rv
+---
+exit: Some(0)
+--- stdout
+6
+1
+2

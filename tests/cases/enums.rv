@@ -1,0 +1,40 @@
+// Enum variants can be named in full or inferred with `::Variant` when the
+// expected type is known. Printing an enum prints the variant's index.
+// Expected output: 1, 0, 1, 1, 0, 2
+enum Boolean {
+    false,
+    true,
+    maybe
+}
+
+enum Direction {
+    Up,
+    Down
+}
+
+func step(v: int, d: Direction) -> int {
+    if d == Direction::Up {
+        return v + 1;
+    }
+    return v - 1;
+}
+
+func xor(left: Boolean, right: Boolean) -> Boolean {
+    if left == right {
+        return ::false;
+    }
+    return ::true;
+}
+
+func main() {
+    let v = 0;
+    v = step(v, ::Up);
+    v = step(v, ::Up);
+    v = step(v, Direction::Down);
+    print v;
+    print xor(::true, ::true);
+    print xor(::true, ::false);
+    print xor(::false, ::true);
+    print xor(::false, ::false);
+    print Boolean::maybe;
+}

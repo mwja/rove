@@ -1,0 +1,21 @@
+// require!/ensure! constraints that hold have no observable effect. `ret` is
+// the return value and `old(x)` is x's value on entry. Tags are optional.
+// Expected output: 50, 2
+func make_purchase(wallet: int, price: int) -> int
+    require! enough_money: wallet >= price
+    ensure! result_correct: ret == wallet - price
+{
+    return wallet - price;
+}
+
+func inc(x: int) -> int
+    require! : x >= 0
+    ensure! grew: ret > old(x)
+{
+    return x + 1;
+}
+
+func main() {
+    print make_purchase(100, 50);
+    print inc(1);
+}

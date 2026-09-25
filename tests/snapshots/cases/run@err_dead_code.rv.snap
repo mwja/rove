@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_dead_code.rv
+---
+compile error:
+[1013] Error: dead code
+   ╭─[ tests/cases/err_dead_code.rv:4:5 ]
+   │
+ 4 │     print 1;
+   │     ───┬───  
+   │        ╰───── this line (and following lines) will never be executed.
+───╯

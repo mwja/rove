@@ -1,0 +1,10 @@
+// A non-void function must return on every path.
+func pick(digit: int) -> float {
+    if digit == 1 {
+        return 1.0;
+    } else if digit == 2 {
+        return 2.0;
+    }
+}
+
+func main() {}

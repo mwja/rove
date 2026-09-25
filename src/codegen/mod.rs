@@ -130,7 +130,7 @@ impl Runtime {
 
                 module
                     .declare_function("rt_println_i64", Linkage::Import, &printf_sig)
-                    .expect("unable to declare runtime function")
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
             },
             println_f64: {
                 let mut printf_sig = module.make_signature();
@@ -141,7 +141,7 @@ impl Runtime {
 
                 module
                     .declare_function("rt_println_f64", Linkage::Import, &printf_sig)
-                    .expect("unable to declare runtime function")
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
             },
             abort_constraint: {
                 let mut abort_sig = module.make_signature();
@@ -159,7 +159,7 @@ impl Runtime {
 
                 module
                     .declare_function("rt_abort_constraint", Linkage::Import, &abort_sig)
-                    .expect("unable to declare runtime function")
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
             },
             start: {
                 let mut start_sig = module.make_signature();
@@ -172,7 +172,7 @@ impl Runtime {
 
                 module
                     .declare_function("rt_start", Linkage::Import, &start_sig)
-                    .expect("unable to declare runtime function")
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
             },
         }
     }
@@ -195,7 +195,8 @@ pub fn generate_object(
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let options = options.unwrap_or_default();
 
-    let isa_builder = cranelift::native::builder().unwrap();
+    let isa_builder =
+        cranelift::native::builder().unwrap_or_else(|e| bug!("unable to create a native isa: {e}"));
     let mut flag_builder = settings::builder();
     flag_builder.set("is_pic", "true")?;
     flag_builder.set("opt_level", "speed_and_size")?;
@@ -204,7 +205,8 @@ pub fn generate_object(
 
     let isa = isa_builder.finish(flags)?;
 
-    let object_builder = ObjectBuilder::new(isa, "program", default_libcall_names()).unwrap();
+    let object_builder = ObjectBuilder::new(isa, "program", default_libcall_names())
+        .unwrap_or_else(|e| bug!("unable to create an object builder for the program: {e}"));
     let mut module = ObjectModule::new(object_builder);
 
     let mut rcx = ReprCx::new(module.target_config());
@@ -217,7 +219,9 @@ pub fn generate_object(
                 let def_id = tcx
                     .defs
                     .resolve_def_id_for_node_id(func_def.node_id)
-                    .unwrap();
+                    .unwrap_or_else(|| {
+                        bug!("a function definition was unable to be resolved to a def_id")
+                    });
                 let def = tcx.defs.def(def_id);
                 let Some(Def {
                     kind: DefKind::Function(sig),
@@ -248,15 +252,24 @@ pub fn generate_object(
     }
 
     let mut emit_clif_file = match &options.emit_clif_to {
-        Some(path) => Some(std::fs::File::create(path).unwrap()),
+        Some(path) => Some(
+            std::fs::File::create(path)
+                .unwrap_or_else(|e| bug!("unable to create a file to emit clif: {e}")),
+        ),
         None => None,
     };
     let mut emit_opt_clif_file = match &options.emit_opt_clif_to {
-        Some(path) => Some(std::fs::File::create(path).unwrap()),
+        Some(path) => Some(
+            std::fs::File::create(path)
+                .unwrap_or_else(|e| bug!("unable to create a file to emit optimized clif: {e}")),
+        ),
         None => None,
     };
     let mut emit_cfg_file = match &options.emit_cfg_to {
-        Some(path) => Some(std::fs::File::create(path).unwrap()),
+        Some(path) => Some(
+            std::fs::File::create(path)
+                .unwrap_or_else(|e| bug!("unable to create a file to emit a DOT diagram: {e}")),
+        ),
         None => None,
     };
 
@@ -271,8 +284,10 @@ pub fn generate_object(
         let def_id = tcx
             .defs
             .resolve_def_id_for_node_id(func_def.node_id)
-            .unwrap();
-        let id = table.get(&def_id).unwrap();
+            .unwrap_or_else(|| bug!("a function definition was unable to be resolved to a def_id when lowering to cranelift"));
+        let id = table
+            .get(&def_id)
+            .unwrap_or_else(|| bug!("a function def_id has no cranelift function id"));
         ctx.func.name = cranelift::codegen::ir::UserFuncName::User(UserExternalName {
             namespace: 0,
             index: id.as_u32(),
@@ -280,8 +295,16 @@ pub fn generate_object(
 
         let mut func_ctx = FunctionBuilderContext::new();
 
-        let cx = CompilerCtxt::new(tcx, tcx.bodies.get(&def_id).unwrap(), &table);
-        ctx.func.signature = func_sig.remove(&def_id).unwrap();
+        let cx = CompilerCtxt::new(
+            tcx,
+            tcx.bodies
+                .get(&def_id)
+                .unwrap_or_else(|| bug!("a function def_id has no typechecked body")),
+            &table,
+        );
+        ctx.func.signature = func_sig
+            .remove(&def_id)
+            .unwrap_or_else(|| bug!("a function def_id has no lowered signature"));
 
         let mut fbuilder = FunctionBuilder::new(&mut ctx.func, &mut func_ctx);
         // disable in release builds of apps.
@@ -349,19 +372,22 @@ pub fn generate_object(
         codegen.lower(func_def);
 
         if let Some(file) = &mut emit_cfg_file {
-            writeln!(file, "{}", CFGPrinter::new(fbuilder.func).to_string()).unwrap();
+            writeln!(file, "{}", CFGPrinter::new(fbuilder.func).to_string())
+                .unwrap_or_else(|e| bug!("unable to write the DOT diagram to its file: {e}"));
         }
 
         fbuilder.finalize(module.target_config());
 
         if let Some(file) = &mut emit_clif_file {
-            writeln!(file, "{}", ctx.func.display()).unwrap();
+            writeln!(file, "{}", ctx.func.display())
+                .unwrap_or_else(|e| bug!("unable to write clif to its file: {e}"));
         }
 
         module.define_function(*id, &mut ctx)?;
 
         if let Some(file) = &mut emit_opt_clif_file {
-            writeln!(file, "{}", ctx.func.display()).unwrap();
+            writeln!(file, "{}", ctx.func.display())
+                .unwrap_or_else(|e| bug!("unable to write optimized clif to its file: {e}"));
         }
 
         module.clear_context(&mut ctx);
@@ -502,13 +528,13 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn frame(&self, scope: ScopeId) -> &ScopeFrame {
         self.scope_frames
             .get(&scope)
-            .expect("no current frame to compile with")
+            .unwrap_or_else(|| bug!("no scope frame exists for the requested scope"))
     }
 
     fn frame_mut(&mut self, scope: ScopeId) -> &mut ScopeFrame {
         self.scope_frames
             .get_mut(&scope)
-            .expect("no current frame to compile with")
+            .unwrap_or_else(|| bug!("no scope frame exists for the requested scope"))
     }
 
     fn frame_locals(&self, scope: ScopeId) -> Vec<LocalId> {
@@ -615,7 +641,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn is_current_block_terminated(&mut self) -> bool {
-        self.is_block_terminated(self.builder.current_block().unwrap())
+        self.is_block_terminated(
+            self.builder
+                .current_block()
+                .unwrap_or_else(|| bug!("builder has no current block")),
+        )
     }
 
     fn is_block_terminated(&mut self, block: Block) -> bool {
@@ -728,7 +758,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .lower_expr(condition.clone())
             .expect_scalar("constraint must be boolean");
 
-        let block = self.builder.current_block().unwrap();
+        let block = self
+            .builder
+            .current_block()
+            .unwrap_or_else(|| bug!("builder has no current block when lowering a constraint"));
         let param_types: Vec<Type> = self
             .builder
             .func
@@ -753,7 +786,12 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         // fallible types is yet to be achieved.
 
         // get the usize of the error
-        let Res::Err(err_id) = self.cx.body.node_res(constraint.node_id()).unwrap() else {
+        let Res::Err(err_id) = self
+            .cx
+            .body
+            .node_res(constraint.node_id())
+            .unwrap_or_else(|| bug!("a constraint has no resolution"))
+        else {
             unreachable!("non error cannot be the res of an error constraint");
         };
 
@@ -761,7 +799,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             self.rcx
                 .repr_of(&self.cx.body.return_ty)
                 .tag_type()
-                .unwrap(),
+                .unwrap_or_else(|| bug!("a fallible return type has no tag type")),
             err_id.as_usize() as i64,
         );
         self.builder.ins().brif(
@@ -788,7 +826,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .lower_expr(condition.clone())
             .expect_scalar("constraint must be boolean");
 
-        let block = self.builder.current_block().unwrap();
+        let block = self
+            .builder
+            .current_block()
+            .unwrap_or_else(|| bug!("builder has no current block when lowering a constraint"));
         let param_types: Vec<Type> = self
             .builder
             .func
@@ -838,25 +879,25 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let fn_name = self
             .module
             .declare_anonymous_data(true, false)
-            .expect("failed to define anonymous data");
+            .unwrap_or_else(|e| bug!("unable to declare anonymous data: {e}"));
 
         let tag_name = self
             .module
             .declare_anonymous_data(true, false)
-            .expect("failed to define anonymous data");
+            .unwrap_or_else(|e| bug!("unable to declare anonymous data: {e}"));
 
         let mut fn_name_data_desc = DataDescription::new();
         fn_name_data_desc.define(self.fn_name.as_bytes().to_vec().into_boxed_slice());
         self.module
             .define_data(fn_name, &fn_name_data_desc)
-            .expect("failed to define data");
+            .unwrap_or_else(|e| bug!("unable to define data: {e}"));
 
         let resolved_tag_name = constraint.tag().clone().unwrap_or("unnamed".to_owned());
         let mut tag_name_data_desc = DataDescription::new();
         tag_name_data_desc.define(resolved_tag_name.as_bytes().to_vec().into_boxed_slice());
         self.module
             .define_data(tag_name, &tag_name_data_desc)
-            .expect("failed to define data");
+            .unwrap_or_else(|e| bug!("unable to define data: {e}"));
 
         // Load ptrs for these in the function
         let local_fn_name_ref = self.module.declare_data_in_func(fn_name, self.builder.func);
@@ -985,6 +1026,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstStmtKind::Continue(_) => self.lower_continue_stmt(),
             ast::AstStmtKind::Fallthrough(_) => self.lower_fallthrough_stmt(),
             ast::AstStmtKind::Switch(switch_stmt) => self.lower_switch_stmt(switch_stmt),
+            ast::AstStmtKind::Throw(_) => todo!("codegen for throw is not yet implemented"),
         };
     }
 
@@ -1036,7 +1078,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             let value = self.lower_expr(*case.expr.clone());
             // check equality, insert a fake astnode for the condition
             let condition = self.lower_cond_direct(
-                self.cx.body.node_ty(case.expr.node_id()).unwrap(),
+                self.cx
+                    .body
+                    .node_ty(case.expr.node_id())
+                    .unwrap_or_else(|| bug!("a switch case expression has no type")),
                 base_value.expect_scalar("switch target must be scalar"),
                 value.expect_scalar("switch case must be scalar"),
                 self.cx.tcx.int_ty(),
@@ -1076,7 +1121,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 .cx
                 .body
                 .node_scope(body.body.node_id)
-                .expect("node scope not found");
+                .unwrap_or_else(|| bug!("a block has no associated scope"));
             self.switches.push(SwitchInfo {
                 scope: scope_id,
                 current_block: *block,
@@ -1105,17 +1150,29 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_fallthrough_stmt(&mut self) {
-        let dest = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Fallthrough);
+        let dest = self.cleanup_block(
+            self.current_scope
+                .unwrap_or_else(|| bug!("fallthrough lowered outside of any scope")),
+            ExitKind::Fallthrough,
+        );
         self.builder.ins().jump(dest, &[]);
     }
 
     fn lower_break_stmt(&mut self) {
-        let dest = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Break);
+        let dest = self.cleanup_block(
+            self.current_scope
+                .unwrap_or_else(|| bug!("break lowered outside of any scope")),
+            ExitKind::Break,
+        );
         self.builder.ins().jump(dest, &[]);
     }
 
     fn lower_continue_stmt(&mut self) {
-        let dest = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Continue);
+        let dest = self.cleanup_block(
+            self.current_scope
+                .unwrap_or_else(|| bug!("continue lowered outside of any scope")),
+            ExitKind::Continue,
+        );
         self.builder.ins().jump(dest, &[]);
     }
 
@@ -1151,16 +1208,24 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let innermost_switch = self.switches.last();
         match kind {
             ExitKind::Continue if innermost_loop.is_some_and(|l| l.scope == scope_id) => {
-                innermost_loop.unwrap().header
+                innermost_loop
+                    .unwrap_or_else(|| bug!("innermost loop was checked to be some, but was none"))
+                    .header
             }
             ExitKind::Break if innermost_loop.is_some_and(|l| l.scope == scope_id) => {
-                innermost_loop.unwrap().exit
+                innermost_loop
+                    .unwrap_or_else(|| bug!("innermost loop was checked to be some, but was none"))
+                    .exit
             }
             ExitKind::Fallthrough if innermost_switch.is_some_and(|s| s.scope == scope_id) => {
                 innermost_switch
-                    .unwrap()
+                    .unwrap_or_else(|| {
+                        bug!("innermost switch was checked to be some, but was none")
+                    })
                     .upcoming_block
-                    .expect("impossible to fallthrough with no next block (typeck checks)")
+                    .unwrap_or_else(|| {
+                        bug!("tried to fallthrough with no next block, which typeck should reject")
+                    })
             }
             ExitKind::Continue | ExitKind::Break | ExitKind::Fallthrough => match parent {
                 Some(parent) => self.cleanup_block(parent, kind),
@@ -1182,7 +1247,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .cx
             .body
             .node_scope(body.node_id)
-            .expect("node scope not found");
+            .unwrap_or_else(|| bug!("a block has no associated scope"));
 
         // Create relevant header blocks (condition checks)
         let header_block = self.builder.create_block();
@@ -1234,7 +1299,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             )],
             (e, r) => unreachable!("return arity mismatch: expr={}, repr={r:?}", e.is_some()),
         };
-        let target = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Return);
+        let target = self.cleanup_block(
+            self.current_scope
+                .unwrap_or_else(|| bug!("return lowered outside of any scope")),
+            ExitKind::Return,
+        );
         self.builder.ins().jump(target, &args);
     }
 
@@ -1244,13 +1313,21 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .expect_scalar("cannot implicitly return pre-made fallible type (yet)");
         let block_arg = BlockArg::Value(v);
         // jump to landing pad
-        let target = self.cleanup_block(self.current_scope.unwrap(), ExitKind::Return);
+        let target = self.cleanup_block(
+            self.current_scope
+                .unwrap_or_else(|| bug!("implicit return lowered outside of any scope")),
+            ExitKind::Return,
+        );
         self.builder.ins().jump(target, [&block_arg]);
     }
 
     fn emit_frame_locals_declare(&mut self, scope_id: ScopeId) {
         for local_id in self.frame_locals(scope_id).into_iter() {
-            let ty = self.cx.body.local_ty(local_id).unwrap();
+            let ty = self
+                .cx
+                .body
+                .local_ty(local_id)
+                .unwrap_or_else(|| bug!("a frame local has no type"));
             let variable = self
                 .builder
                 .declare_var(self.rcx.repr_of(&ty).expect_scalar("local variable"));
@@ -1272,7 +1349,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .cx
             .body
             .node_scope(block.node_id)
-            .expect("node scope not found");
+            .unwrap_or_else(|| bug!("a block has no associated scope"));
 
         // open scope frame for this block.
         self.open_frame(scope_id);
@@ -1326,8 +1403,12 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let mut merge_reachable = else_block.is_none() || then_falls_through;
 
         if let Some(else_) = if_stmt.else_ {
-            self.builder.switch_to_block(else_block.unwrap());
-            self.builder.seal_block(else_block.unwrap());
+            self.builder.switch_to_block(else_block.unwrap_or_else(|| {
+                bug!("if statement has an else branch but no else block was created")
+            }));
+            self.builder.seal_block(else_block.unwrap_or_else(|| {
+                bug!("if statement has an else branch but no else block was created")
+            }));
             match else_ {
                 ast::AstElseBranch::Block(block_stmt) => {
                     self.lower_block_stmt(block_stmt);
@@ -1354,8 +1435,14 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_assign(&mut self, assign: ast::AstAssignStmt) {
         self.loc(&assign.node_id);
         let target = self
-            .lookup_local(&self.cx.body.node_res(assign.node_id).unwrap())
-            .unwrap();
+            .lookup_local(
+                &self
+                    .cx
+                    .body
+                    .node_res(assign.node_id)
+                    .unwrap_or_else(|| bug!("an assignment target has no resolution")),
+            )
+            .unwrap_or_else(|| bug!("an assignment target does not resolve to a local variable"));
         let value = self
             .lower_expr(*assign.expr)
             .expect_scalar("cannot store fallible types in variables (yet)");
@@ -1371,14 +1458,23 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_let(&mut self, let_decl: ast::AstLetDecl) {
         self.loc(&let_decl.name.node_id);
 
-        let Res::Local(local_id) = self.cx.body.node_res(let_decl.name.node_id).unwrap() else {
+        let Res::Local(local_id) = self
+            .cx
+            .body
+            .node_res(let_decl.name.node_id)
+            .unwrap_or_else(|| bug!("a let declaration has no resolution"))
+        else {
             unreachable!();
         };
         let value = self
             .lower_expr(*let_decl.expr)
             .expect_scalar("cannot store fallible types in variables (yet)");
         // for now we only have i64s... so no need to check
-        let variable = self.locals.get(&local_id).copied().unwrap();
+        let variable = self
+            .locals
+            .get(&local_id)
+            .copied()
+            .unwrap_or_else(|| bug!("a let-declared local has no cranelift variable"));
         self.builder.def_var(variable, value);
 
         self.insert(Res::Local(local_id), variable);
@@ -1391,7 +1487,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstExprKind::Literal(_) => Operand::Scalar(self.lower_lit(expr)),
             ast::AstExprKind::Binary(_) => Operand::Scalar(self.lower_bin_expr(expr)),
             ast::AstExprKind::Ident(ident) => self.lower_ident(ident),
-            ast::AstExprKind::Call(call_expr) => self.lower_call(call_expr),
+            ast::AstExprKind::Call(call_expr) => match self.cx.body.node_res(call_expr.node_id) {
+                Some(res @ Res::ConstraintOld(_)) => self.lower_value_res(res),
+                _ => self.lower_call(call_expr),
+            },
             ast::AstExprKind::Path(path_expr) => self.lower_path(path_expr),
             ast::AstExprKind::ImplicitPath(implicit_path_expr) => {
                 self.lower_implicit_path(implicit_path_expr)
@@ -1400,33 +1499,47 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_path(&mut self, path_expr: ast::AstPathExpr) -> Operand {
-        let res = self.cx.body.node_res(path_expr.node_id).unwrap();
+        let res = self
+            .cx
+            .body
+            .node_res(path_expr.node_id)
+            .unwrap_or_else(|| bug!("a path expression has no resolution"));
         self.lower_value_res(res)
     }
 
     fn lower_implicit_path(&mut self, implicit_path_expr: ast::AstImplicitPathExpr) -> Operand {
-        let res = self.cx.body.node_res(implicit_path_expr.node_id).unwrap();
+        let res = self
+            .cx
+            .body
+            .node_res(implicit_path_expr.node_id)
+            .unwrap_or_else(|| bug!("an implicit path expression has no resolution"));
         self.lower_value_res(res)
     }
 
     /// Lower a res that is a value (for now only enum variants.)
     fn lower_value_res(&mut self, res: Res) -> Operand {
         match res {
-            Res::Local(..) => Operand::Scalar(
-                self.builder.use_var(
-                    self.lookup_local(&res)
-                        .expect("unable to find local variable"),
-                ),
-            ),
+            Res::Local(..) => {
+                Operand::Scalar(self.builder.use_var(self.lookup_local(&res).unwrap_or_else(
+                    || bug!("a local variable has no associated cranelift variable"),
+                )))
+            }
             Res::Param(param_id) => {
                 Operand::Scalar(self.builder.block_params(self.entry_block)[param_id.index()])
             }
             Res::Def(def_id) => {
                 let callee = self.module.declare_func_in_func(
-                    self.cx.def_id_to_function_id(def_id).unwrap(),
+                    self.cx
+                        .def_id_to_function_id(def_id)
+                        .unwrap_or_else(|| bug!("a function def_id has no cranelift function id")),
                     &mut self.builder.func,
                 );
-                let def = self.cx.tcx.defs.def(def_id).unwrap();
+                let def = self
+                    .cx
+                    .tcx
+                    .defs
+                    .def(def_id)
+                    .unwrap_or_else(|| bug!("a resolved def_id has no associated def"));
                 match def.kind {
                     DefKind::Function(_) => {
                         Operand::Scalar(self.builder.ins().func_addr(func_ty(self.module), callee))
@@ -1437,7 +1550,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.old_values
                     .get(&old_id)
                     .cloned()
-                    .expect("unable to get old id (error in compiler)")
+                    .unwrap_or_else(|| bug!("an old value was referenced but never captured"))
                     .expect_scalar("cannot refer to a fallible type as a value"),
             ),
             Res::ConstraintRet => {
@@ -1463,7 +1576,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
     fn lower_call(&mut self, expr: ast::AstCallExpr) -> Operand {
         // Get callee
-        let callee_ty = self.cx.body.node_ty(expr.callee.node_id()).unwrap();
+        let callee_ty = self
+            .cx
+            .body
+            .node_ty(expr.callee.node_id())
+            .unwrap_or_else(|| bug!("a call's callee has no type"));
         let callee_sig = match callee_ty.kind() {
             TyKind::Func(callee_sig) => callee_sig,
             _ => unreachable!(),
@@ -1506,7 +1623,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     /// the proper cranelift `FuncId` if so.
     fn try_expr_function_ident(&self, ident: &ast::AstExpr) -> Option<FuncId> {
         if let ast::AstExprKind::Ident(ident) = &ident.kind {
-            let res = &self.cx.body.node_res(ident.node_id).unwrap();
+            let res = &self
+                .cx
+                .body
+                .node_res(ident.node_id)
+                .unwrap_or_else(|| bug!("an identifier has no resolution"));
             if let Res::Def(def_id) = res {
                 self.cx.def_id_to_function_id(*def_id)
             } else {
@@ -1518,7 +1639,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_ident(&mut self, ident: ast::AstIdent) -> Operand {
-        let res = self.cx.body.node_res(ident.node_id).unwrap();
+        let res = self
+            .cx
+            .body
+            .node_res(ident.node_id)
+            .unwrap_or_else(|| bug!("an identifier has no resolution"));
         self.lower_value_res(res)
     }
 
@@ -1556,8 +1681,13 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             },
             ast::AstBinaryOperator::Div => {
                 // In the future this will be defined in the language itself.
-                let x = self.builder.ins().fcvt_from_sint(types::F64, x);
-                let y = self.builder.ins().fcvt_from_sint(types::F64, y);
+                let (x, y) = match x_ty.kind() {
+                    TyKind::Float => (x, y),
+                    _ => (
+                        self.builder.ins().fcvt_from_sint(types::F64, x),
+                        self.builder.ins().fcvt_from_sint(types::F64, y),
+                    ),
+                };
                 self.builder.ins().fdiv(x, y)
             }
             ast::AstBinaryOperator::Eq
@@ -1621,7 +1751,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let ast::AstExprKind::Binary(bin_expr) = expr.kind else {
             unreachable!()
         };
-        let x_ty = self.cx.body.node_ty(bin_expr.left.node_id()).unwrap();
+        let x_ty = self
+            .cx
+            .body
+            .node_ty(bin_expr.left.node_id())
+            .unwrap_or_else(|| bug!("the left operand of a binary expression has no type"));
         let x = self
             .lower_expr(*bin_expr.left)
             .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
@@ -1629,7 +1763,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .lower_expr(*bin_expr.right)
             .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
 
-        let res_ty = self.cx.body.node_ty(bin_expr.node_id).unwrap();
+        let res_ty = self
+            .cx
+            .body
+            .node_ty(bin_expr.node_id)
+            .unwrap_or_else(|| bug!("a binary expression has no type"));
         self.lower_cond_direct(x_ty, x, y, res_ty, bin_expr.operator)
     }
 
@@ -1637,7 +1775,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let ast::AstExprKind::Literal(lit) = expr.kind else {
             unreachable!()
         };
-        let ty = self.cx.body.node_ty(lit.node_id).unwrap();
+        let ty = self
+            .cx
+            .body
+            .node_ty(lit.node_id)
+            .unwrap_or_else(|| bug!("a literal has no type"));
         let repr = self.rcx.repr_of(&ty).expect_scalar("literal");
         match repr {
             types::I64 => self.builder.ins().iconst(repr, lit.value.as_int()),
@@ -1648,7 +1790,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
     fn lower_print(&mut self, print: ast::AstPrintStmt) {
         self.loc(&print.node_id);
-        let x_ty = self.cx.body.node_ty(print.expr.node_id()).unwrap();
+        let x_ty = self
+            .cx
+            .body
+            .node_ty(print.expr.node_id())
+            .unwrap_or_else(|| bug!("a print expression has no type"));
         let x = self
             .lower_expr(*print.expr)
             .expect_scalar("cannot print fallible type");

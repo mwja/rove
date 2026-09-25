@@ -1,0 +1,51 @@
+// switch takes the matching case; `fallthrough` continues into the next case
+// (including else); else catches everything unmatched.
+// Expected output: 20, 30, 40, 100, 6000, 3
+enum Colour {
+    Red,
+    Green,
+    Blue
+}
+
+func pick(v: int) {
+    switch v {
+        case 1 => {
+            print 10;
+        }
+        case 2 => {
+            print 20;
+            fallthrough;
+        }
+        case 3 => {
+            print 30;
+        }
+        else => {
+            print 40;
+        }
+    }
+}
+
+func main() {
+    pick(2);
+    pick(7);
+
+    let c = Colour::Green;
+    switch c {
+        case ::Red => {
+            print 0 - 100;
+        }
+        case ::Green => {
+            print 100;
+            fallthrough;
+        }
+        else => {
+            print 6000;
+        }
+    }
+
+    switch Colour::Blue {
+        case ::Red => { print 1; }
+        case ::Green => { print 2; }
+        case ::Blue => { print 3; }
+    }
+}

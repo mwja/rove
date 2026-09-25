@@ -410,12 +410,12 @@ impl DiagnoseWith<NodeId> for TypeError {
                 ]
             }
             NestedFallibleType(node_id) => {
-                vec![
-                    Diagnostic::new(message)
-                        .with_code(self.as_code())
-                        .with_label_from(recorder, node_id, "nested fallible type here")
-                        .with_help(Some("consider collapsing the nested fallible types into a single fallible type")),
-                ]
+                vec![Diagnostic::new(message)
+                    .with_code(self.as_code())
+                    .with_label_from(recorder, node_id, "nested fallible type here")
+                    .with_help(Some(
+                        "consider collapsing the nested fallible types into a single fallible type",
+                    ))]
             }
             FallibleTypesNotYetStored(node_id) => {
                 vec![
@@ -523,15 +523,13 @@ impl DiagnoseWith<NodeId> for TypeError {
                 vec![diag]
             }
             FallthroughOutsideCase(node_id) => {
-                vec![
-                    Diagnostic::new(message)
-                        .with_code(self.as_code())
-                        .with_label_from(
-                            recorder,
-                            node_id,
-                            "fallthrough is only permitted inside non-else cases of switch statements",
-                        ),
-                ]
+                vec![Diagnostic::new(message)
+                    .with_code(self.as_code())
+                    .with_label_from(
+                        recorder,
+                        node_id,
+                        "fallthrough is only permitted inside non-else cases of switch statements",
+                    )]
             }
             FallthroughWithNothingToFallThroughTo(node_id) => {
                 vec![
@@ -792,12 +790,17 @@ impl<'c> TypeckCtxt<'c> {
         self.body.set_node_res(node_id, Res::Local(local_id));
         self.scopes
             .last_mut()
-            .unwrap()
+            .unwrap_or_else(|| bug!("tried to declare a local with no active scope"))
             .insert(name.to_string(), Res::Local(local_id));
 
         self.body
             .scope_locals
-            .entry(self.current_scope_ids.last().copied().unwrap())
+            .entry(
+                self.current_scope_ids
+                    .last()
+                    .copied()
+                    .unwrap_or_else(|| bug!("tried to declare a local with no active scope id")),
+            )
             .or_default()
             .push(local_id);
 
@@ -810,7 +813,7 @@ impl<'c> TypeckCtxt<'c> {
         self.body.set_node_res(node_id, Res::Param(param_id));
         self.scopes
             .last_mut()
-            .unwrap()
+            .unwrap_or_else(|| bug!("tried to declare a param with no active scope"))
             .insert(name.to_string(), Res::Param(param_id));
         param_id
     }
@@ -885,8 +888,18 @@ pub fn typeck_ast(
                 let def_id = tcx
                     .defs
                     .resolve_def_id_for_node_id(ast_func_def.node_id)
-                    .unwrap();
-                let def = tcx.defs.def(def_id).unwrap().clone();
+                    .unwrap_or_else(|| {
+                        bug!(
+                        "a function definition was unable to be resolved to a def_id during typeck"
+                    )
+                    });
+                let def = tcx
+                    .defs
+                    .def(def_id)
+                    .unwrap_or_else(|| {
+                        bug!("a resolved def_id has no associated def during typeck")
+                    })
+                    .clone();
                 match def {
                     defs::Def {
                         kind: defs::DefKind::Function(sig),
@@ -919,7 +932,9 @@ pub fn typeck_ast(
                             (_, Returns(false, _)) => {
                                 errors.push(TypeError::NotAllBranchesReturn(
                                     ast_func_def.node_id,
-                                    ast_func_def.return_node_id.unwrap(),
+                                    ast_func_def.return_node_id.unwrap_or_else(|| {
+                                        bug!("a non-void function has no return type node id")
+                                    }),
                                     tccx.body.return_ty.clone(),
                                 ));
                             }
@@ -948,8 +963,18 @@ pub fn typeck_ast(
 
 fn typeck_sig(tccx: &mut TypeckCtxt, sig: &FuncSig) -> Result<(), TypeError> {
     // ensure that we don't return !!T. !!T is (for now) unrepresentable
-    if sig.return_ty.is_fallible() && sig.return_ty.success_ty().unwrap().is_fallible() {
-        return Err(TypeError::NestedFallibleType(tccx.return_node_id.unwrap()));
+    if sig.return_ty.is_fallible()
+        && sig
+            .return_ty
+            .success_ty()
+            .unwrap_or_else(|| bug!("a fallible return type has no success type"))
+            .is_fallible()
+    {
+        return Err(TypeError::NestedFallibleType(
+            tccx.return_node_id.unwrap_or_else(|| {
+                bug!("a function with a return type has no return type node id")
+            }),
+        ));
     }
 
     Ok(())
@@ -991,7 +1016,11 @@ fn typeck_guard_constraint_error(
 ) -> Result<(), TypeError> {
     typeck_fallible(tccx, node_id)?;
     // Get the error from the set of expected errors for this function.
-    let set_id = tccx.body.return_ty.error_set().unwrap();
+    let set_id = tccx
+        .body
+        .return_ty
+        .error_set()
+        .unwrap_or_else(|| bug!("a fallible function has no error set"));
     let set = tccx.tcx.errs.get_set(set_id);
     let Some(err_id) = set.get_id(error_name) else {
         return Err(TypeError::ErrorNotFoundInSet(
@@ -1134,6 +1163,7 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt, index: Position) -> R
         AstStmtKind::Fallthrough(fallthrough_stmt) => {
             typeck_fallthrough(tccx, fallthrough_stmt).reported(tccx)?;
         }
+        AstStmtKind::Throw(_) => todo!("typeck for throw is not yet implemented"),
     };
 
     Ok(())
@@ -1199,7 +1229,9 @@ fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Res
     }
 
     if else_node_ids.len() > 1 {
-        let (start, others) = else_node_ids.split_first().unwrap();
+        let (start, others) = else_node_ids
+            .split_first()
+            .unwrap_or_else(|| bug!("else_node_ids was checked to be non-empty, but was empty"));
         return Err(TypeError::SeveralElseBranches(*start, others.to_vec())).reported(tccx);
     }
 
@@ -1224,7 +1256,7 @@ fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Res
             .tcx
             .enums
             .get_enum(*enum_id)
-            .expect("enum provided by type should exist");
+            .unwrap_or_else(|| bug!("an enum id from a type has no associated enum"));
 
         let case_node_ids = switch_stmt
             .cases()
@@ -1238,7 +1270,7 @@ fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Res
                 let Res::EnumVariant(enum_variant) = tccx
                     .body
                     .node_res(case.expr.node_id())
-                    .expect("case of enum must be enum variant")
+                    .unwrap_or_else(|| bug!("a switch case on an enum has no resolution"))
                 else {
                     unreachable!("case of enum must be enum variant")
                 };
@@ -1271,7 +1303,9 @@ fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Res
                 .collect::<Vec<_>>();
 
             if matches.len() > 1 {
-                let (first, others) = matches.split_first().unwrap();
+                let (first, others) = matches
+                    .split_first()
+                    .unwrap_or_else(|| bug!("matches was checked to be non-empty, but was empty"));
                 return Err(TypeError::DuplicateVariantInSwitch(
                     switch_stmt.node_id,
                     first.1,
@@ -1342,7 +1376,10 @@ fn typeck_implicit_return(
     expr: &ast::AstExpr,
     index: Position,
 ) -> Result<(), TypeError> {
-    let return_ty = typeck_expr(tccx, expr)?;
+    let ity = tccx.begin_inferrable_ty(Some(tccx.body.return_ty.as_infallible()));
+    let return_ty = typeck_expr(tccx, expr);
+    tccx.end_inferrable_ty(ity);
+    let return_ty = return_ty?;
 
     if !matches!(index, Position::Last | Position::Only) {
         return Err(TypeError::ImplicitReturnNotLast(expr.node_id()));
@@ -1352,7 +1389,8 @@ fn typeck_implicit_return(
         (TyKind::Void, TyKind::Void) => Ok(()),
         (TyKind::Void, _) => Err(TypeError::ExpectedReturn(
             expr.node_id(),
-            tccx.return_node_id.unwrap(),
+            tccx.return_node_id
+                .unwrap_or_else(|| bug!("a non-void function has no return type node id")),
             tccx.body.return_ty.clone(),
         )),
         (_, TyKind::Void) => Err(TypeError::DidNotExpectReturn(
@@ -1363,7 +1401,9 @@ fn typeck_implicit_return(
             return_ty.clone(),
             tccx.body.return_ty.clone(),
             expr.node_id(),
-            tccx.return_node_id.unwrap(),
+            tccx.return_node_id.unwrap_or_else(|| {
+                bug!("a function with a return type has no return type node id")
+            }),
         )),
         _ => Ok(()),
     }
@@ -1392,7 +1432,9 @@ fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Res
             ty.clone(),
             tccx.body.return_ty.clone(),
             return_stmt.node_id,
-            tccx.return_node_id.unwrap(),
+            tccx.return_node_id.unwrap_or_else(|| {
+                bug!("a function with a return type has no return type node id")
+            }),
         )),
         // Returns and expects return or no return and expects void
         // This also covers returning (but returning void from somewhere else)
@@ -1402,7 +1444,8 @@ fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Res
         // case handled.
         (None, _) => Err(TypeError::ExpectedReturn(
             return_stmt.node_id,
-            tccx.return_node_id.unwrap(),
+            tccx.return_node_id
+                .unwrap_or_else(|| bug!("a non-void function has no return type node id")),
             tccx.body.return_ty.clone(),
         )),
     }
@@ -1634,7 +1677,9 @@ fn typeck_binary_expr(
     bin_expr: &ast::AstBinaryExpr,
 ) -> Result<Ty, TypeError> {
     let left = typeck_expr(tccx, &bin_expr.left)?;
+    let ity = tccx.begin_inferrable_ty(Some(left.clone()));
     let right = typeck_expr(tccx, &bin_expr.right)?;
+    tccx.end_inferrable_ty(ity);
     if left != right {
         return Err(TypeError::IncompatibleTypes(
             left,
@@ -1715,6 +1760,7 @@ fn always_returns(stmt: &ast::AstStmt) -> Returns {
         AstStmtKind::If(s) => if_always_returns(s),
         AstStmtKind::Loop(l) => loop_always_returns(l),
         AstStmtKind::Switch(s) => switch_always_returns(s),
+        AstStmtKind::Throw(_) => todo!("return analysis for throw is not yet implemented"),
 
         AstStmtKind::Expr(_)
         | AstStmtKind::Print(_)

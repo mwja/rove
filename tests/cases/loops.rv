@@ -1,0 +1,55 @@
+// while, loop, break and continue.
+// Expected output: 25, 8, 5, 6, 5
+func first_square_over(limit: int) -> int {
+    let i = 0;
+    while i < 100 {
+        i = i + 1;
+        if i * i > limit {
+            return i;
+        }
+    }
+    return 0 - 1;
+}
+
+func main() {
+    let i = 0;
+    let total = 0;
+    while i < 10 {
+        i = i + 1;
+        if i == 3 {
+            continue;
+        }
+        if i == 8 {
+            break;
+        }
+        total = total + i;
+    }
+    print total;
+    print i;
+
+    let n = 0;
+    loop {
+        n = n + 1;
+        if n >= 5 {
+            break;
+        }
+    }
+    print n;
+
+    let pairs = 0;
+    let a = 0;
+    while (a < 3) {
+        a = a + 1;
+        let b = 0;
+        while (b < 3) {
+            b = b + 1;
+            if a == b {
+                continue;
+            }
+            pairs = pairs + 1;
+        }
+    }
+    print pairs;
+
+    print first_square_over(20);
+}

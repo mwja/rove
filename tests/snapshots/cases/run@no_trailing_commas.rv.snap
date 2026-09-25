@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+assertion_line: 78
+input_file: tests/cases/no_trailing_commas.rv
+---
+exit: Some(0)
+--- stdout
+3
+0

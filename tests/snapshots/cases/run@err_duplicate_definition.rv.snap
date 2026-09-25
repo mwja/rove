@@ -1,0 +1,18 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_duplicate_definition.rv
+---
+compile error:
+[2001] Error: duplicate definitions of twice
+   ╭─[ tests/cases/err_duplicate_definition.rv:5:1 ]
+   │
+ 5 │ func twice() {}
+   │ ───────┬───────  
+   │        ╰───────── conflicting definition of same name here
+   │
+   ├─[ tests/cases/err_duplicate_definition.rv:3:1 ]
+   │
+ 3 │ func twice() {}
+   │ ───────┬───────  
+   │        ╰───────── original definition here
+───╯

@@ -1,0 +1,16 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_switch_not_exhaustive.rv
+---
+compile error:
+[1029] Error: switch branches must be exhaustive
+    ╭─[ tests/cases/err_switch_not_exhaustive.rv:9:5 ]
+    │
+  9 │ ╭─▶     switch Colour::Red {
+    ┆ ┆   
+ 12 │ ├─▶     }
+    │ │           
+    │ ╰─────────── this switch statement is not exhaustive
+    │     
+    │     Help: you appear to be missing the `Blue` variant
+────╯

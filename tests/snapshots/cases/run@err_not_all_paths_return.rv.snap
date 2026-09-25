@@ -1,0 +1,20 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_not_all_paths_return.rv
+---
+compile error:
+[1014] Error: not all branches return
+   ╭─[ tests/cases/err_not_all_paths_return.rv:2:1 ]
+   │
+ 2 │ ╭─▶ func pick(digit: int) -> float {
+   ┆ ┆   
+ 8 │ ├─▶ }
+   │ │       
+   │ ╰─────── in this function
+   │
+   ├─[ tests/cases/err_not_all_paths_return.rv:2:26 ]
+   │
+ 2 │ func pick(digit: int) -> float {
+   │                          ──┬──  
+   │                            ╰──── expectation to return a float defined here
+───╯

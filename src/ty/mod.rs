@@ -183,7 +183,7 @@ impl TyCtxt {
             return Ok(None);
         }
 
-        match base.unwrap() {
+        match base.unwrap_or_else(|| bug!("base was checked to be some, but was none")) {
             Res::Local(..)
             | Res::ConstraintOld(..)
             | Res::ConstraintRet

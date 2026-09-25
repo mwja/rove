@@ -1,0 +1,8 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/implicit_return.rv
+---
+exit: Some(0)
+--- stdout
+5
+3.5

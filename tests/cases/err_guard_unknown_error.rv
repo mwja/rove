@@ -1,0 +1,12 @@
+// A guard must name an error from the function's error set.
+error PurchaseError {
+    OutOfStock
+}
+
+func buy(stock: int) -> PurchaseError!int
+    guard Missing if stock > 0
+{
+    stock
+}
+
+func main() {}

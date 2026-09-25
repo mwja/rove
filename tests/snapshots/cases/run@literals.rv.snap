@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/literals.rv
+---
+exit: Some(0)
+--- stdout
+0
+42
+9223372036854775807
+1.5
+0.5
+2.0

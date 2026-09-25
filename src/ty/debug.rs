@@ -46,8 +46,10 @@ fn display_def(tcx: &TyCtxt, def: &ast::AstDef) -> String {
             let def_id = tcx
                 .defs
                 .resolve_def_id_for_node_id(func_def.node_id)
-                .unwrap();
-            let body = tcx.bodies.get(&def_id).unwrap();
+                .unwrap_or_else(|| bug!("a function definition was unable to be resolved to a def_id when printing debug output"));
+            let body = tcx.bodies.get(&def_id).unwrap_or_else(|| {
+                bug!("a function def_id has no associated body when printing debug output")
+            });
             format!("{}", display_func(body, func_def))
         }
     }
@@ -61,7 +63,13 @@ fn display_func(body: &BodyInfo, func_def: &ast::AstFunctionDef) -> String {
             .args
             .iter()
             .map(|a| (a, body.node_res(a.node_id)))
-            .map(|(a, b)| format!("{}: {}", a, b.unwrap()))
+            .map(|(a, b)| format!(
+                "{}: {}",
+                a,
+                b.unwrap_or_else(|| bug!(
+                    "a function argument has no resolution when printing debug output"
+                ))
+            ))
             .collect::<Vec<_>>()
             .join(", "),
         func_def.return_ty,
@@ -99,6 +107,13 @@ fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
             display_fallthrough(body, fallthrough_stmt)
         }
         ast::AstStmtKind::Switch(switch_stmt) => display_switch(body, switch_stmt),
+        ast::AstStmtKind::Throw(throw_stmt) => {
+            format!(
+                "{}; // throw {};",
+                throw_stmt,
+                annotate_expr(body, &throw_stmt.expr)
+            )
+        }
     }
 }
 

@@ -1,0 +1,14 @@
+// Identifiers that start with a keyword are still ordinary identifiers.
+// Expected output: 45
+func main() {
+    let iffy = 1;
+    let printer = 2;
+    let returned = 3;
+    let loops = 4;
+    let letter = 5;
+    let whiled = 6;
+    let cased = 7;
+    let elsewhere = 8;
+    let integer = 9;
+    print iffy + printer + returned + loops + letter + whiled + cased + elsewhere + integer;
+}

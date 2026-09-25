@@ -192,7 +192,10 @@ impl ErrorSetCtxt {
             // duplicate
             return Err(ErrError::DuplicateSet(
                 name,
-                *self.error_set_to_node_id.get(&old_id).unwrap(),
+                *self
+                    .error_set_to_node_id
+                    .get(&old_id)
+                    .unwrap_or_else(|| bug!("an existing error set has no associated node id")),
                 node_id,
             ));
         }

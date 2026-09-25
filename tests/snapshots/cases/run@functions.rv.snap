@@ -1,0 +1,10 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/functions.rv
+---
+exit: Some(0)
+--- stdout
+55
+7
+3
+42

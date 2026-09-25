@@ -1,0 +1,7 @@
+// Defining a function twice is an error. The first definition (line 3) is the
+// original; the second (line 5) is the conflicting one.
+func twice() {}
+
+func twice() {}
+
+func main() {}

@@ -1,0 +1,14 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_mixed_int_float.rv
+---
+compile error:
+[1002] Error: types int and float are incompatible
+   ╭─[ tests/cases/err_mixed_int_float.rv:3:11 ]
+   │
+ 3 │     print 1 + 1.0;
+   │           ┬   ─┬─  
+   │           ╰──────── this value has type int
+   │                │   
+   │                ╰─── but this value has type float
+───╯

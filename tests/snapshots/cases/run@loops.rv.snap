@@ -1,0 +1,11 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/loops.rv
+---
+exit: Some(0)
+--- stdout
+25
+8
+5
+6
+5

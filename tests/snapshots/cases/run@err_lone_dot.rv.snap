@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_lone_dot.rv
+---
+compile error:
+Error: failed to parse
+   ╭─[ tests/cases/err_lone_dot.rv:3:13 ]
+   │
+ 3 │     let a = .;
+   │             ┬  
+   │             ╰── did not expect . in this location
+───╯

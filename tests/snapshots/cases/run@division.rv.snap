@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/division.rv
+---
+exit: Some(0)
+--- stdout
+3.5
+2.0
+2.0

@@ -1,0 +1,5 @@
+// The value returned from main is the process exit code.
+// Expected: exit code 3, no output
+func main() -> int {
+    return 3;
+}

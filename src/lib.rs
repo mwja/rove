@@ -7,6 +7,8 @@ use crate::{
 
 #[macro_use]
 mod id;
+#[macro_use]
+mod bug;
 
 mod arena;
 mod ast;
@@ -20,11 +22,37 @@ mod ty;
 
 pub use sourcemap::SourceMap;
 
+/// Debug artifacts that can be written next to the input file as `__<file>.<ext>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum Emit {
+    Ast,
+    Typed,
+    Clif,
+    OptClif,
+    Cfg,
+    Obj,
+}
+
 pub fn compile(
     input_path: PathBuf,
     output_path: PathBuf,
+    emit: &[Emit],
     source_map: &mut sourcemap::SourceMap,
 ) -> Result<(), Vec<Diagnostic>> {
+    let artifact = |kind: Emit, ext: &str| {
+        emit.contains(&kind).then(|| {
+            let mut path = input_path.clone();
+            path.set_file_name(format!(
+                "__{}.{ext}",
+                input_path
+                    .file_name()
+                    .unwrap_or_else(|| bug!("the input path has no file name"))
+                    .to_string_lossy()
+            ));
+            path
+        })
+    };
+
     let input = std::fs::read(&input_path)
         .map_err(|_| vec![Diagnostic::new("unable to read input file")])?;
     let contents = String::from_utf8(input)
@@ -36,84 +64,49 @@ pub fn compile(
     let raw = syntax::parse(&contents, source_file_id)?;
 
     let mut node_to_span = sourcemap::SpanRecorder::new();
-    let ast = syntax::lower_to_ast(raw, source_file_id, &mut node_to_span);
+    let ast = syntax::lower_to_ast(raw, source_file_id, &mut node_to_span)?;
 
     let mut ty_ctxt = TyCtxt::new();
 
-    ty_ctxt.enums = enums::resolve(&ast);
+    ty_ctxt.enums =
+        enums::resolve(&ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
     err::resolve(&mut ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
     defs::resolve(&mut ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
     ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
-    let typed_output = File::create({
-        let mut path = input_path.clone();
-        path.set_file_name(format!(
-            "__{}.typed",
-            input_path.file_name().unwrap().to_string_lossy()
-        ));
-        path
-    })
-    .ok();
-
-    if let Some(mut typed_output) = typed_output {
+    if let Some(path) = artifact(Emit::Typed, "typed")
+        && let Ok(mut typed_output) = File::create(path)
+    {
         let _ = ty::debug::display_debug(&mut typed_output, &ty_ctxt, &ast);
     }
 
-    std::fs::write(
-        {
-            let mut path = input_path.clone();
-            path.set_file_name(format!(
-                "__{}.ast",
-                input_path.file_name().unwrap().to_string_lossy()
-            ));
-            path
-        },
-        format!("{}", ast),
-    )
-    .unwrap();
+    if let Some(path) = artifact(Emit::Ast, "ast") {
+        std::fs::write(path, format!("{}", ast))
+            .unwrap_or_else(|e| bug!("unable to write the ast to a file: {e}"));
+    }
 
     let bytes = codegen::generate_object(
         &mut ty_ctxt,
         ast,
         Some(codegen::CodegenOptions {
-            emit_clif_to: {
-                let mut path = input_path.clone();
-                path.set_file_name(format!(
-                    "__{}.clif",
-                    input_path.file_name().unwrap().to_string_lossy()
-                ));
-                Some(path)
-            },
-            emit_opt_clif_to: {
-                let mut path = input_path.clone();
-                path.set_file_name(format!(
-                    "__{}.opt.clif",
-                    input_path.file_name().unwrap().to_string_lossy()
-                ));
-                Some(path)
-            },
-            emit_cfg_to: {
-                let mut path = input_path.clone();
-                path.set_file_name(format!(
-                    "__{}.cfg",
-                    input_path.file_name().unwrap().to_string_lossy()
-                ));
-                Some(path)
-            },
+            emit_clif_to: artifact(Emit::Clif, "clif"),
+            emit_opt_clif_to: artifact(Emit::OptClif, "opt.clif"),
+            emit_cfg_to: artifact(Emit::Cfg, "cfg"),
         }),
     )
-    .unwrap();
+    .unwrap_or_else(|e| bug!("unable to generate an object file for the program: {e}"));
 
-    // Generate a ugly named .o file just for compilation.
-    let mut object_path = input_path.clone();
-    object_path.set_file_name(format!(
-        "__{}.o",
-        input_path.file_name().unwrap().to_string_lossy()
-    ));
+    let emitted_object = artifact(Emit::Obj, "o");
+    let object_path = emitted_object.clone().unwrap_or_else(|| {
+        let mut path = output_path.clone().into_os_string();
+        path.push(".o");
+        path.into()
+    });
 
-    std::fs::write(&object_path, &bytes).unwrap();
+    std::fs::write(&object_path, &bytes)
+        .unwrap_or_else(|e| bug!("unable to write the object file: {e}"));
 
     use std::process::Command;
 
@@ -138,7 +131,14 @@ pub fn compile(
 
     args.extend(["-o".into(), output_path.to_string_lossy().into_owned()]);
 
-    let status = Command::new("cc").args(args).status().unwrap();
+    let status = Command::new("cc")
+        .args(args)
+        .status()
+        .unwrap_or_else(|e| bug!("unable to invoke the system linker (cc): {e}"));
+
+    if emitted_object.is_none() {
+        let _ = std::fs::remove_file(&object_path);
+    }
 
     if !status.success() {
         panic!("linking failed");
@@ -152,13 +152,19 @@ pub fn compile(
 /// # Examples
 ///
 /// ```no_run
-/// rove::compileq!("examples/0_add_1_2.rv");
+/// rove::compileq!("main.rv");
 /// ```
 ///
 /// This is equivalent to (and can also be run as):
 ///
 /// ```no_run
-/// rove::compileq!("examples/0_add_1_2.rv", "examples/0_add_1_2");
+/// rove::compileq!("main.rv", "main");
+/// ```
+///
+/// Debug artifacts can be requested with a third argument:
+///
+/// ```no_run
+/// rove::compileq!("main.rv", "main", &[rove::Emit::Clif]);
 /// ```
 #[macro_export]
 macro_rules! compileq {
@@ -166,21 +172,25 @@ macro_rules! compileq {
         let path = ::std::path::PathBuf::from($path);
         $crate::compileq!(path.clone(), path.with_extension(""))
     }};
-    ($path:expr, $output:expr) => {{
+    ($path:expr, $output:expr) => {
+        $crate::compileq!($path, $output, &[])
+    };
+    ($path:expr, $output:expr, $emit:expr) => {{
         let mut source_map = $crate::SourceMap::new();
         match $crate::compile(
             ::std::path::PathBuf::from($path),
             ::std::path::PathBuf::from($output),
+            $emit,
             &mut source_map,
         ) {
             Ok(res) => Ok(res),
             Err(err) => {
                 let builder = source_map.build_report().with_diagnostics(err.clone());
 
-                builder
-                    .build()
-                    .iter()
-                    .for_each(|r| r.eprint(builder.as_cache()).unwrap());
+                builder.build().iter().for_each(|r| {
+                    r.eprint(builder.as_cache())
+                        .unwrap_or_else(|e| $crate::bug!("failed to print error: {e}"))
+                });
 
                 Err(err)
             }

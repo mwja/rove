@@ -1,0 +1,11 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/arithmetic.rv
+---
+exit: Some(0)
+--- stdout
+7
+9
+5
+2
+-3

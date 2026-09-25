@@ -1,0 +1,10 @@
+// Integer and float literal forms.
+// Expected output: 0, 42, 9223372036854775807, 1.5, 0.5, 2.0
+func main() {
+    print 0;
+    print 42;
+    print 9223372036854775807;
+    print 1.5;
+    print .5;
+    print 2.;
+}

@@ -1,0 +1,13 @@
+// A switch over an enum without an else must cover every variant.
+enum Colour {
+    Red,
+    Green,
+    Blue
+}
+
+func main() {
+    switch Colour::Red {
+        case ::Red => { print 1; }
+        case ::Green => { print 2; }
+    }
+}

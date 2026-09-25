@@ -43,11 +43,7 @@ mod grammar {
         pub name: Spanned<Ident>,
         #[rust_sitter::leaf(text = "{")]
         _l: (),
-        #[rust_sitter::delimited(
-            #[rust_sitter::leaf(text = ",")]
-            ()
-        )]
-        pub variants: Vec<Spanned<Ident>>,
+        pub variants: Option<IdentList>,
         #[rust_sitter::leaf(text = "}")]
         _r: (),
     }
@@ -58,11 +54,7 @@ mod grammar {
         pub name: Spanned<Ident>,
         #[rust_sitter::leaf(text = "{")]
         _l: (),
-        #[rust_sitter::delimited(
-            #[rust_sitter::leaf(text = ",")]
-            ()
-        )]
-        pub errors: Vec<Spanned<Ident>>,
+        pub errors: Option<IdentList>,
         #[rust_sitter::leaf(text = "}")]
         _r: (),
     }
@@ -73,29 +65,61 @@ mod grammar {
         pub name: Spanned<Ident>,
         #[rust_sitter::leaf(text = "(")]
         _lp: (),
-        #[rust_sitter::delimited(
-            #[rust_sitter::leaf(text = ",")]
-            ()
-        )]
-        pub args: Vec<Spanned<ArgDef>>,
+        pub args: Option<ArgDefList>,
         #[rust_sitter::leaf(text = ")")]
         _rp: (),
-        // pub throws: Option<ThrowsDef>,
+        pub throws: Option<ThrowsDef>,
         pub return_ty: Option<ReturnDef>,
         pub constraints: Vec<Spanned<Constraint>>,
         pub body: Spanned<BlockStmt>,
     }
 
-    // pub struct ThrowsDef {
-    //     #[rust_sitter::leaf(text = "throws")]
-    //     _t: (),
-    //     pub error_name: Spanned<Ident>,
-    // }
+    // Comma-separated lists, which permit a trailing comma. These are right
+    // recursive (`item [, [list]]`) as tree-sitter can't otherwise decide
+    // whether a comma is a separator or trailing with a single token lookahead.
+    pub struct IdentList {
+        pub head: Spanned<Ident>,
+        pub tail: Option<IdentListTail>,
+    }
+
+    pub struct IdentListTail {
+        #[rust_sitter::leaf(text = ",")]
+        _c: (),
+        pub rest: Option<Box<IdentList>>,
+    }
+
+    pub struct ArgDefList {
+        pub head: Spanned<ArgDef>,
+        pub tail: Option<ArgDefListTail>,
+    }
+
+    pub struct ArgDefListTail {
+        #[rust_sitter::leaf(text = ",")]
+        _c: (),
+        pub rest: Option<Box<ArgDefList>>,
+    }
+
+    pub struct ExprList {
+        pub head: Box<Spanned<Expr>>,
+        pub tail: Option<ExprListTail>,
+    }
+
+    pub struct ExprListTail {
+        #[rust_sitter::leaf(text = ",")]
+        _c: (),
+        pub rest: Option<Box<ExprList>>,
+    }
+
+    pub struct ThrowsDef {
+        #[rust_sitter::leaf(text = "throws")]
+        _t: (),
+        pub error_name: Spanned<Ident>,
+    }
 
     pub enum Constraint {
         Require(RequireConstraint),
         Ensure(EnsureConstraint),
-        // guard constraints are 'recoverable0
+        // guard constraints are recoverable
         Guard(GuardConstraint),
     }
 
@@ -286,8 +310,17 @@ mod grammar {
         ),
         #[rust_sitter::prec_left(99)]
         Call(Spanned<CallExpr>),
+        #[rust_sitter::prec_left(98)]
+        Throw(Spanned<ThrowExpr>),
         // TryElse(Spanned<TryElseExpr>),
         // ForcedTry(Spanned<ForcedTryExpr>),
+    }
+
+    #[rust_sitter::prec_left(98)]
+    pub struct ThrowExpr {
+        #[rust_sitter::leaf(text = "throw")]
+        _throw: (),
+        pub expr: Box<Spanned<Expr>>,
     }
 
     #[rust_sitter::prec_left(99)]
@@ -328,11 +361,7 @@ mod grammar {
         pub callee: Box<Spanned<Expr>>,
         #[rust_sitter::leaf(text = "(")]
         _l: (),
-        #[rust_sitter::delimited(
-            #[rust_sitter::leaf(text = ",")]
-            ()
-        )]
-        pub args: Vec<Box<Spanned<Expr>>>,
+        pub args: Option<ExprList>,
         #[rust_sitter::leaf(text = ")")]
         _r: (),
     }
@@ -385,13 +414,13 @@ mod grammar {
         Int(
             #[rust_sitter::leaf(
               pattern = r"0|[1-9]\d*",
-              transform = |v| v.parse().unwrap()
+              transform = |v| v.to_string()
             )]
-            i64,
+            String,
         ),
         Float(
             #[rust_sitter::leaf(
-              pattern = r"(?:0|[1-9]\d*)?\.[0-9]*",
+              pattern = r"(?:0|[1-9]\d*)\.[0-9]*|\.[0-9]+",
               transform = |v| v.parse().unwrap()
             )]
             f64,
@@ -422,14 +451,75 @@ mod grammar {
     #[rust_sitter::extra]
     #[allow(dead_code)]
     struct LineComment {
-        #[rust_sitter::leaf(pattern = r"//([^!\n][^\n]*|)\n")]
+        #[rust_sitter::leaf(pattern = r"//([^!\n][^\n]*)?")]
         _comment: (),
     }
     #[rust_sitter::extra]
     #[allow(dead_code)]
     struct MultilineComment {
-        #[rust_sitter::leaf(pattern = r"/\*[^\*/]\*/")]
+        #[rust_sitter::leaf(pattern = r"/\*[^*]*\*+([^/*][^*]*\*+)*/")]
         _linecomment: (),
+    }
+}
+
+/// A right-recursive comma-separated list from the grammar.
+trait CommaList: Sized {
+    type Item;
+
+    fn split(self) -> (Self::Item, Option<Self>);
+}
+
+impl CommaList for grammar::IdentList {
+    type Item = Spanned<grammar::Ident>;
+
+    fn split(self) -> (Self::Item, Option<Self>) {
+        (
+            self.head,
+            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
+        )
+    }
+}
+
+impl CommaList for grammar::ArgDefList {
+    type Item = Spanned<grammar::ArgDef>;
+
+    fn split(self) -> (Self::Item, Option<Self>) {
+        (
+            self.head,
+            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
+        )
+    }
+}
+
+impl CommaList for grammar::ExprList {
+    type Item = Box<Spanned<grammar::Expr>>;
+
+    fn split(self) -> (Self::Item, Option<Self>) {
+        (
+            self.head,
+            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
+        )
+    }
+}
+
+trait FlattenList {
+    type Item;
+
+    fn flatten_list(self) -> Vec<Self::Item>;
+}
+
+impl<L: CommaList> FlattenList for Option<L> {
+    type Item = L::Item;
+
+    fn flatten_list(self) -> Vec<Self::Item> {
+        let mut items = Vec::new();
+        let mut rest = self;
+        while let Some(list) = rest {
+            let (item, next) = list.split();
+            items.push(item);
+            rest = next;
+        }
+        items
     }
 }
 
@@ -487,7 +577,7 @@ pub fn lower_to_ast(
     program: grammar::Program,
     source_file_id: SourceFileId,
     node_to_span: &mut SpanRecorder<NodeId>,
-) -> ast::AstProgram {
+) -> Result<ast::AstProgram, Vec<Diagnostic>> {
     ProgramLowerer::new(source_file_id, node_to_span).lower(program)
 }
 
@@ -496,6 +586,7 @@ struct ProgramLowerer<'a> {
     next_node_id: usize,
     source_file_id: SourceFileId,
     node_to_span: &'a mut SpanRecorder<NodeId>,
+    errors: Vec<Diagnostic>,
 }
 impl_next_id!(ProgramLowerer<'a>.next_node_id -> NodeId);
 
@@ -505,6 +596,7 @@ impl<'a> ProgramLowerer<'a> {
             next_node_id: 0,
             source_file_id,
             node_to_span,
+            errors: Vec::new(),
         }
     }
 
@@ -515,7 +607,7 @@ impl<'a> ProgramLowerer<'a> {
         id
     }
 
-    pub fn lower(mut self, program: grammar::Program) -> ast::AstProgram {
+    pub fn lower(mut self, program: grammar::Program) -> Result<ast::AstProgram, Vec<Diagnostic>> {
         let mut defs = Vec::new();
         let mut error_sets = Vec::new();
         let mut enums = Vec::new();
@@ -527,7 +619,7 @@ impl<'a> ProgramLowerer<'a> {
                 grammar::Def::Enum(..) => enums.push(def),
             }
         }
-        ast::AstProgram {
+        let program = ast::AstProgram {
             defs: defs.into_iter().map(|def| self.lower_def(def)).collect(),
             error_sets: error_sets
                 .into_iter()
@@ -537,6 +629,12 @@ impl<'a> ProgramLowerer<'a> {
                 .into_iter()
                 .map(|def| self.lower_enum_def(def))
                 .collect(),
+        };
+
+        if self.errors.is_empty() {
+            Ok(program)
+        } else {
+            Err(self.errors)
         }
     }
 
@@ -549,6 +647,7 @@ impl<'a> ProgramLowerer<'a> {
                 variants: enum_def
                     .value
                     .variants
+                    .flatten_list()
                     .into_iter()
                     .map(|ident| self.lower_ident(ident))
                     .collect(),
@@ -566,6 +665,7 @@ impl<'a> ProgramLowerer<'a> {
                 errors: error_set
                     .value
                     .errors
+                    .flatten_list()
                     .into_iter()
                     .map(|ident| self.lower_ident(ident))
                     .collect(),
@@ -590,15 +690,20 @@ impl<'a> ProgramLowerer<'a> {
                 .return_ty
                 .as_ref()
                 .map(|r| self.next_id_spanned(r.ty.span)),
-            // throws: func.value.throws.map(|t| t.error_name.text.clone()),
-            // throws_node_id: func
-            //     .throws
-            //     .as_ref()
-            //     .map(|t| self.next_id_spanned(t.error_name.span)),
+            throws: func
+                .value
+                .throws
+                .as_ref()
+                .map(|t| t.error_name.text.clone()),
+            throws_node_id: func
+                .throws
+                .as_ref()
+                .map(|t| self.next_id_spanned(t.error_name.span)),
             return_ty: self.lower_type(func.value.return_ty.and_then(|rty| Some(rty.ty))),
             args: func
                 .value
                 .args
+                .flatten_list()
                 .into_iter()
                 .map(|arg| self.lower_arg_def(arg))
                 .collect(),
@@ -861,6 +966,9 @@ impl<'a> ProgramLowerer<'a> {
             // grammar::Expr::ForcedTry(forced_try) => {
             //     ast::AstExprKind::ForcedTry(self.lower_forced_try(forced_try))
             // }
+            grammar::Expr::Throw(_) => {
+                todo!("lowering of throw expressions is not yet implemented")
+            }
         }
     }
 
@@ -870,7 +978,17 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Path::Path(path_expr) if path_expr.value.base.is_some() => {
                 ast::AstPath::Path(ast::AstPathExpr {
                     node_id: self.next_id_spanned(path_expr.span),
-                    base: Box::new(self.lower_path(path_expr.value.base.unwrap().value)),
+                    base: Box::new(
+                        self.lower_path(
+                            path_expr
+                                .value
+                                .base
+                                .unwrap_or_else(|| {
+                                    bug!("path base was checked to be some, but was none")
+                                })
+                                .value,
+                        ),
+                    ),
                     field: self.lower_ident(path_expr.value.field),
                 })
             }
@@ -896,6 +1014,7 @@ impl<'a> ProgramLowerer<'a> {
             args: call
                 .value
                 .args
+                .flatten_list()
                 .into_iter()
                 .map(|arg| Box::new(self.lower_expr(*arg)))
                 .collect::<Vec<_>>(),
@@ -948,13 +1067,27 @@ impl<'a> ProgramLowerer<'a> {
     fn lower_literal(&mut self, literal: Spanned<grammar::Literal>) -> ast::AstLiteral {
         ast::AstLiteral {
             node_id: self.next_id_spanned(literal.span),
-            value: self.lower_literal_kind(literal.value),
+            value: self.lower_literal_kind(literal.value, literal.span),
         }
     }
 
-    fn lower_literal_kind(&mut self, literal: grammar::Literal) -> ast::AstLiteralKind {
+    fn lower_literal_kind(
+        &mut self,
+        literal: grammar::Literal,
+        span: (usize, usize),
+    ) -> ast::AstLiteralKind {
         match literal {
-            grammar::Literal::Int(value) => ast::AstLiteralKind::Int(value),
+            grammar::Literal::Int(text) => {
+                ast::AstLiteralKind::Int(text.parse().unwrap_or_else(|_| {
+                    // the grammar only permits digits, so this can only be an overflow
+                    self.errors
+                        .push(Diagnostic::new("integer literal is too large").with_label(
+                            "this literal does not fit in a 64-bit integer",
+                            Span::from_span(self.source_file_id, span),
+                        ));
+                    0
+                }))
+            }
             grammar::Literal::Float(value) => ast::AstLiteralKind::Float(value),
         }
     }

@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_break_outside_loop.rv
+---
+compile error:
+[1016] Error: break outside of a loop
+   ╭─[ tests/cases/err_break_outside_loop.rv:3:5 ]
+   │
+ 3 │     break;
+   │     ──┬──  
+   │       ╰──── break here
+───╯

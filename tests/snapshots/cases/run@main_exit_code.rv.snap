@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/main_exit_code.rv
+---
+exit: Some(3)
+--- stdout

@@ -1,0 +1,29 @@
+// Functions: arguments, recursion, nested calls, calls in expressions and
+// functions declared after use.
+// Expected output: 55, 7, 3, 42
+func main() {
+    print fib(10);
+    print add(add(1, 2), 4);
+    print one() + one() * 2;
+    greet();
+}
+
+func fib(n: int) -> int {
+    if n <= 1 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+func add(a: int, b: int) -> int {
+    return a + b;
+}
+
+func one() -> int {
+    return 1;
+}
+
+func greet() {
+    print 42;
+    return;
+}

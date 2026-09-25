@@ -1,0 +1,4 @@
+// fallthrough is only valid inside a switch case.
+func main() {
+    fallthrough;
+}

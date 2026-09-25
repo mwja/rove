@@ -1,0 +1,14 @@
+// The final expression of a function body (without a semicolon) is returned.
+// Expected output: 5, 3.5
+func five() -> int {
+    5
+}
+
+func half(x: int) -> float {
+    x / 2
+}
+
+func main() {
+    print five();
+    print half(7);
+}

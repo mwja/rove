@@ -1,0 +1,35 @@
+// Every comma-separated list accepts an optional trailing comma, on one line
+// or spread over several.
+// Expected output: 6, 1, 2
+enum Colour {
+    Red,
+    Green,
+    Blue,
+}
+
+enum Single { Only, }
+
+error PurchaseError {
+    OutOfStock,
+    NoMoney,
+}
+
+func add3(
+    a: int,
+    b: int,
+    c: int,
+) -> int {
+    return a + b + c;
+}
+
+func id(x: int,) -> int {
+    return x;
+}
+
+func main() {
+    print add3(1, 2, 3,);
+    print id(
+        1,
+    );
+    print Colour::Blue;
+}

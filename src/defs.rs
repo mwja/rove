@@ -96,7 +96,8 @@ impl<'d> DefCtxt<'d> {
             Some(def_id) => Err(DefError::DuplicateImpl(
                 name,
                 node_id,
-                self.reverse_def_id_to_node_id(*def_id).unwrap(),
+                self.reverse_def_id_to_node_id(*def_id)
+                    .unwrap_or_else(|| bug!("an existing def_id has no associated node id")),
             )),
             None => {
                 let def_id = self.next_id();
@@ -120,7 +121,7 @@ impl<'d> DefCtxt<'d> {
             defs: self
                 .defs
                 .into_iter()
-                .map(|d| d.unwrap())
+                .map(|d| d.unwrap_or_else(|| bug!("a def_id was allocated but never defined")))
                 .collect::<Vec<_>>(),
             name_to_def_id: self.name_to_def_id,
             node_id_to_def_id: self.node_id_to_def_id,
@@ -163,16 +164,16 @@ impl DiagnoseWith<NodeId> for DefError {
         use DefError::*;
         let message = self.to_string();
         match self {
-            DuplicateImpl(_name, original_node, current_node) => {
+            DuplicateImpl(_name, current_node, original_node) => {
                 vec![
                     Diagnostic::new(message)
                         .with_code(self.as_code())
-                        .with_label_from(recorder, original_node, "original definition here")
                         .with_label_from(
                             recorder,
                             current_node,
                             "conflicting definition of same name here",
-                        ),
+                        )
+                        .with_label_from(recorder, original_node, "original definition here"),
                 ]
             }
             ErrorSetNotFound(_name) => {
@@ -283,7 +284,8 @@ fn resolve_func(
     };
 
     dcx.define(
-        dcx.node_to_def_id(func.node_id).unwrap(),
+        dcx.node_to_def_id(func.node_id)
+            .unwrap_or_else(|| bug!("a function definition has no associated def_id")),
         Def {
             kind: DefKind::Function(sig),
         },

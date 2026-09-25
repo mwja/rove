@@ -1,0 +1,7 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/keyword_prefixed_idents.rv
+---
+exit: Some(0)
+--- stdout
+45

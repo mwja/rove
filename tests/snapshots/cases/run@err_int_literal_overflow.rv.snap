@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_int_literal_overflow.rv
+---
+compile error:
+Error: integer literal is too large
+   ╭─[ tests/cases/err_int_literal_overflow.rv:3:11 ]
+   │
+ 3 │     print 9223372036854775808;
+   │           ─────────┬─────────  
+   │                    ╰─────────── this literal does not fit in a 64-bit integer
+───╯

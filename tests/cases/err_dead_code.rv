@@ -1,0 +1,5 @@
+// Code after a return is unreachable and reported.
+func main() {
+    return;
+    print 1;
+}

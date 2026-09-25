@@ -89,8 +89,8 @@ pub struct AstFunctionDef {
     pub name: String,
     pub args: Vec<AstArgDef>,
     pub return_node_id: Option<NodeId>,
-    // pub throws: Option<String>,
-    // pub throws_node_id: Option<NodeId>,
+    pub throws: Option<String>,
+    pub throws_node_id: Option<NodeId>,
     pub return_ty: AstType,
     pub body: AstBlockStmt,
     pub is_main: bool,
@@ -164,13 +164,13 @@ impl Display for AstConstraint {
         match self {
             AstConstraint::Require(c) => write!(
                 f,
-                "require {}: {}",
+                "require! {}: {}",
                 c.tag.as_deref().unwrap_or(""),
                 c.condition
             ),
             AstConstraint::Ensure(c) => write!(
                 f,
-                "ensure {}: {}",
+                "ensure! {}: {}",
                 c.tag.as_deref().unwrap_or(""),
                 c.condition
             ),
@@ -249,6 +249,7 @@ impl AstStmt {
             AstStmtKind::Fallthrough(fallthrough_stmt) => fallthrough_stmt.node_id,
             AstStmtKind::ImplicitReturn(expr) => expr.node_id(),
             AstStmtKind::Switch(switch_stmt) => switch_stmt.node_id,
+            AstStmtKind::Throw(throw_stmt) => throw_stmt.node_id,
         }
     }
 
@@ -279,6 +280,7 @@ pub enum AstStmtKind {
     Return(AstReturnStmt),
     ImplicitReturn(AstExpr),
     Switch(AstSwitchStmt),
+    Throw(AstThrowStmt),
 }
 
 impl Display for AstStmtKind {
@@ -298,7 +300,20 @@ impl Display for AstStmtKind {
             AstStmtKind::Fallthrough(fallthrough_stmt) => write!(f, "{};", fallthrough_stmt),
             AstStmtKind::ImplicitReturn(expr) => write!(f, "{}", expr),
             AstStmtKind::Switch(switch_stmt) => write!(f, "{}", switch_stmt),
+            AstStmtKind::Throw(throw_stmt) => write!(f, "{};", throw_stmt),
         }
+    }
+}
+
+#[derive(Debug)]
+pub struct AstThrowStmt {
+    pub node_id: NodeId,
+    pub expr: Box<AstExpr>,
+}
+
+impl Display for AstThrowStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "throw {}", self.expr)
     }
 }
 

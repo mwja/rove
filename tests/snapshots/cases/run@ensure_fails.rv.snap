@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/ensure_fails.rv
+---
+exit: Some(1)
+--- stdout
+2
+--- stderr
+fatal: ensure constraint failed on function double: tag=doubled line=4
