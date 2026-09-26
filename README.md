@@ -25,7 +25,7 @@ and my first failed attempt at a language was called Otter).
 - [x] Errors
 - [x] enum errors and removing the error union types (`error!T`), `throws X`
 - [x] `try! x()`
-- [ ] `throw`
+- [x] `throw`
 - [ ] `try x() else y` and `try x() else e { ... /* must exit function here */ }`
 - [ ] `guard` inside the function body
   - [ ] e.g. `guard x > 0 else { return 0 }`, or `guard ::BiggerThanZero if x > 0 `

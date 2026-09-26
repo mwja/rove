@@ -1,0 +1,8 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/throw_in_func.rv
+---
+exit: Some(1)
+--- stdout
+--- stderr
+fatal: try! performed on a function that errored, on function main: line=0

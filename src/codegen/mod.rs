@@ -77,13 +77,6 @@ impl Operand {
             other => unreachable!("{what} must be single-slot, got {other:?}"),
         }
     }
-
-    /// commonly required reason for [expect_scalar]
-    fn expect_scalar_usability(self) -> Value {
-        self.expect_scalar(
-            "cannot use a non-scalar (fallible) type for comparison or returns (yet)",
-        )
-    }
 }
 
 fn lower_sig(rcx: ReprCx, def_sig: &FuncSig, is_main: bool) -> Signature {
@@ -1052,8 +1045,24 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstStmtKind::Continue(_) => self.lower_continue_stmt(),
             ast::AstStmtKind::Fallthrough(_) => self.lower_fallthrough_stmt(),
             ast::AstStmtKind::Switch(switch_stmt) => self.lower_switch_stmt(switch_stmt),
-            ast::AstStmtKind::Throw(_) => todo!("codegen for throw is not yet implemented"),
+            ast::AstStmtKind::Throw(throw_stmt) => self.lower_throw_stmt(throw_stmt),
         };
+    }
+
+    fn lower_throw_stmt(&mut self, throw_stmt: ast::AstThrowStmt) {
+        let err_value = self.lower_expr(*throw_stmt.expr.clone());
+
+        let dest = self.cleanup_block(
+            self.current_scope
+                .unwrap_or_else(|| bug!("throw lowered outside of any scope")),
+            ExitKind::Error,
+        );
+        self.builder.ins().jump(
+            dest,
+            &[BlockArg::Value(
+                err_value.expect_scalar("error values must be scalar"),
+            )],
+        );
     }
 
     fn lower_switch_stmt(&mut self, switch_stmt: ast::AstSwitchStmt) {

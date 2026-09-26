@@ -171,7 +171,14 @@ mod grammar {
             #[rust_sitter::leaf(text = ";")] (),
         ),
         Switch(Spanned<SwitchStmt>),
+        Throw(Spanned<ThrowStmt>, #[rust_sitter::leaf(text = ";")] ()),
         Return(Spanned<ReturnStmt>, #[rust_sitter::leaf(text = ";")] ()),
+    }
+
+    pub struct ThrowStmt {
+        #[rust_sitter::leaf(text = "throw")]
+        pub _switch: (),
+        pub expr: Box<Spanned<Expr>>,
     }
 
     pub struct SwitchStmt {
@@ -293,17 +300,8 @@ mod grammar {
         ),
         #[rust_sitter::prec_left(99)]
         Call(Spanned<CallExpr>),
-        #[rust_sitter::prec_left(98)]
-        Throw(Spanned<ThrowExpr>),
         // TryElse(Spanned<TryElseExpr>),
         ForcedTry(Spanned<ForcedTryExpr>),
-    }
-
-    #[rust_sitter::prec_left(98)]
-    pub struct ThrowExpr {
-        #[rust_sitter::leaf(text = "throw")]
-        _throw: (),
-        pub expr: Box<Spanned<Expr>>,
     }
 
     #[rust_sitter::prec_left(99)]
@@ -754,9 +752,16 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Stmt::Switch(switch) => {
                 ast::AstStmtKind::Switch(self.lower_switch_stmt(switch))
             }
+            grammar::Stmt::Throw(throw, _) => ast::AstStmtKind::Throw(self.lower_throw_stmt(throw)),
         }
     }
 
+    fn lower_throw_stmt(&mut self, throw: Spanned<grammar::ThrowStmt>) -> ast::AstThrowStmt {
+        ast::AstThrowStmt {
+            node_id: self.next_id_spanned(throw.span),
+            expr: Box::new(self.lower_expr(*throw.value.expr)),
+        }
+    }
     fn lower_switch_stmt(&mut self, switch: Spanned<grammar::SwitchStmt>) -> ast::AstSwitchStmt {
         ast::AstSwitchStmt {
             node_id: self.next_id_spanned(switch.span),
@@ -920,9 +925,6 @@ impl<'a> ProgramLowerer<'a> {
             },
             grammar::Expr::ForcedTry(forced_try) => {
                 ast::AstExprKind::ForcedTry(self.lower_forced_try(forced_try))
-            }
-            grammar::Expr::Throw(_) => {
-                todo!("lowering of throw expressions is not yet implemented")
             }
         }
     }

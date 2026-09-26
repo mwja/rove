@@ -411,11 +411,10 @@ impl DiagnoseWith<NodeId> for TypeError {
                     Diagnostic::new(message)
                         .with_code(self.as_code())
                         .with_label_from(recorder, func_node_id, "infallible function defined here")
-                        .with_label_from(
-                            recorder,
-                            fallible_node_id,
-                            "fallible operation used here",
-                        ),
+                        .with_label_from(recorder, fallible_node_id, "fallible operation used here")
+                        .with_help(Some(
+                            "are you missing a `throws X` notation on your function?",
+                        )),
                 ]
             }
             InvalidThrowsType(node_id, _) => {
@@ -786,6 +785,23 @@ impl<'c> TypeckCtxt<'c> {
         self.inferrable_tys.len() - 1
     }
 
+    /// Less boilerplate to do
+    ///
+    /// ```no_run
+    /// let idx = tccx.begin_inferrable_ty(Some(ty));
+    /// ...
+    /// tccx.end_inferrable_ty(idx);
+    /// ```
+    fn with_inferrable<T, F>(&mut self, inferrable_ty: &Ty, callback: F) -> T
+    where
+        F: FnOnce(&mut TypeckCtxt) -> T,
+    {
+        let idx = self.begin_inferrable_ty(Some(inferrable_ty.clone()));
+        let res = callback(self);
+        self.end_inferrable_ty(idx);
+        res
+    }
+
     fn end_inferrable_ty(&mut self, idx: usize) {
         debug_assert_eq!(
             idx,
@@ -1049,12 +1065,7 @@ fn typeck_guard_constraint_error(
     node_id: NodeId,
     error: &AstExpr,
 ) -> Result<(), TypeError> {
-    typeck_fallible(tccx, node_id)?;
-    let throws_ty = tccx
-        .body
-        .throws_ty
-        .clone()
-        .unwrap_or_else(|| bug!("a fallible function has no throws type"));
+    let throws_ty = typeck_fallible(tccx, node_id)?;
 
     let ity = tccx.begin_inferrable_ty(Some(throws_ty.clone()));
     let error_ty = typeck_expr(tccx, error);
@@ -1110,15 +1121,14 @@ fn typeck_post_constraint(
     Ok(())
 }
 
-fn typeck_fallible(tccx: &mut TypeckCtxt, node_id: NodeId) -> Result<(), TypeError> {
-    if tccx.body.throws_ty.is_none() {
-        return Err(TypeError::ErrorInInfallibleFunction(
+fn typeck_fallible(tccx: &mut TypeckCtxt, node_id: NodeId) -> Result<Ty, TypeError> {
+    match tccx.body.throws_ty {
+        None => Err(TypeError::ErrorInInfallibleFunction(
             tccx.func_node_id,
             node_id,
-        ));
+        )),
+        Some(ref throws_ty) => Ok(throws_ty.clone()),
     }
-
-    Ok(())
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1201,8 +1211,27 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt, index: Position) -> R
         AstStmtKind::Fallthrough(fallthrough_stmt) => {
             typeck_fallthrough(tccx, fallthrough_stmt).reported(tccx)?;
         }
-        AstStmtKind::Throw(_) => todo!("typeck for throw is not yet implemented"),
+        AstStmtKind::Throw(throw_stmt) => typeck_throw(tccx, throw_stmt).reported(tccx)?,
     };
+
+    Ok(())
+}
+
+fn typeck_throw(tccx: &mut TypeckCtxt, throw_stmt: &ast::AstThrowStmt) -> Result<(), TypeError> {
+    let throws_ty = typeck_fallible(tccx, throw_stmt.node_id)?;
+
+    let expr_ty = tccx.with_inferrable(&throws_ty, |tccx| {
+        typeck_expr(tccx, throw_stmt.expr.as_ref())
+    })?;
+
+    if expr_ty != throws_ty {
+        return Err(TypeError::IncompatibleTypes(
+            expr_ty,
+            throws_ty.clone(),
+            throw_stmt.expr.node_id(),
+            throw_stmt.node_id,
+        ));
+    }
 
     Ok(())
 }
@@ -1234,9 +1263,9 @@ fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Res
         tccx.inside_fallthroughable_case =
             i < cases_len - 1 && matches!(case, AstSwitchCase::Case(_));
         if let AstSwitchCase::Case(case) = case {
-            let ity = tccx.begin_inferrable_ty(Some(switch_ty.clone()));
-            let case_ty = typeck_expr(tccx, &case.expr).reported(tccx);
-            tccx.end_inferrable_ty(ity);
+            let case_ty = tccx.with_inferrable(&switch_ty, |tccx| {
+                typeck_expr(tccx, &case.expr).reported(tccx)
+            });
             let case_ty = case_ty?;
 
             if switch_ty != case_ty {

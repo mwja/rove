@@ -1,0 +1,29 @@
+// A function can throw an enum. `guard` throws the given variant when its
+// condition is false, and `try!` aborts the program if the call threw.
+// Expected output: 70, 10, then a fatal try! abort in main (exit 1).
+enum PurchaseFailure {
+    no_units,
+    insufficient_funds,
+    upstream_error
+}
+
+func c_style_processing_func() -> int {
+    return 1;
+}
+
+/// Returns new wallet total
+func purchase(cost: int, units: int, wallet: int) throws PurchaseFailure -> int
+    guard ::no_units if units > 0
+    guard PurchaseFailure::insufficient_funds if wallet >= cost * units
+    ensure! cost_deducted: ret == wallet - cost * units
+{
+    if c_style_processing_func() {
+        throw ::upstream_error;
+    }
+
+    return wallet - cost * units;
+}
+
+func main() {
+    try! purchase(10, 3, 100);
+}
