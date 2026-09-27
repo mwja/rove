@@ -1,5 +1,8 @@
 # Rove
 
+![last version](https://img.shields.io/github/v/tag/mwja/rove?sort=semver&label=latest%20version) ![last commit](https://img.shields.io/github/last-commit/mwja/rove)
+
+
 A less ambitious project for a compiled language.
 
 **Why 'Rove'?**
@@ -13,11 +16,18 @@ project - hence the 'aimless' aspect of it.
 Also because it makes me think of romp and raft (both words for groups of otters
 and my first failed attempt at a language was called Otter).
 
+**Examples**
+
+See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The language is informally design-by-contract and allows preconditions and postconditions to be defined in function headers. It is meant to be readable (inspired by Swift on some of its syntax). Once the language is stabilised, I will make a full guide and begin
+dog-fooding it by rewriting the compiler in Rove itself.
+
 ## Steps towards full language-hood
 
 - [x] Type checker
 - [x] Functions
 - [x] If/else
+
+🏷️ *v0.0.1*
 - [x] Loops
 - [x] Constraints (guard, require, ensure)
 - [x] Enums
@@ -27,21 +37,30 @@ and my first failed attempt at a language was called Otter).
 - [x] `try! x()`
 - [x] `throw`
 - [x] `try x() else y` and `try x() else e { ... /* must exit function here */ }`
-- [ ] `guard` inside the function body
-  - [ ] e.g. `guard x > 0 else { return 0 }`, or `guard ::BiggerThanZero if x > 0 `
+- [x] `guard` inside the function body
+  - [x] e.g. `guard x > 0 else { return 0 }`, or `guard x > 0 else ::BiggerThanZero`
+
+🏷️ *v0.0.2* 
 - [ ] Fix float division (int/int should produce an int, truncated. not a float)
 - [ ] `use X` namespace aliasing.
 - [ ] Real booleans
 - [ ] Unary operators
-- [ ] Make all statements expressions (e.g. `if` and `switch` should return a value)
+
+🏷️ *v0.0.3* 
 - [ ] `&&` and `||` with shortcircuiting.
-- [ ] Heap allocation
-- [ ] Structs
+- [ ] Make all statements expressions (e.g. `if` and `switch` should return a value)
+
+🏷️ *v0.0.4* 
+- [ ] Structs (with heap alloc)
     - [ ] Field access
 - [ ] ARC memory management
+
+🏷️ *v0.0.5* 
 - [ ] Defer/errdefer
 - [ ] Managed/unmanaged strings
 - [ ] Arrays
+
+🏷️ *v0.0.6* 
 - [ ] Generics
 - [ ] Custom linking with C libs
 
