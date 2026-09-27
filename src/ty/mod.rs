@@ -42,7 +42,13 @@ impl Ty {
     }
 
     pub fn has_value(&self) -> bool {
-        !matches!(*self.kind, TyKind::Void)
+        !matches!(*self.kind, TyKind::Void | TyKind::Never)
+    }
+
+    /// Can a value of this type be used where `expected` is wanted?
+    /// `never` fits anywhere, as control never actually produces one.
+    pub fn coerces_to(&self, expected: &Ty) -> bool {
+        self == expected || matches!(*self.kind, TyKind::Never)
     }
 }
 
@@ -57,6 +63,9 @@ pub enum TyKind {
     /// No meaningful value (most statements carry this type)
     #[default]
     Void,
+    /// The type of blocks that never complete (they always return, throw,
+    /// break, etc.)
+    Never,
     /// An integer type with a 64 bit width (fixed for now)
     Int,
     /// A floating-point type
@@ -79,6 +88,7 @@ impl Display for TyKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             TyKind::Void => write!(f, "void"),
+            TyKind::Never => write!(f, "never"),
             TyKind::Int => write!(f, "int"),
             TyKind::Float => write!(f, "float"),
             TyKind::Func(sig) => write!(
@@ -194,6 +204,7 @@ impl TyCtxt {
             | TyKind::Float
             | TyKind::Int
             | TyKind::Void
+            | TyKind::Never
             | TyKind::Func(..) => return Err(TypeError::CannotImplyVariant(path.node_id)),
         };
 

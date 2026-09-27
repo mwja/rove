@@ -1,0 +1,64 @@
+// `try f() catch |err| { ... }` handles a thrown error in place. The catch
+// block's trailing expression is the value of the whole expression, and a
+// catch block may instead leave with return, break, continue, etc.
+// Expected output: 5, 0, 7, 1, 3, 12, 2, 4
+enum StockError {
+    Empty,
+    Recalled
+}
+
+func stock(units: int) throws StockError -> int
+    guard ::Empty if units > 0
+    guard ::Recalled if units != 3
+{
+    return units;
+}
+
+func check(units: int) throws StockError
+    guard ::Empty if units > 0
+{
+}
+
+func describe(units: int) -> int {
+    return try stock(units) catch |err| {
+        switch err {
+            case ::Empty => { return 1; }
+            case ::Recalled => { return 3; }
+        }
+    };
+}
+
+func main() {
+    // success and failure values
+    print try stock(5) catch |err| { 0 };
+    print try stock(0) catch { 0 };
+
+    // `return` inside a catch leaves the enclosing function
+    print try stock(7) catch |err| { 0 };
+    print describe(0);
+    print describe(3);
+
+    // `continue` and `break` from a catch reach the enclosing loop
+    let total = 0;
+    let i = 0;
+    while i < 5 {
+        i = i + 1;
+        total = total + try stock(i) catch |err| { continue; };
+    }
+    print total;
+
+    let found = 0;
+    loop {
+        found = found + 1;
+        let units = try stock(found - 2) catch |err| { 0 };
+        if units > 0 {
+            break;
+        }
+    }
+    print found - 1;
+
+    // a void call just runs the catch block when it throws
+    try check(0) catch |err| {
+        print 4;
+    };
+}

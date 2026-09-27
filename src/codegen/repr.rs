@@ -72,7 +72,8 @@ impl ReprCx {
 
     pub fn repr_of(self, ty: &Ty) -> Repr {
         match ty.kind() {
-            TyKind::Void => Repr::Empty,
+            // never values are never materialised, so they take no slots.
+            TyKind::Void | TyKind::Never => Repr::Empty,
             TyKind::Int => Repr::Scalar(types::I64),
             TyKind::Float => Repr::Scalar(types::F64),
             TyKind::Func(_) => Repr::Scalar(self.ptr()),
@@ -85,7 +86,8 @@ impl ReprCx {
     /// know something has gone well.
     pub fn success_repr_of(self, ty: &Ty) -> Repr {
         match ty.kind() {
-            TyKind::Void => Repr::Empty,
+            // never values are never materialised, so they take no slots.
+            TyKind::Void | TyKind::Never => Repr::Empty,
             TyKind::Int => Repr::Scalar(types::I64),
             TyKind::Float => Repr::Scalar(types::F64),
             TyKind::Func(_) => Repr::Scalar(self.ptr()),

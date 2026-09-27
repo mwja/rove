@@ -645,7 +645,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         // Then the require checks (ensure checks happen in the success pad and branch to the landing pad if failing)
         self.lower_constraints_require(&def.constraints);
         self.lower_constraints_guards(&def.constraints);
-        self.lower_block_stmt(def.body);
+        let value = self.lower_block_stmt(def.body);
+        self.yield_to(self.success_landing_pad, value);
 
         self.build_success_pad(&def.constraints);
         self.build_failure_pad();
@@ -1017,6 +1018,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.lower_constraint_expr_olds(&left);
                 self.lower_constraint_expr_olds(&right);
             }
+            (_, ast::AstExprKind::TryCatch(..)) => {
+                unreachable!("typeck rejects try/catch inside constraints")
+            }
             (
                 _,
                 ast::AstExprKind::Literal(..)
@@ -1035,10 +1039,14 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstStmtKind::Print(print) => self.lower_print(print),
             ast::AstStmtKind::Decl(decl) => self.lower_decl(decl),
             ast::AstStmtKind::Assign(assign) => self.lower_assign(assign),
-            ast::AstStmtKind::Block(block) => self.lower_block_stmt(block),
+            ast::AstStmtKind::Block(block) => {
+                self.lower_block_stmt(block);
+            }
             ast::AstStmtKind::If(if_) => self.lower_if_stmt(if_),
             ast::AstStmtKind::Return(return_) => self.lower_return_stmt(return_),
-            ast::AstStmtKind::ImplicitReturn(expr) => self.lower_implicit_return(expr),
+            ast::AstStmtKind::ImplicitReturn(_) => {
+                unreachable!("tails are lowered by lower_block_stmt as the block's value")
+            }
             ast::AstStmtKind::Loop(loop_) => self.lower_gen_loop(loop_.body, None),
             ast::AstStmtKind::While(while_) => self.lower_gen_loop(while_.body, Some(*while_.cond)),
             ast::AstStmtKind::Break(_) => self.lower_break_stmt(),
@@ -1108,7 +1116,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .collect::<Vec<_>>();
         for (idx, case) in cases.iter().enumerate() {
             let block = check_blocks[idx];
-            self.fallthrough_to(block);
+            if !self.is_current_block_terminated() {
+                self.builder.ins().jump(block, &[]);
+            }
             self.builder.switch_to_block(block);
             let value = self.lower_expr(*case.expr.clone());
             // check equality, insert a fake astnode for the condition
@@ -1141,7 +1151,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         }
 
         // above we fell through to the different blocks, now let's make the switch landing pad.
-        self.fallthrough_to(switch_landing_pad);
+        if !self.is_current_block_terminated() {
+            self.builder.ins().jump(switch_landing_pad, &[]);
+        }
         self.builder.switch_to_block(switch_landing_pad);
         self.builder.seal_block(switch_landing_pad);
 
@@ -1346,18 +1358,24 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder.ins().jump(target, &args);
     }
 
-    fn lower_implicit_return(&mut self, expr: ast::AstExpr) {
-        let v = self
-            .lower_expr(expr)
-            .expect_scalar("cannot implicitly return pre-made fallible type (yet)");
-        let block_arg = BlockArg::Value(v);
-        // jump to landing pad
-        let target = self.cleanup_block(
-            self.current_scope
-                .unwrap_or_else(|| bug!("implicit return lowered outside of any scope")),
-            ExitKind::Return,
-        );
-        self.builder.ins().jump(target, [&block_arg]);
+    /// Jumps to `target` with a block's value, unless the block already jumped
+    /// elsewhere.
+    fn yield_to(&mut self, target: Block, value: Operand) {
+        if self.is_current_block_terminated() {
+            return;
+        }
+        let args: Vec<BlockArg> = match value {
+            Operand::Empty => vec![],
+            Operand::Scalar(v) => vec![BlockArg::Value(v)],
+            Operand::Pair(..) => unreachable!("blocks cannot yield fallible values"),
+        };
+        if args.len() != self.builder.block_params(target).len() {
+            // typeck only lets a block skip its value if it diverges (e.g. an
+            // infinite `loop`), so this point is unreachable.
+            self.builder.ins().trap(TrapCode::unwrap_user(7));
+            return;
+        }
+        self.builder.ins().jump(target, &args);
     }
 
     fn emit_frame_locals_declare(&mut self, scope_id: ScopeId) {
@@ -1382,7 +1400,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
     /// Blocks need to be cleaned up in certain ways,
 
-    fn lower_block_stmt(&mut self, block: ast::AstBlockStmt) {
+    /// Returns the block's value, which is its tail (if any).
+    fn lower_block_stmt(&mut self, block: ast::AstBlockStmt) -> Operand {
         self.loc(&block.node_id);
         let scope_id = self
             .cx
@@ -1394,8 +1413,13 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.open_frame(scope_id);
         self.emit_frame_locals_declare(scope_id);
 
+        let mut value = Operand::Empty;
         for stmt in block.stmts {
-            self.lower_stmt(stmt);
+            match stmt.kind {
+                // typeck only permits a tail as the last statement.
+                ast::AstStmtKind::ImplicitReturn(expr) => value = self.lower_expr(expr),
+                kind => self.lower_stmt(ast::AstStmt { kind }),
+            }
         }
 
         // Got quite a few of these through the file for the minute but I'm not
@@ -1405,6 +1429,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         }
 
         self.close_frame(scope_id);
+        value
     }
 
     fn lower_if_stmt(&mut self, if_stmt: ast::AstIfStmt) {
@@ -1535,15 +1560,84 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.lower_implicit_path(implicit_path_expr)
             }
             ast::AstExprKind::ForcedTry(forced_try_expr) => self.lower_forced_try(forced_try_expr),
+            ast::AstExprKind::TryCatch(try_catch_expr) => self.lower_try_catch(try_catch_expr),
+        }
+    }
+
+    /// Lowers a throwing call, splitting its result into (success, error).
+    fn lower_handled_call(&mut self, call_expr: ast::AstCallExpr) -> (Operand, Value) {
+        match self.lower_call(call_expr) {
+            Operand::Pair(success_val, error_val) => (Operand::Scalar(success_val), error_val),
+            Operand::Scalar(error_val) => (Operand::Empty, error_val),
+            Operand::Empty => bug!("a handled call expression has no error slot"),
+        }
+    }
+
+    fn lower_try_catch(&mut self, try_catch_expr: ast::AstTryCatchExpr) -> Operand {
+        let (success, error_val) = self.lower_handled_call(*try_catch_expr.call_expr);
+        self.loc(&try_catch_expr.node_id);
+
+        let ty = self
+            .cx
+            .body
+            .node_ty(try_catch_expr.node_id)
+            .unwrap_or_else(|| bug!("a try/catch expression has no type"));
+        let catch_block = self.builder.create_block();
+        let merge_block = self.builder.create_block();
+        for param_ty in self.rcx.repr_of(&ty).types() {
+            self.builder.append_block_param(merge_block, param_ty);
+        }
+
+        // A non-zero error means the call threw, otherwise its success value is ours.
+        let success_args: Vec<BlockArg> = match success {
+            Operand::Scalar(v) => vec![BlockArg::Value(v)],
+            _ => vec![],
+        };
+        self.builder
+            .ins()
+            .brif(error_val, catch_block, &[], merge_block, &success_args);
+
+        self.builder.switch_to_block(catch_block);
+        self.builder.seal_block(catch_block);
+
+        // The binding lives in its own scope around the body (see typeck).
+        let scope_id = self
+            .cx
+            .body
+            .node_scope(try_catch_expr.node_id)
+            .unwrap_or_else(|| bug!("a try/catch expression has no associated scope"));
+        self.open_frame(scope_id);
+        self.emit_frame_locals_declare(scope_id);
+        if let Some(binding) = try_catch_expr.binding {
+            let res = self
+                .cx
+                .body
+                .node_res(binding.node_id)
+                .unwrap_or_else(|| bug!("a catch binding has no resolution"));
+            let variable = self
+                .lookup_local(&res)
+                .unwrap_or_else(|| bug!("a catch binding has no cranelift variable"));
+            self.builder.def_var(variable, error_val);
+        }
+
+        let value = self.lower_block_stmt(try_catch_expr.body);
+        if !self.is_current_block_terminated() {
+            self.emit_frame_locals_release(scope_id);
+        }
+        self.yield_to(merge_block, value);
+        self.close_frame(scope_id);
+
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(merge_block);
+        match self.builder.block_params(merge_block) {
+            [] => Operand::Empty,
+            [v] => Operand::Scalar(*v),
+            _ => unreachable!("try/catch values are single-slot"),
         }
     }
 
     fn lower_forced_try(&mut self, forced_try_expr: AstForcedTryExpr) -> Operand {
-        let (success, error_val) = match self.lower_call(*forced_try_expr.call_expr.clone()) {
-            Operand::Pair(success_val, error_val) => (Operand::Scalar(success_val), error_val),
-            Operand::Scalar(error_val) => (Operand::Empty, error_val),
-            Operand::Empty => bug!("call expression inside a try! has no error slot"),
-        };
+        let (success, error_val) = self.lower_handled_call(*forced_try_expr.call_expr.clone());
 
         self.loc(&forced_try_expr.node_id);
         // For now, errors that are 0 are not errors
@@ -1776,21 +1870,33 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstBinaryOperator::Add => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().iadd(x, y),
                 TyKind::Float => self.builder.ins().fadd(x, y),
-                TyKind::Void | TyKind::Func(_) | TyKind::FullFallible(_, _) | TyKind::Enum(..) => {
+                TyKind::Void
+                | TyKind::Never
+                | TyKind::Func(_)
+                | TyKind::FullFallible(_, _)
+                | TyKind::Enum(..) => {
                     unreachable!()
                 }
             },
             ast::AstBinaryOperator::Sub => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().isub(x, y),
                 TyKind::Float => self.builder.ins().fsub(x, y),
-                TyKind::Void | TyKind::Func(_) | TyKind::FullFallible(_, _) | TyKind::Enum(..) => {
+                TyKind::Void
+                | TyKind::Never
+                | TyKind::Func(_)
+                | TyKind::FullFallible(_, _)
+                | TyKind::Enum(..) => {
                     unreachable!()
                 }
             },
             ast::AstBinaryOperator::Mul => match res_ty.kind() {
                 TyKind::Int => self.builder.ins().imul(x, y),
                 TyKind::Float => self.builder.ins().fmul(x, y),
-                TyKind::Void | TyKind::Func(_) | TyKind::FullFallible(_, _) | TyKind::Enum(..) => {
+                TyKind::Void
+                | TyKind::Never
+                | TyKind::Func(_)
+                | TyKind::FullFallible(_, _)
+                | TyKind::Enum(..) => {
                     unreachable!()
                 }
             },
@@ -1853,7 +1959,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                         y,
                     ),
                     TyKind::Func(_) => unreachable!(),
-                    TyKind::Void => unreachable!(),
+                    TyKind::Void | TyKind::Never => unreachable!(),
                     TyKind::FullFallible(_, _) => unreachable!(),
                 };
 
@@ -1922,7 +2028,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let printf_ref = self.get_or_cache_function(match x_ty.kind() {
             TyKind::Int | TyKind::Enum(..) => self.runtime.println_i64,
             TyKind::Float => self.runtime.println_f64,
-            TyKind::Void => unreachable!(),
+            TyKind::Void | TyKind::Never => unreachable!(),
             TyKind::Func(_) => unreachable!(),
             TyKind::FullFallible(_, _) => unreachable!(),
         });

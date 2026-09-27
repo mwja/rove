@@ -302,6 +302,7 @@ mod grammar {
         Call(Spanned<CallExpr>),
         // TryElse(Spanned<TryElseExpr>),
         ForcedTry(Spanned<ForcedTryExpr>),
+        TryCatch(Spanned<TryCatchExpr>),
     }
 
     #[rust_sitter::prec_left(99)]
@@ -324,6 +325,26 @@ mod grammar {
         #[rust_sitter::leaf(text = "try!")]
         _try: (),
         pub expr: Box<Spanned<CallExpr>>,
+    }
+
+    // let a = try dangerousfunc() catch |err| { 0 };
+    #[rust_sitter::prec_right(0)]
+    pub struct TryCatchExpr {
+        #[rust_sitter::leaf(text = "try")]
+        _try: (),
+        pub expr: Box<Spanned<CallExpr>>,
+        #[rust_sitter::leaf(text = "catch")]
+        _catch: (),
+        pub binding: Option<CatchBinding>,
+        pub body: Spanned<BlockStmt>,
+    }
+
+    pub struct CatchBinding {
+        #[rust_sitter::leaf(text = "|")]
+        _l: (),
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = "|")]
+        _r: (),
     }
 
     // // let a = try dangerousfunc() else 0
@@ -926,6 +947,9 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Expr::ForcedTry(forced_try) => {
                 ast::AstExprKind::ForcedTry(self.lower_forced_try(forced_try))
             }
+            grammar::Expr::TryCatch(try_catch) => {
+                ast::AstExprKind::TryCatch(self.lower_try_catch(try_catch))
+            }
         }
     }
 
@@ -961,6 +985,21 @@ impl<'a> ProgramLowerer<'a> {
         ast::AstForcedTryExpr {
             node_id: self.next_id_spanned(forced_try.span),
             call_expr: Box::new(self.lower_call(*forced_try.value.expr)),
+        }
+    }
+
+    fn lower_try_catch(
+        &mut self,
+        try_catch: Spanned<grammar::TryCatchExpr>,
+    ) -> ast::AstTryCatchExpr {
+        ast::AstTryCatchExpr {
+            node_id: self.next_id_spanned(try_catch.span),
+            call_expr: Box::new(self.lower_call(*try_catch.value.expr)),
+            binding: try_catch
+                .value
+                .binding
+                .map(|binding| self.lower_ident(binding.name)),
+            body: self.lower_block_stmt(try_catch.value.body),
         }
     }
 

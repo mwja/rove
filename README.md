@@ -26,11 +26,14 @@ and my first failed attempt at a language was called Otter).
 - [x] enum errors and removing the error union types (`error!T`), `throws X`
 - [x] `try! x()`
 - [x] `throw`
-- [ ] `try x() else y` and `try x() else e { ... /* must exit function here */ }`
+- [x] `try x() else y` and `try x() else e { ... /* must exit function here */ }`
 - [ ] `guard` inside the function body
   - [ ] e.g. `guard x > 0 else { return 0 }`, or `guard ::BiggerThanZero if x > 0 `
 - [ ] Fix float division (int/int should produce an int, truncated. not a float)
+- [ ] `use X` namespace aliasing.
+- [ ] Real booleans
 - [ ] Unary operators
+- [ ] Make all statements expressions (e.g. `if` and `switch` should return a value)
 - [ ] `&&` and `||` with shortcircuiting.
 - [ ] Heap allocation
 - [ ] Structs

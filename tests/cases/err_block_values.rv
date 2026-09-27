@@ -1,0 +1,24 @@
+// A trailing expression is the value of its own block, so blocks in statement
+// position cannot have one, and a catch block's value must match the call.
+enum Failure {
+    Bad
+}
+
+func risky() throws Failure -> int
+    guard ::Bad if 0
+{
+    return 1;
+}
+
+func pick(c: int) -> int {
+    if c {
+        1
+    }
+    return 2;
+}
+
+func main() {
+    let a = try risky() catch |err| { 1.0 };
+    let b = try risky() catch |err| { print 1; };
+    let c = try pick(1) catch { 0 };
+}

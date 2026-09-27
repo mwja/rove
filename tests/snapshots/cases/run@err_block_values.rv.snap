@@ -1,0 +1,41 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_block_values.rv
+---
+compile error:
+[1039] Error: the value of this block is discarded
+    ╭─[ tests/cases/err_block_values.rv:15:9 ]
+    │
+ 15 │         1
+    │         ┬  
+    │         ╰── this int is the value of its block, which is unused
+    │ 
+    │ Help: a trailing expression is the value of its own block. did you mean to `return` it, or add a `;`?
+────╯
+[1002] Error: types float and int are incompatible
+    ╭─[ tests/cases/err_block_values.rv:21:39 ]
+    │
+ 21 │     let a = try risky() catch |err| { 1.0 };
+    │                 ───┬───               ─┬─  
+    │                    ╰─────────────────────── but this value has type int
+    │                                        │   
+    │                                        ╰─── this value has type float
+────╯
+[1002] Error: types void and int are incompatible
+    ╭─[ tests/cases/err_block_values.rv:22:39 ]
+    │
+ 22 │     let b = try risky() catch |err| { print 1; };
+    │                 ───┬───               ───┬───  
+    │                    ╰─────────────────────────── but this value has type int
+    │                                          │     
+    │                                          ╰───── this value has type void
+────╯
+[1038] Error: try used on a call that cannot throw
+    ╭─[ tests/cases/err_block_values.rv:23:13 ]
+    │
+ 23 │     let c = try pick(1) catch { 0 };
+    │             ───────────┬───────────  
+    │                        ╰───────────── this call never throws
+    │ 
+    │ Help: remove the try
+────╯

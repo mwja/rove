@@ -1,0 +1,21 @@
+// A `loop` only ends through `break`, so a loop without one never completes
+// and a function ending in one needs no trailing return.
+// Expected output: 6
+func first_over_five(start: int) -> int {
+    let n = start;
+    loop {
+        n = n + 1;
+        if n > 5 {
+            return n;
+        }
+    }
+}
+
+// Never called, but must still compile.
+func forever() -> int {
+    loop {}
+}
+
+func main() {
+    print first_over_five(0);
+}

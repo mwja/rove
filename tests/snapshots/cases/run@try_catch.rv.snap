@@ -1,0 +1,14 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/try_catch.rv
+---
+exit: Some(0)
+--- stdout
+5
+0
+7
+1
+3
+12
+2
+4

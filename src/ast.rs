@@ -213,7 +213,7 @@ impl Display for AstProgram {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstStmt {
     pub kind: AstStmtKind,
 }
@@ -250,7 +250,7 @@ impl Display for AstStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AstStmtKind {
     Expr(AstExpr),
     Print(AstPrintStmt),
@@ -291,7 +291,7 @@ impl Display for AstStmtKind {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstThrowStmt {
     pub node_id: NodeId,
     pub expr: Box<AstExpr>,
@@ -303,7 +303,7 @@ impl Display for AstThrowStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstSwitchStmt {
     pub node_id: NodeId,
     pub expr: Box<AstExpr>,
@@ -374,7 +374,7 @@ impl Display for AstSwitchStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AstSwitchCase {
     Case(AstSwitchCaseItem),
     Else(AstSwitchElseCase),
@@ -405,7 +405,7 @@ impl Display for AstSwitchCase {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstSwitchCaseItem {
     pub node_id: NodeId,
     pub expr: Box<AstExpr>,
@@ -418,7 +418,7 @@ impl Display for AstSwitchCaseItem {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstSwitchElseCase {
     pub node_id: NodeId,
     pub body: AstBlockStmt,
@@ -430,7 +430,7 @@ impl Display for AstSwitchElseCase {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstLoopStmt {
     pub node_id: NodeId,
     pub body: AstBlockStmt,
@@ -442,7 +442,7 @@ impl Display for AstLoopStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstWhileStmt {
     pub node_id: NodeId,
     pub cond: Box<AstExpr>,
@@ -455,7 +455,7 @@ impl Display for AstWhileStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstBreakStmt {
     pub node_id: NodeId,
 }
@@ -466,7 +466,7 @@ impl Display for AstBreakStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstFallthroughStmt {
     pub node_id: NodeId,
 }
@@ -477,7 +477,7 @@ impl Display for AstFallthroughStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstContinueStmt {
     pub node_id: NodeId,
 }
@@ -488,7 +488,7 @@ impl Display for AstContinueStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstReturnStmt {
     /// Only for diagnostics, do NOT type this
     pub node_id: NodeId,
@@ -506,7 +506,7 @@ impl Display for AstReturnStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstBlockStmt {
     pub node_id: NodeId,
     pub stmts: Vec<AstStmt>,
@@ -527,7 +527,7 @@ impl Display for AstBlockStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstIfStmt {
     pub node_id: NodeId,
     pub cond: Box<AstExpr>,
@@ -545,7 +545,7 @@ impl Display for AstIfStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AstElseBranch {
     Block(AstBlockStmt),
     If(Box<AstIfStmt>),
@@ -560,7 +560,7 @@ impl Display for AstElseBranch {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstAssignStmt {
     pub node_id: NodeId,
     pub name: AstIdent,
@@ -590,6 +590,7 @@ impl AstExpr {
             AstExprKind::Path(field_access) => field_access.node_id,
             AstExprKind::ImplicitPath(implicit_field_access) => implicit_field_access.node_id, // AstExprKind::ForcedTry(forced_try) => forced_try.node_id,
             AstExprKind::ForcedTry(forced_try) => forced_try.node_id,
+            AstExprKind::TryCatch(try_catch) => try_catch.node_id,
         }
     }
 }
@@ -600,7 +601,7 @@ impl Display for AstExpr {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstPrintStmt {
     pub node_id: NodeId,
     pub expr: Box<AstExpr>,
@@ -612,7 +613,7 @@ impl Display for AstPrintStmt {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstDecl {
     pub kind: AstDeclKind,
 }
@@ -631,7 +632,7 @@ impl Display for AstDecl {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AstDeclKind {
     Let(AstLetDecl),
 }
@@ -644,7 +645,7 @@ impl Display for AstDeclKind {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AstLetDecl {
     pub name: AstIdent,
     pub expr: Box<AstExpr>,
@@ -689,6 +690,7 @@ pub enum AstExprKind {
     Path(AstPathExpr),
     ImplicitPath(AstImplicitPathExpr),
     ForcedTry(AstForcedTryExpr),
+    TryCatch(AstTryCatchExpr),
 }
 
 #[derive(Debug, Clone)]
@@ -747,6 +749,24 @@ impl Display for AstForcedTryExpr {
 }
 
 #[derive(Debug, Clone)]
+pub struct AstTryCatchExpr {
+    pub node_id: NodeId,
+    pub call_expr: Box<AstCallExpr>,
+    pub binding: Option<AstIdent>,
+    pub body: AstBlockStmt,
+}
+
+impl Display for AstTryCatchExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "try {} catch ", self.call_expr)?;
+        if let Some(binding) = &self.binding {
+            write!(f, "|{}| ", binding)?;
+        }
+        write!(f, "{}", self.body)
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct AstCallExpr {
     pub node_id: NodeId,
     pub callee: Box<AstExpr>,
@@ -790,6 +810,7 @@ impl Display for AstExprKind {
                 write!(f, "::{}", implicit_field_access.path)
             }
             AstExprKind::ForcedTry(forced_try) => write!(f, "{}!", forced_try.call_expr),
+            AstExprKind::TryCatch(try_catch) => write!(f, "{}", try_catch),
         }
     }
 }
