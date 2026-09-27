@@ -1,0 +1,13 @@
+// A guard's else block runs when its condition fails, so it must not complete,
+// and a guard's condition must be an int.
+func check(n: int) -> int {
+    guard n > 0 else {
+        print n;
+    }
+    guard 1.0 else {
+        return 0;
+    }
+    return n;
+}
+
+func main() {}

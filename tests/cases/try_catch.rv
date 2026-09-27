@@ -8,14 +8,14 @@ enum StockError {
 }
 
 func stock(units: int) throws StockError -> int
-    guard ::Empty if units > 0
-    guard ::Recalled if units != 3
+    guard units > 0 else ::Empty
+    guard units != 3 else ::Recalled
 {
     return units;
 }
 
 func check(units: int) throws StockError
-    guard ::Empty if units > 0
+    guard units > 0 else ::Empty
 {
 }
 

@@ -98,6 +98,8 @@ pub enum TypeError {
     DiscardedBlockValue(NodeId, Ty),
     #[error("try/catch is not permitted inside constraints")]
     TryCatchInConstraint(NodeId, NodeId),
+    #[error("the else block of a guard must not complete")]
+    GuardElseMustDiverge(NodeId, NodeId),
 }
 
 impl TypeError {
@@ -144,6 +146,7 @@ impl TypeError {
             TryOnNonThrowingCall(..) => Some(1038),
             DiscardedBlockValue(..) => Some(1039),
             TryCatchInConstraint(..) => Some(1040),
+            GuardElseMustDiverge(..) => Some(1041),
         }
     }
 }
@@ -606,6 +609,17 @@ impl DiagnoseWith<NodeId> for TypeError {
                             enclosing_constraint_node_id,
                             "enclosing constraint",
                         ),
+                ]
+            }
+            GuardElseMustDiverge(guard_node_id, else_node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, guard_node_id, "in this guard")
+                        .with_label_from(recorder, else_node_id, "this block can complete")
+                        .with_help(Some(
+                            "the else block runs when the condition fails, so it must return, throw, break or continue",
+                        )),
                 ]
             }
             NonScalarFallible(node_id, returns_ty) => {
@@ -1131,14 +1145,15 @@ fn typeck_constraint_condition(
     condition: &ast::AstExpr,
 ) -> Result<Ty, TypeError> {
     tccx.inside_constraint = Some(type_);
-    let ty = typeck_expr(tccx, condition)?;
+    let ty = typeck_expr(tccx, condition);
+    tccx.inside_constraint = None;
+    let ty = ty?;
     if !ty.is_bool() {
         return Err(TypeError::ConstraintConditionNotValid(
             condition.node_id(),
             ty,
         ));
     }
-    tccx.inside_constraint = None;
     Ok(ty)
 }
 
@@ -1233,7 +1248,40 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
             typeck_fallthrough(tccx, fallthrough_stmt).reported(tccx)?;
         }
         AstStmtKind::Throw(throw_stmt) => typeck_throw(tccx, throw_stmt).reported(tccx)?,
+        AstStmtKind::Guard(guard_stmt) => typeck_guard_stmt(tccx, guard_stmt)?,
+        AstStmtKind::Require(require) => {
+            typeck_constraint_condition(
+                tccx,
+                ConstraintType::Pre(require.node_id),
+                &require.condition,
+            )
+            .reported(tccx)?;
+        }
     };
+
+    Ok(())
+}
+
+fn typeck_guard_stmt(tccx: &mut TypeckCtxt, guard_stmt: &ast::AstGuardStmt) -> Result<(), ()> {
+    let ty = typeck_expr(tccx, &guard_stmt.condition).reported(tccx)?;
+    if !ty.is_bool() {
+        return Err(TypeError::ConstraintConditionNotValid(
+            guard_stmt.condition.node_id(),
+            ty,
+        ))
+        .reported(tccx);
+    }
+
+    // Code after the guard relies on the condition holding.
+    let void_ty = tccx.tcx.void_ty();
+    let else_ty = typeck_block(tccx, &guard_stmt.else_, false, &void_ty)?;
+    if !matches!(else_ty.kind(), TyKind::Never) {
+        return Err(TypeError::GuardElseMustDiverge(
+            guard_stmt.node_id,
+            guard_stmt.else_.node_id,
+        ))
+        .reported(tccx);
+    }
 
     Ok(())
 }
@@ -1990,6 +2038,8 @@ fn diverges(stmt: &ast::AstStmt, loops_with_breaks: &HashSet<NodeId>) -> Diverge
         | AstStmtKind::Print(_)
         | AstStmtKind::Decl(_)
         | AstStmtKind::Assign(_)
+        | AstStmtKind::Guard(_)
+        | AstStmtKind::Require(_)
         // A tail is the value of its block, so control continues after it.
         | AstStmtKind::ImplicitReturn(_)
         // Compiler isn't yet smart enough to check this.

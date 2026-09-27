@@ -8,8 +8,8 @@ enum PurchaseFailure {
 
 /// Returns new wallet total
 func purchase(cost: int, units: int, wallet: int) throws PurchaseFailure -> int
-    guard ::NoUnits if units > 0
-    guard PurchaseFailure::InsufficientFunds if wallet >= cost * units
+    guard units > 0 else ::NoUnits
+    guard wallet >= cost * units else PurchaseFailure::InsufficientFunds
     ensure! cost_deducted: ret == wallet - cost * units
 {
     return wallet - cost * units;

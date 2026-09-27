@@ -1,0 +1,27 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_guard_else.rv
+---
+compile error:
+[1041] Error: the else block of a guard must not complete
+   ╭─[ tests/cases/err_guard_else.rv:4:5 ]
+   │
+ 4 │ ╭───▶     guard n > 0 else {
+   │ │                          ▲   
+   │ │ ╭────────────────────────╯   
+   ┆ ┆ ┆   
+ 6 │ │ ├─▶     }
+   │ │ │       ▲   
+   │ │ ╰─────────── this block can complete
+   │ │         │   
+   │ ╰─────────┴─── in this guard
+   │       
+   │       Help: the else block runs when the condition fails, so it must return, throw, break or continue
+───╯
+[1020] Error: condition in constraint is not an int
+   ╭─[ tests/cases/err_guard_else.rv:7:11 ]
+   │
+ 7 │     guard 1.0 else {
+   │           ─┬─  
+   │            ╰─── condition here must be an int, got float
+───╯

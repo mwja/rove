@@ -1,0 +1,13 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/guards.rv
+---
+exit: Some(0)
+--- stdout
+1
+2
+3
+5000
+18
+0
+7

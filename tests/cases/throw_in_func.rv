@@ -13,8 +13,8 @@ func c_style_processing_func() -> int {
 
 /// Returns new wallet total
 func purchase(cost: int, units: int, wallet: int) throws PurchaseFailure -> int
-    guard ::no_units if units > 0
-    guard PurchaseFailure::insufficient_funds if wallet >= cost * units
+    guard units > 0 else ::no_units
+    guard wallet >= cost * units else PurchaseFailure::insufficient_funds
     ensure! cost_deducted: ret == wallet - cost * units
 {
     if c_style_processing_func() {

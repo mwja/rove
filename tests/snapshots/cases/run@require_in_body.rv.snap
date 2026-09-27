@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/require_in_body.rv
+---
+exit: Some(1)
+--- stdout
+1
+--- stderr
+fatal: require constraint failed on function main: tag=small line=9

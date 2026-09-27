@@ -127,12 +127,10 @@ mod grammar {
     pub struct GuardConstraint {
         #[rust_sitter::leaf(text = "guard")]
         _c: (),
-        pub error: Spanned<Expr>,
-        // deliberately uses different syntax to clarify
-        // it is not a runtime failure but is recoverable.
-        #[rust_sitter::leaf(text = "if")]
-        _colon: (),
         pub expr: Spanned<Expr>,
+        #[rust_sitter::leaf(text = "else")]
+        _else: (),
+        pub error: Spanned<Expr>,
     }
 
     pub struct ArgDef {
@@ -172,7 +170,27 @@ mod grammar {
         ),
         Switch(Spanned<SwitchStmt>),
         Throw(Spanned<ThrowStmt>, #[rust_sitter::leaf(text = ";")] ()),
+        Guard(Spanned<GuardStmt>),
+        Require(
+            Spanned<RequireConstraint>,
+            #[rust_sitter::leaf(text = ";")] (),
+        ),
         Return(Spanned<ReturnStmt>, #[rust_sitter::leaf(text = ";")] ()),
+    }
+
+    pub struct GuardStmt {
+        #[rust_sitter::leaf(text = "guard")]
+        _guard: (),
+        pub cond: Box<Spanned<Expr>>,
+        #[rust_sitter::leaf(text = "else")]
+        _else: (),
+        pub else_: GuardElse,
+    }
+
+    pub enum GuardElse {
+        Block(Spanned<BlockStmt>),
+        // Shorthand for `else { throw X; }`, matching the header form.
+        Throw(Spanned<Expr>, #[rust_sitter::leaf(text = ";")] ()),
     }
 
     pub struct ThrowStmt {
@@ -704,12 +722,8 @@ impl<'a> ProgramLowerer<'a> {
                     tag: tag.map(|t| t.text.clone()),
                 })
             }
-            grammar::Constraint::Require(grammar::RequireConstraint { expr, tag, .. }) => {
-                ast::AstConstraint::Require(ast::AstRequireConstraint {
-                    condition: Box::new(self.lower_expr(expr)),
-                    node_id: self.next_id_spanned(constraint.span),
-                    tag: tag.map(|t| t.text.clone()),
-                })
+            grammar::Constraint::Require(require) => {
+                ast::AstConstraint::Require(self.lower_require(require, constraint.span))
             }
             grammar::Constraint::Guard(grammar::GuardConstraint { expr, error, .. }) => {
                 ast::AstConstraint::Guard(ast::AstGuardConstraint {
@@ -774,6 +788,45 @@ impl<'a> ProgramLowerer<'a> {
                 ast::AstStmtKind::Switch(self.lower_switch_stmt(switch))
             }
             grammar::Stmt::Throw(throw, _) => ast::AstStmtKind::Throw(self.lower_throw_stmt(throw)),
+            grammar::Stmt::Guard(guard) => ast::AstStmtKind::Guard(self.lower_guard_stmt(guard)),
+            grammar::Stmt::Require(require, _) => {
+                ast::AstStmtKind::Require(self.lower_require(require.value, require.span))
+            }
+        }
+    }
+
+    fn lower_guard_stmt(&mut self, guard: Spanned<grammar::GuardStmt>) -> ast::AstGuardStmt {
+        let node_id = self.next_id_spanned(guard.span);
+        let condition = Box::new(self.lower_expr(*guard.value.cond));
+        let else_ = match guard.value.else_ {
+            grammar::GuardElse::Block(block) => self.lower_block_stmt(block),
+            grammar::GuardElse::Throw(error, _) => ast::AstBlockStmt {
+                node_id: self.next_id_spanned(error.span),
+                stmts: vec![ast::AstStmt {
+                    kind: ast::AstStmtKind::Throw(ast::AstThrowStmt {
+                        node_id: self.next_id_spanned(error.span),
+                        expr: Box::new(self.lower_expr(error)),
+                    }),
+                }],
+            },
+        };
+
+        ast::AstGuardStmt {
+            node_id,
+            condition,
+            else_,
+        }
+    }
+
+    fn lower_require(
+        &mut self,
+        require: grammar::RequireConstraint,
+        span: (usize, usize),
+    ) -> ast::AstRequireConstraint {
+        ast::AstRequireConstraint {
+            condition: Box::new(self.lower_expr(require.expr)),
+            node_id: self.next_id_spanned(span),
+            tag: require.tag.map(|t| t.text.clone()),
         }
     }
 

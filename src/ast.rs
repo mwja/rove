@@ -161,7 +161,7 @@ impl Display for AstConstraint {
                 c.condition
             ),
             AstConstraint::Guard(c) => {
-                write!(f, "guard {} if {}", c.error, c.condition)
+                write!(f, "guard {} else {}", c.condition, c.error)
             }
         }
     }
@@ -236,6 +236,8 @@ impl AstStmt {
             AstStmtKind::ImplicitReturn(expr) => expr.node_id(),
             AstStmtKind::Switch(switch_stmt) => switch_stmt.node_id,
             AstStmtKind::Throw(throw_stmt) => throw_stmt.node_id,
+            AstStmtKind::Guard(guard_stmt) => guard_stmt.node_id,
+            AstStmtKind::Require(require) => require.node_id,
         }
     }
 
@@ -267,6 +269,8 @@ pub enum AstStmtKind {
     ImplicitReturn(AstExpr),
     Switch(AstSwitchStmt),
     Throw(AstThrowStmt),
+    Guard(AstGuardStmt),
+    Require(AstRequireConstraint),
 }
 
 impl Display for AstStmtKind {
@@ -287,7 +291,28 @@ impl Display for AstStmtKind {
             AstStmtKind::ImplicitReturn(expr) => write!(f, "{}", expr),
             AstStmtKind::Switch(switch_stmt) => write!(f, "{}", switch_stmt),
             AstStmtKind::Throw(throw_stmt) => write!(f, "{};", throw_stmt),
+            AstStmtKind::Guard(guard_stmt) => write!(f, "{}", guard_stmt),
+            AstStmtKind::Require(require) => write!(
+                f,
+                "require! {}: {};",
+                require.tag.as_deref().unwrap_or(""),
+                require.condition
+            ),
         }
+    }
+}
+
+/// `guard cond else ::E;` is lowered as `guard cond else { throw ::E; }`.
+#[derive(Debug, Clone)]
+pub struct AstGuardStmt {
+    pub node_id: NodeId,
+    pub condition: Box<AstExpr>,
+    pub else_: AstBlockStmt,
+}
+
+impl Display for AstGuardStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "guard {} else {}", self.condition, self.else_)
     }
 }
 

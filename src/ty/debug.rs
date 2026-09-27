@@ -114,6 +114,17 @@ fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
                 annotate_expr(body, &throw_stmt.expr)
             )
         }
+        ast::AstStmtKind::Guard(guard_stmt) => format!(
+            "guard {} else {} // guard {}",
+            guard_stmt.condition,
+            display_block(body, &guard_stmt.else_),
+            annotate_expr(body, &guard_stmt.condition)
+        ),
+        ast::AstStmtKind::Require(require) => format!(
+            "{} // require! {};",
+            stmt,
+            annotate_expr(body, &require.condition)
+        ),
     }
 }
 

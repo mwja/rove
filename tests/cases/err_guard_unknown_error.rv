@@ -4,7 +4,7 @@ enum PurchaseError {
 }
 
 func buy(stock: int) throws PurchaseError -> int
-    guard ::Missing if stock > 0
+    guard stock > 0 else ::Missing
 {
     stock
 }

@@ -5,7 +5,7 @@ enum Failure {
 }
 
 func risky() throws Failure -> int
-    guard ::Bad if 0
+    guard 0 else ::Bad
 {
     return 1;
 }

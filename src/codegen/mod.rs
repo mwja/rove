@@ -1054,7 +1054,37 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ast::AstStmtKind::Fallthrough(_) => self.lower_fallthrough_stmt(),
             ast::AstStmtKind::Switch(switch_stmt) => self.lower_switch_stmt(switch_stmt),
             ast::AstStmtKind::Throw(throw_stmt) => self.lower_throw_stmt(throw_stmt),
+            ast::AstStmtKind::Guard(guard_stmt) => self.lower_guard_stmt(guard_stmt),
+            ast::AstStmtKind::Require(require) => {
+                self.lower_aborting_constraint_param_passthrough(&ast::AstConstraint::Require(
+                    require,
+                ));
+            }
         };
+    }
+
+    fn lower_guard_stmt(&mut self, guard_stmt: ast::AstGuardStmt) {
+        self.loc(&guard_stmt.node_id);
+        let cond = self
+            .lower_expr(*guard_stmt.condition)
+            .expect_scalar("guard condition must be scalar");
+        let else_block = self.builder.create_block();
+        let continue_block = self.builder.create_block();
+        self.builder
+            .ins()
+            .brif(cond, continue_block, &[], else_block, &[]);
+
+        self.builder.switch_to_block(else_block);
+        self.builder.seal_block(else_block);
+        self.lower_block_stmt(guard_stmt.else_);
+        if !self.is_current_block_terminated() {
+            // typeck requires the else block to diverge, so this is unreachable
+            // (e.g. the dead exit of an infinite `loop`).
+            self.builder.ins().trap(TrapCode::unwrap_user(7));
+        }
+
+        self.builder.switch_to_block(continue_block);
+        self.builder.seal_block(continue_block);
     }
 
     fn lower_throw_stmt(&mut self, throw_stmt: ast::AstThrowStmt) {

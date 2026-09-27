@@ -1,0 +1,8 @@
+func main() {
+    let n = 1;
+    require! small: n < 2;
+    print n;
+    n = 5;
+    require! small: n < 2;
+    print 99;
+}
