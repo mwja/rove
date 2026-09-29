@@ -5,13 +5,16 @@ use thiserror::Error;
 use super::*;
 use crate::{
     ast::{
-        self, AstExpr, AstForcedTryExpr, AstGuardConstraint, AstIdent, AstImplicitPathExpr,
-        AstLetDecl, AstPath, AstPathExpr, AstRequireConstraint, AstStmtKind, AstSwitchCase,
-        AstSwitchCaseItem, AstSwitchElseCase, AstTryCatchExpr,
+        self, AstExpr, AstForcedTryExpr, AstFunctionDef, AstGuardConstraint, AstIdent,
+        AstImplicitPathExpr, AstLetDecl, AstPath, AstPathExpr, AstRequireConstraint, AstStmtKind,
+        AstSwitchCase, AstSwitchCaseItem, AstSwitchElseCase, AstTryCatchExpr,
     },
     defs::{self, FuncSig},
     sourcemap::{DiagnoseWith, report::Diagnostic},
-    ty::res::{LocalId, OldId, ParamId, Res},
+    ty::{
+        module::{ModuleId, ResolverError},
+        res::{LocalId, OldId, ParamId, Res},
+    },
 };
 
 #[derive(Debug, Error)]
@@ -100,6 +103,10 @@ pub enum TypeError {
     TryCatchInConstraint(NodeId, NodeId),
     #[error("the else block of a guard must not complete")]
     GuardElseMustDiverge(NodeId, NodeId),
+    #[error("{1}")]
+    PathResolutionError(NodeId, ResolverError),
+    #[error("multiple entry points defined")]
+    MultipleEntryPoints(NodeId, NodeId),
 }
 
 impl TypeError {
@@ -147,6 +154,9 @@ impl TypeError {
             DiscardedBlockValue(..) => Some(1039),
             TryCatchInConstraint(..) => Some(1040),
             GuardElseMustDiverge(..) => Some(1041),
+            MultipleEntryPoints(..) => Some(1042),
+
+            PathResolutionError(_, err) => Some(err.as_code()),
         }
     }
 }
@@ -630,6 +640,26 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_help(Some("this may be a bug in the compiler as you generally can't manually specify non scalars."))
                 ]
             }
+            PathResolutionError(node_id, _) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "resolving this"),
+                ]
+            }
+            MultipleEntryPoints(first_node_id, second_node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, first_node_id, "entry point defined here")
+                        .with_label_from(
+                            recorder,
+                            second_node_id,
+                            "...another entry point defined here",
+                        )
+                        .with_help(Some("there can only be one entry point in a program")),
+                ]
+            }
         }
     }
 }
@@ -754,6 +784,7 @@ struct TypeckCtxt<'c> {
     next_scope_id: usize,
     next_old_id: usize,
     tcx: &'c mut TyCtxt,
+    module_id: ModuleId,
     scopes: Vec<HashMap<String, Res>>,
     current_scope_ids: Vec<ScopeId>,
     /// Innermost loop, which `break` and `continue` target.
@@ -796,10 +827,11 @@ impl_next_id!(TypeckCtxt<'c>.next_param_id -> ParamId, next_param_id);
 impl_next_id!(TypeckCtxt<'c>.next_scope_id -> ScopeId, next_scope_id);
 impl_next_id!(TypeckCtxt<'c>.next_old_id -> OldId, next_old_id);
 impl<'c> TypeckCtxt<'c> {
-    pub fn new(tcx: &'c mut TyCtxt) -> Self {
+    pub fn new(tcx: &'c mut TyCtxt, module_id: ModuleId) -> Self {
         let return_ty = tcx.void_ty();
         Self {
             tcx,
+            module_id,
             scopes: Vec::new(),
             body: BodyInfo::new_with_return_ty(return_ty, None),
             next_id: 0,
@@ -866,10 +898,11 @@ impl<'c> TypeckCtxt<'c> {
 
     fn new_with_func_sig(
         tcx: &'c mut TyCtxt,
+        module_id: ModuleId,
         def: &ast::AstFunctionDef,
         sig: &defs::FuncSig,
     ) -> Self {
-        let mut tccx = Self::new(tcx);
+        let mut tccx = Self::new(tcx, module_id);
         tccx.open_scope(def.body.node_id);
 
         for (param, ty) in def.args.iter().zip(sig.param_tys.iter()) {
@@ -931,7 +964,7 @@ impl<'c> TypeckCtxt<'c> {
                 // prefer locals and params.
                 s.get(name).cloned()
             })
-            .or_else(|| self.tcx.resolve_single_path(name))
+            .or_else(|| self.tcx.resolve_single_path(name, self.module_id))
     }
 
     fn res_ty(&self, res: &Res) -> Option<Ty> {
@@ -948,6 +981,7 @@ impl<'c> TypeckCtxt<'c> {
             Res::Param(param_id) => self.body.param_ty(*param_id),
             Res::Enum(enum_id) => Some(self.ty(TyKind::Enum(*enum_id))),
             Res::EnumVariant(enum_variant) => Some(self.ty(TyKind::Enum(enum_variant.enum_id()))),
+            Res::Module(..) => None,
         }
     }
 
@@ -979,10 +1013,17 @@ impl<'c> TypeckCtxt<'c> {
     }
 }
 
-/// Walks the given AST and tries to apply types to every NodeId.
 pub fn typeck_ast(
     tcx: &mut TyCtxt,
-    program: &ast::AstProgram,
+    program: &ast::AstModule,
+) -> Result<HashMap<DefId, BodyInfo>, Vec<TypeError>> {
+    typeck_module(tcx, program)
+}
+
+/// Walks the given AST and tries to apply types to every NodeId.
+fn typeck_module(
+    tcx: &mut TyCtxt,
+    program: &ast::AstModule,
 ) -> Result<HashMap<DefId, BodyInfo>, Vec<TypeError>> {
     let mut results = HashMap::new();
     let mut errors = Vec::new();
@@ -1008,7 +1049,16 @@ pub fn typeck_ast(
                     defs::Def {
                         kind: defs::DefKind::Function(sig),
                     } => {
-                        let mut tccx = TypeckCtxt::new_with_func_sig(tcx, ast_func_def, &sig);
+                        let mut tccx = TypeckCtxt::new_with_func_sig(
+                            tcx,
+                            tcx.mcx.get_module_id(program.node_id).unwrap_or_else(|| {
+                                bug!("unable to resolve module id of module in typeck")
+                            }),
+                            ast_func_def,
+                            &sig,
+                        );
+                        let _ =
+                            typeck_mark_entry_point(&mut tccx, ast_func_def).reported(&mut tccx);
                         let _ = typeck_sig(&mut tccx, &sig).reported(&mut tccx);
                         let _ = typeck_pre_constraint(&mut tccx, &ast_func_def.constraints);
                         // The body's scope is already open (from new_with_func_sig) as
@@ -1065,11 +1115,58 @@ pub fn typeck_ast(
         }
     }
 
+    for module in program.mods.iter() {
+        match typeck_module(tcx, module) {
+            Ok(module_results) => {
+                results.extend(module_results);
+            }
+            Err(err) => {
+                errors.extend(err);
+            }
+        }
+    }
+
     if !errors.is_empty() {
         return Err(errors);
     }
 
     Ok(results)
+}
+
+fn typeck_mark_entry_point(tccx: &mut TypeckCtxt, def: &AstFunctionDef) -> Result<(), TypeError> {
+    let module = tccx
+        .tcx
+        .mcx
+        .get_module(tccx.module_id)
+        .unwrap_or_else(|| bug!("cannot find module when checking for entry point"));
+
+    if def.name != "main" || module.parent.is_some() {
+        return Ok(());
+    }
+
+    match tccx.tcx.entry_point {
+        None => {
+            tccx.tcx.entry_point = Some(
+                tccx.tcx
+                    .defs
+                    .resolve_def_id_for_node_id(def.node_id)
+                    .unwrap_or_else(|| bug!("cannot find def id for node id")),
+            );
+            Ok(())
+        }
+        Some(existing_entry_point) => {
+            let original_node_id = tccx
+                .tcx
+                .defs
+                .resolve_node_id_for_def_id(existing_entry_point)
+                .unwrap_or_else(|| bug!("cannot find node id for def id"));
+
+            Err(TypeError::MultipleEntryPoints(
+                original_node_id,
+                def.node_id,
+            ))
+        }
+    }
 }
 
 fn typeck_sig(tccx: &mut TypeckCtxt, sig: &FuncSig) -> Result<(), TypeError> {
@@ -1855,7 +1952,7 @@ fn typeck_constraint_expr(
 fn typeck_path_expr(tccx: &mut TypeckCtxt, path_expr: &ast::AstPathExpr) -> Result<Ty, TypeError> {
     let res = tccx
         .tcx
-        .resolve_path_expr(path_expr.clone())?
+        .resolve_path_expr(path_expr.clone(), tccx.module_id)?
         .ok_or_else(|| TypeError::CannotResolve(path_expr.field.text.clone(), path_expr.node_id))?;
 
     let ty = tccx.res_ty(&res).ok_or_else(|| {
@@ -1876,7 +1973,7 @@ fn typeck_implicit_path_expr(
 
     let res = tccx
         .tcx
-        .resolve_implicit_path_expr(impl_path_expr.clone(), expected.clone())?
+        .resolve_implicit_path_expr(impl_path_expr.clone(), expected.clone(), tccx.module_id)?
         .ok_or_else(|| TypeError::CannotImplyVariant(impl_path_expr.node_id))?;
 
     let ty = tccx.res_ty(&res).ok_or_else(|| {

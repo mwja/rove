@@ -1,0 +1,5 @@
+module no_main;
+
+func main() {
+    print no_main::add(1, 2);
+}

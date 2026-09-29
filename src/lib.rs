@@ -15,6 +15,7 @@ mod ast;
 mod codegen;
 mod defs;
 mod enums;
+mod mangle;
 mod sourcemap;
 mod syntax;
 mod ty;
@@ -52,24 +53,38 @@ pub fn compile(
         })
     };
 
-    let input = std::fs::read(&input_path)
-        .map_err(|_| vec![Diagnostic::new("unable to read input file")])?;
-    let contents = String::from_utf8(input)
-        .map_err(|_| vec![Diagnostic::new("unable to parse input file as utf8")])?;
-    // for now its only one file
-    let source_file_id =
-        source_map.add_file(input_path.clone().into_boxed_path(), contents.clone());
-
-    let raw = syntax::parse(&contents, source_file_id)?;
-
     let mut node_to_span = sourcemap::SpanRecorder::new();
-    let ast = syntax::lower_to_ast(raw, source_file_id, &mut node_to_span)?;
 
+    let ast = syntax::lower_modules(
+        input_path.clone(),
+        {
+            let mut search_buf = input_path.clone();
+            search_buf.pop();
+            search_buf
+        },
+        source_map,
+        &mut node_to_span,
+        &mut 0,
+    )?;
     let mut ty_ctxt = TyCtxt::new();
 
-    ty_ctxt.enums =
-        enums::resolve(&ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
-    defs::resolve(&mut ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
+    // Collect all modules and give each module node_id a corresponding module_id.
+    ty_ctxt.mcx.collect_modules(&ast);
+
+    enums::resolve(&ast, &mut ty_ctxt.enums)
+        .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
+
+    let dcx =
+        defs::declare(&ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
+    // Fill each module's items now that every def has a `DefId`, so that
+    // signatures can resolve their types through the module tree.
+    ty_ctxt
+        .mcx
+        .build_tree(&ast, dcx.def_ids(), &ty_ctxt.enums)
+        .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
+
+    defs::define(&mut ty_ctxt, dcx, &ast)
+        .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
     ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;

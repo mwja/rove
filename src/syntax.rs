@@ -1,8 +1,9 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, path::PathBuf};
 
 use rust_sitter::{Spanned, errors::ParseError};
 
 use crate::{
+    SourceMap,
     ast::{self, AstPathExpr, NodeId},
     sourcemap::{SourceFileId, Span, SpanRecorder, report::Diagnostic},
 };
@@ -13,7 +14,7 @@ mod grammar {
 
     #[rust_sitter::language]
     pub struct Program {
-        pub defs: Vec<Def>,
+        pub defs: Spanned<Vec<Def>>,
     }
 
     pub enum Type {
@@ -29,6 +30,26 @@ mod grammar {
     pub enum Def {
         Function(Spanned<FunctionDef>),
         Enum(Spanned<EnumDef>),
+        Module(Spanned<ModuleDef>),
+    }
+
+    pub struct ModuleDef {
+        #[rust_sitter::leaf(text = "module")]
+        _m: (),
+        pub name: Spanned<Ident>,
+        pub body: ModuleBlock,
+    }
+
+    pub enum ModuleBlock {
+        Block {
+            #[rust_sitter::leaf(text = "{")]
+            _l: (),
+            defs: Vec<Def>,
+            #[rust_sitter::leaf(text = "}")]
+            _r: (),
+        },
+        #[rust_sitter::prec()]
+        Empty(#[rust_sitter::leaf(text = ";")] ()),
     }
 
     pub struct EnumDef {
@@ -593,12 +614,67 @@ pub fn parse(
     }
 }
 
-pub fn lower_to_ast(
+fn lower_to_ast(
     program: grammar::Program,
     source_file_id: SourceFileId,
     node_to_span: &mut SpanRecorder<NodeId>,
-) -> Result<ast::AstProgram, Vec<Diagnostic>> {
-    ProgramLowerer::new(source_file_id, node_to_span).lower(program)
+    next_node_id: &mut usize,
+) -> Result<ast::AstModule, Vec<Diagnostic>> {
+    let (ast, node_id) =
+        ProgramLowerer::new(source_file_id, node_to_span, Some(*next_node_id)).lower(program)?;
+    *next_node_id = node_id;
+    Ok(ast)
+}
+
+pub fn lower_modules(
+    root_path: PathBuf,
+    search_path: PathBuf,
+    source_map: &mut SourceMap,
+    node_to_span: &mut SpanRecorder<NodeId>,
+    next_node_id: &mut usize,
+) -> Result<ast::AstModule, Vec<Diagnostic>> {
+    let mut diagnostics = Vec::new();
+    // root
+    let input = std::fs::read(&root_path)
+        .map_err(|_| vec![Diagnostic::new("unable to read input file")])?;
+    let contents = String::from_utf8(input)
+        .map_err(|_| vec![Diagnostic::new("unable to parse input file as utf8")])?;
+
+    let source_file_id = source_map.add_file(root_path.clone().into_boxed_path(), contents.clone());
+    let raw = parse(&contents, source_file_id)?;
+
+    let mut ast = lower_to_ast(raw, source_file_id, node_to_span, next_node_id)?;
+    // find all submodules that aren't inline, and inline them
+    for module in ast.mods.iter_mut() {
+        if !module.is_shell {
+            continue;
+        }
+
+        let path = {
+            let mut path_buf = search_path.clone();
+            path_buf.push(format!("{}.rv", module.name));
+            path_buf
+        };
+        let search_path = {
+            let mut path_buf = search_path.clone();
+            path_buf.push(format!("{}", module.name));
+            path_buf
+        };
+        match lower_modules(path, search_path, source_map, node_to_span, next_node_id) {
+            Err(diag) => diagnostics.extend(diag),
+            Ok(submodule) => {
+                let name = module.name.clone();
+                *module = submodule;
+                module.name = name;
+            }
+        }
+    }
+
+    if diagnostics.is_empty() {
+        Ok(ast)
+    } else {
+        Err(diagnostics)
+    }
 }
 
 // struct to keep track of nodes.
@@ -611,9 +687,13 @@ struct ProgramLowerer<'a> {
 impl_next_id!(ProgramLowerer<'a>.next_node_id -> NodeId);
 
 impl<'a> ProgramLowerer<'a> {
-    fn new(source_file_id: SourceFileId, node_to_span: &'a mut SpanRecorder<NodeId>) -> Self {
+    fn new(
+        source_file_id: SourceFileId,
+        node_to_span: &'a mut SpanRecorder<NodeId>,
+        next_node_id: Option<usize>,
+    ) -> Self {
         Self {
-            next_node_id: 0,
+            next_node_id: next_node_id.unwrap_or_default(),
             source_file_id,
             node_to_span,
             errors: Vec::new(),
@@ -627,53 +707,97 @@ impl<'a> ProgramLowerer<'a> {
         id
     }
 
-    pub fn lower(mut self, program: grammar::Program) -> Result<ast::AstProgram, Vec<Diagnostic>> {
-        let mut defs = Vec::new();
-        let mut enums = Vec::new();
-
-        for def in program.defs {
-            match def {
-                grammar::Def::Function(..) => defs.push(def),
-                grammar::Def::Enum(..) => enums.push(def),
-            }
-        }
-        let program = ast::AstProgram {
-            defs: defs.into_iter().map(|def| self.lower_def(def)).collect(),
-            enums: enums
-                .into_iter()
-                .map(|def| self.lower_enum_def(def))
-                .collect(),
-        };
+    pub fn lower(
+        mut self,
+        program: grammar::Program,
+    ) -> Result<(ast::AstModule, usize), Vec<Diagnostic>> {
+        let program =
+            self.lower_definitions("<root>", program.defs.span, program.defs.value, false);
 
         if self.errors.is_empty() {
-            Ok(program)
+            Ok((program, self.next_node_id))
         } else {
             Err(self.errors)
         }
     }
 
-    fn lower_enum_def(&mut self, def: grammar::Def) -> ast::AstEnumDef {
-        match def {
-            grammar::Def::Function(..) => unreachable!(),
-            grammar::Def::Enum(enum_def) => ast::AstEnumDef {
-                node_id: self.next_id_spanned(enum_def.span),
-                name: enum_def.value.name.text.clone(),
-                variants: enum_def
-                    .value
-                    .variants
-                    .flatten_list()
-                    .into_iter()
-                    .map(|ident| self.lower_ident(ident))
-                    .collect(),
+    fn lower_module_def(&mut self, def: grammar::Def) -> ast::AstModule {
+        let grammar::Def::Module(module_def) = def else {
+            unreachable!();
+        };
+        let is_shell = matches!(module_def.value.body, grammar::ModuleBlock::Empty(..));
+
+        self.lower_definitions(
+            module_def.value.name.value.text,
+            module_def.span,
+            match module_def.value.body {
+                grammar::ModuleBlock::Empty(..) => vec![],
+                grammar::ModuleBlock::Block { defs, .. } => defs,
             },
+            is_shell,
+        )
+    }
+
+    fn lower_definitions(
+        &mut self,
+        name: impl Into<String>,
+        span: (usize, usize),
+        body_defs: Vec<grammar::Def>,
+        is_shell: bool,
+    ) -> ast::AstModule {
+        let mut defs = Vec::new();
+        let mut enums = Vec::new();
+        let mut modules = Vec::new();
+
+        for def in body_defs {
+            match def {
+                grammar::Def::Function(..) => defs.push(def),
+                grammar::Def::Enum(..) => enums.push(def),
+                grammar::Def::Module(..) => modules.push(def),
+            }
+        }
+        let program = ast::AstModule {
+            node_id: self.next_id_spanned(span),
+            name: name.into(),
+            mods: modules
+                .into_iter()
+                .map(|def| self.lower_module_def(def))
+                .collect(),
+            defs: defs.into_iter().map(|def| self.lower_def(def)).collect(),
+            enums: enums
+                .into_iter()
+                .map(|def| self.lower_enum_def(def))
+                .collect(),
+            is_shell,
+        };
+
+        program
+    }
+
+    fn lower_enum_def(&mut self, def: grammar::Def) -> ast::AstEnumDef {
+        let grammar::Def::Enum(enum_def) = def else {
+            unreachable!();
+        };
+
+        ast::AstEnumDef {
+            node_id: self.next_id_spanned(enum_def.span),
+            name: enum_def.value.name.text.clone(),
+            variants: enum_def
+                .value
+                .variants
+                .flatten_list()
+                .into_iter()
+                .map(|ident| self.lower_ident(ident))
+                .collect(),
         }
     }
 
     fn lower_def(&mut self, def: grammar::Def) -> ast::AstDef {
-        match def {
-            grammar::Def::Function(func) => ast::AstDef::Function(self.lower_function_def(func)),
-            grammar::Def::Enum(..) => unreachable!(),
-        }
+        let grammar::Def::Function(func) = def else {
+            unreachable!();
+        };
+
+        ast::AstDef::Function(self.lower_function_def(func))
     }
 
     fn lower_function_def(&mut self, func: Spanned<grammar::FunctionDef>) -> ast::AstFunctionDef {
@@ -709,7 +833,6 @@ impl<'a> ProgramLowerer<'a> {
                 .into_iter()
                 .map(|c| self.lower_constraint(c))
                 .collect(),
-            is_main: func.value.name.text == "main",
         }
     }
 

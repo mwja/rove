@@ -31,7 +31,7 @@ fn opt_ty(ty: Option<Ty>) -> OptionalTy {
 pub fn display_debug(
     f: &mut dyn std::io::Write,
     tcx: &TyCtxt,
-    tree: &ast::AstProgram,
+    tree: &ast::AstModule,
 ) -> std::io::Result<()> {
     for def in &tree.defs {
         writeln!(f, "{}", display_def(tcx, def))?;

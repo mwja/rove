@@ -1,0 +1,7 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/module_include.rv
+---
+exit: Some(0)
+--- stdout
+3

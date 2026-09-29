@@ -96,7 +96,6 @@ impl Enum {
 pub struct Enums {
     next_id: usize,
     node_id_to_enum_id: HashMap<NodeId, EnumId>,
-    name_to_enum_id: HashMap<String, EnumId>,
     enums: Vec<Enum>,
 }
 
@@ -105,32 +104,24 @@ impl Enums {
         Self {
             next_id: 0,
             node_id_to_enum_id: HashMap::new(),
-            name_to_enum_id: HashMap::new(),
             enums: Vec::new(),
         }
     }
 
+    pub fn resolve_node_id(&self, node_id: NodeId) -> Option<EnumId> {
+        self.node_id_to_enum_id.get(&node_id).copied()
+    }
+
     fn add_enum(&mut self, node_id: NodeId, name: String, variants: Vec<String>) -> EnumId {
         let id = self.next_id();
-        self.name_to_enum_id.insert(name.clone(), id);
         let enum_def = Enum::new(id, name, variants);
         self.node_id_to_enum_id.insert(node_id, id);
         self.enums.push(enum_def);
         id
     }
 
-    pub fn resolve_name(&self, name: &str) -> Option<EnumId> {
-        self.name_to_enum_id.get(name).copied()
-    }
-
     pub fn get_enum(&self, id: EnumId) -> Option<&Enum> {
         self.enums.get(id.0 as usize)
-    }
-
-    pub fn get_enum_by_name(&self, name: &str) -> Option<&Enum> {
-        self.name_to_enum_id
-            .get(name)
-            .and_then(|id| self.get_enum(*id))
     }
 }
 
@@ -168,20 +159,9 @@ impl DiagnoseWith<NodeId> for EnumError {
     }
 }
 
-pub fn resolve(ast: &ast::AstProgram) -> Result<Enums, Vec<EnumError>> {
-    let mut enums = Enums::new();
+pub fn resolve(ast: &ast::AstModule, enums: &mut Enums) -> Result<(), Vec<EnumError>> {
     let mut errors = Vec::new();
-    let mut seen_enums: HashMap<&str, NodeId> = HashMap::new();
     for enum_def in ast.enums.iter() {
-        if let Some(original) = seen_enums.insert(&enum_def.name, enum_def.node_id) {
-            errors.push(EnumError::DuplicateEnum(
-                enum_def.name.clone(),
-                original,
-                enum_def.node_id,
-            ));
-            continue;
-        }
-
         let mut seen_variants: HashMap<&str, NodeId> = HashMap::new();
         for variant in enum_def.variants.iter() {
             if let Some(original) = seen_variants.insert(&variant.text, variant.node_id) {
@@ -197,8 +177,17 @@ pub fn resolve(ast: &ast::AstProgram) -> Result<Enums, Vec<EnumError>> {
         enums.add_enum(enum_def.node_id, enum_def.name.clone(), variants);
     }
 
+    for module in ast.mods.iter() {
+        match resolve(module, enums) {
+            Ok(_) => {}
+            Err(mut sub_errors) => {
+                errors.append(&mut sub_errors);
+            }
+        }
+    }
+
     if errors.is_empty() {
-        Ok(enums)
+        Ok(())
     } else {
         Err(errors)
     }

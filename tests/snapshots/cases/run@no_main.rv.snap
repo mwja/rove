@@ -1,0 +1,6 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/no_main.rv
+---
+exit: Some(0)
+--- stdout

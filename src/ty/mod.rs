@@ -6,12 +6,14 @@ use crate::{
     defs::{DefId, Defs, FuncSig},
     enums::{EnumId, Enums},
     ty::{
+        module::{ModuleCtxt, ModuleId, ModuleTree},
         res::Res,
         typeck::{BodyInfo, TypeError},
     },
 };
 
 pub mod debug;
+pub mod module;
 pub mod res;
 pub mod typeck;
 
@@ -115,6 +117,8 @@ pub struct TyCtxt {
     /// Not initially populated with data until the resolve pass occurs.
     pub defs: Defs,
     pub enums: Enums,
+    pub mcx: ModuleCtxt,
+    pub entry_point: Option<DefId>,
 }
 
 impl TyCtxt {
@@ -147,81 +151,49 @@ impl TyCtxt {
         self.ty(TyKind::Float)
     }
 
-    pub fn resolve_single_path(&self, name: &str) -> Option<Res> {
-        self.defs
-            .resolve_name(name)
-            .map(|def_id| Res::Def(def_id))
-            .or_else(|| {
-                self.enums
-                    .resolve_name(name)
-                    .map(|enum_id| Res::Enum(enum_id))
-            })
+    pub fn is_entry_point(&self, def_id: DefId) -> bool {
+        self.entry_point == Some(def_id)
     }
 
-    pub fn resolve_path(&self, path: AstPath) -> Result<Option<Res>, TypeError> {
-        match path {
-            AstPath::Path(path) => self.resolve_path_expr(path),
-            AstPath::Ident(ident) => Ok(self.resolve_single_path(&ident.text)),
-        }
+    pub fn resolve_single_path(&self, name: &str, module_id: ModuleId) -> Option<Res> {
+        self.get_module_for_module_id(module_id).resolve_name(name)
     }
 
-    pub fn resolve_path_expr(&self, path: AstPathExpr) -> Result<Option<Res>, TypeError> {
-        let base = self.resolve_path(*path.base)?;
+    fn get_module_for_module_id(&self, module_id: ModuleId) -> &ModuleTree {
+        self.mcx
+            .get_module(module_id)
+            .unwrap_or_else(|| bug!("module_id {} not found", module_id))
+    }
 
-        if base.is_none() {
-            return Ok(None);
-        }
+    pub fn resolve_path(
+        &self,
+        path: AstPath,
+        module_id: ModuleId,
+    ) -> Result<Option<Res>, TypeError> {
+        let node_id = path.node_id();
+        self.get_module_for_module_id(module_id)
+            .resolve_path(path, self)
+            .map_err(|e| TypeError::PathResolutionError(node_id, e))
+    }
 
-        match base.unwrap_or_else(|| bug!("base was checked to be some, but was none")) {
-            Res::Local(..)
-            | Res::ConstraintOld(..)
-            | Res::ConstraintRet
-            | Res::Param(..)
-            | Res::Def(..)
-            | Res::EnumVariant(..) => Err(TypeError::TypeHasNoNamespaceMembers(path.node_id)),
-            Res::Enum(enum_id) => {
-                let enum_ = match self.enums.get_enum(enum_id) {
-                    Some(enum_) => enum_,
-                    None => return Ok(None),
-                };
-
-                match enum_.get_variant_by_name(&path.field.text) {
-                    None => Ok(None),
-                    Some(variant) => Ok(Some(Res::EnumVariant(variant))),
-                }
-            }
-        }
+    pub fn resolve_path_expr(
+        &self,
+        path: AstPathExpr,
+        module_id: ModuleId,
+    ) -> Result<Option<Res>, TypeError> {
+        self.resolve_path(AstPath::Path(path), module_id)
     }
 
     pub fn resolve_implicit_path_expr(
         &self,
         path: AstImplicitPathExpr,
         expected: Ty,
+        module_id: ModuleId,
     ) -> Result<Option<Res>, TypeError> {
-        let base = match *expected.kind {
-            TyKind::Enum(enum_id) => Res::Enum(enum_id),
-            TyKind::FullFallible(..)
-            | TyKind::Float
-            | TyKind::Int
-            | TyKind::Void
-            | TyKind::Never
-            | TyKind::Func(..) => return Err(TypeError::CannotImplyVariant(path.node_id)),
-        };
-
-        match base {
-            Res::Enum(enum_id) => {
-                let enum_ = match self.enums.get_enum(enum_id) {
-                    Some(enum_) => enum_,
-                    None => return Ok(None),
-                };
-
-                match enum_.get_variant_by_name(&path.path.text) {
-                    None => Ok(None),
-                    Some(variant) => Ok(Some(Res::EnumVariant(variant))),
-                }
-            }
-            _ => Err(TypeError::CannotImplyVariant(path.node_id)),
-        }
+        let node_id = path.node_id;
+        self.get_module_for_module_id(module_id)
+            .resolve_implicit_path(path, self, expected)
+            .map_err(|e| TypeError::PathResolutionError(node_id, e))
     }
 
     pub fn new() -> Self {
@@ -230,6 +202,8 @@ impl TyCtxt {
             bodies: HashMap::new(),
             defs: Defs::default(),
             enums: Enums::default(),
+            mcx: ModuleCtxt::default(),
+            entry_point: None,
         }
     }
 

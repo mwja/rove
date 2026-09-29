@@ -3,6 +3,7 @@ use std::fmt::Display;
 use crate::{
     defs::DefId,
     enums::{EnumId, EnumVariant},
+    ty::module::ModuleId,
 };
 
 indexable_id!(pub LocalId);
@@ -21,6 +22,8 @@ pub enum Res {
 
     Enum(EnumId),
     EnumVariant(EnumVariant),
+
+    Module(ModuleId),
 }
 
 impl Display for Res {
@@ -33,6 +36,7 @@ impl Display for Res {
             Res::ConstraintRet => write!(f, "constraint ret"),
             Res::Enum(id) => write!(f, "enum {}", id),
             Res::EnumVariant(id) => write!(f, "enum variant {}", id),
+            Res::Module(id) => write!(f, "module #{}", id),
         }
     }
 }

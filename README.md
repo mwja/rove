@@ -1,6 +1,6 @@
 # Rove
 
-![last version](https://img.shields.io/github/v/tag/mwja/rove?sort=semver&label=latest%20version) ![last commit](https://img.shields.io/github/last-commit/mwja/rove)
+![last version](https://img.shields.io/github/v/tag/mwja/rove?sort=semver&label=latest%20version) ![last commit](https://img.shields.io/github/last-commit/mwja/rove) [![tests](https://github.com/mwja/rove/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/mwja/rove/actions/workflows/tests.yml)
 
 
 A less ambitious project for a compiled language.
@@ -18,8 +18,7 @@ and my first failed attempt at a language was called Otter).
 
 **Examples**
 
-See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The language is informally design-by-contract and allows preconditions and postconditions to be defined in function headers. It is meant to be readable (inspired by Swift on some of its syntax). Once the language is stabilised, I will make a full guide and begin
-dog-fooding it by rewriting the compiler in Rove itself.
+See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The language is informally design-by-contract and allows preconditions and postconditions to be defined in function headers. It is meant to be readable (inspired by Swift on some of its syntax). Once the language is stabilised, I will make a full guide and begin dog-fooding it by rewriting the compiler in Rove itself.
 
 ## Steps towards full language-hood
 
@@ -41,12 +40,13 @@ dog-fooding it by rewriting the compiler in Rove itself.
   - [x] e.g. `guard x > 0 else { return 0 }`, or `guard x > 0 else ::BiggerThanZero`
 
 🏷️ *v0.0.2* 
+- [x] `module X` and `module Y {}`
 - [ ] Fix float division (int/int should produce an int, truncated. not a float)
-- [ ] `use X` namespace aliasing.
 - [ ] Real booleans
 - [ ] Unary operators
 
 🏷️ *v0.0.3* 
+- [ ] `use X::*`, `use X::{X, Y}`
 - [ ] `&&` and `||` with shortcircuiting.
 - [ ] Make all statements expressions (e.g. `if` and `switch` should return a value)
 
@@ -62,7 +62,12 @@ dog-fooding it by rewriting the compiler in Rove itself.
 
 🏷️ *v0.0.6* 
 - [ ] Generics
-- [ ] Custom linking with C libs
+- [ ] Custom linking with C libs (with extern names, or no_mangle)
+
+🏷️ *v0.0.7* 
+- [ ] `import X`, compiling other libraries into the same binary and a (for now
+      unstable) interface to allow linking with other Rove libraries (like
+      rmeta)
 
 ## Use
 

@@ -21,12 +21,13 @@ use cranelift::{
     module::{DataDescription, FuncId, Linkage, Module, default_libcall_names},
     object::{ObjectBuilder, ObjectModule},
 };
-use std::{collections::HashMap, io::Write as _, path::PathBuf};
+use std::{collections::HashMap, error::Error, io::Write as _, path::PathBuf};
 
 use crate::{
     ast::{self, AstDef, AstForcedTryExpr, NodeId},
     codegen::repr::{Repr, ReprCx},
     defs::{self, Def, DefKind, FuncSig},
+    mangle,
     ty::{
         Ty, TyCtxt, TyKind,
         res::{LocalId, OldId, Res},
@@ -201,7 +202,7 @@ pub struct CodegenOptions {
 
 pub fn generate_object(
     tcx: &mut TyCtxt,
-    ast: ast::AstProgram,
+    ast: ast::AstModule,
     options: Option<CodegenOptions>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let options = options.unwrap_or_default();
@@ -220,10 +221,74 @@ pub fn generate_object(
         .unwrap_or_else(|e| bug!("unable to create an object builder for the program: {e}"));
     let mut module = ObjectModule::new(object_builder);
 
-    let mut rcx = ReprCx::new(module.target_config());
+    let rcx = ReprCx::new(module.target_config());
     let mut table = HashMap::new();
     let mut func_sig = HashMap::new();
-    // first, make all functions
+
+    compile_module(tcx, &ast, &mut module, rcx, &mut table, &mut func_sig)?;
+
+    let emit_clif_file = match &options.emit_clif_to {
+        Some(path) => Some(
+            std::fs::File::create(path)
+                .unwrap_or_else(|e| bug!("unable to create a file to emit clif: {e}")),
+        ),
+        None => None,
+    };
+    let emit_opt_clif_file = match &options.emit_opt_clif_to {
+        Some(path) => Some(
+            std::fs::File::create(path)
+                .unwrap_or_else(|e| bug!("unable to create a file to emit optimized clif: {e}")),
+        ),
+        None => None,
+    };
+    let emit_cfg_file = match &options.emit_cfg_to {
+        Some(path) => Some(
+            std::fs::File::create(path)
+                .unwrap_or_else(|e| bug!("unable to create a file to emit a DOT diagram: {e}")),
+        ),
+        None => None,
+    };
+
+    let runtime = Runtime::from_object(&mut module);
+    let mut ctx = module.make_context();
+    let mut emit = EmitFiles {
+        clif: emit_clif_file,
+        opt_clif: emit_opt_clif_file,
+        cfg: emit_cfg_file,
+    };
+    define_module(
+        tcx,
+        ast,
+        &mut module,
+        &mut ctx,
+        runtime,
+        rcx,
+        &table,
+        &mut func_sig,
+        &mut emit,
+    )?;
+
+    let product = module.finish();
+    let bytes = product
+        .emit()
+        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+
+    Ok(bytes)
+}
+
+fn compile_module(
+    tcx: &mut TyCtxt,
+    ast: &ast::AstModule,
+    module: &mut ObjectModule,
+    rcx: ReprCx,
+    table: &mut HashMap<defs::DefId, FuncId>,
+    func_sig: &mut HashMap<defs::DefId, Signature>,
+) -> Result<(), Box<dyn Error + 'static>> {
+    let module_id = tcx
+        .mcx
+        .get_module_id(ast.node_id)
+        .unwrap_or_else(|| bug!("unable to resolve module id of module in codegen"));
+
     for def in ast.defs.iter() {
         match def {
             ast::AstDef::Function(func_def) => {
@@ -241,15 +306,13 @@ pub fn generate_object(
                     continue;
                 };
 
-                let sig = lower_sig(rcx, sig, func_def.is_main);
+                let is_main = tcx.is_entry_point(def_id);
+                let sig = lower_sig(rcx, sig, is_main);
+                let symbol = mangle::mangle_name(tcx, module_id, &func_def.name);
 
                 let id = module.declare_function(
-                    if func_def.is_main {
-                        "__rove_entry"
-                    } else {
-                        &func_def.name
-                    },
-                    if func_def.is_main {
+                    if is_main { "__rove_entry" } else { &symbol },
+                    if is_main {
                         Linkage::Export
                     } else {
                         Linkage::Local
@@ -262,32 +325,39 @@ pub fn generate_object(
         }
     }
 
-    let mut emit_clif_file = match &options.emit_clif_to {
-        Some(path) => Some(
-            std::fs::File::create(path)
-                .unwrap_or_else(|e| bug!("unable to create a file to emit clif: {e}")),
-        ),
-        None => None,
-    };
-    let mut emit_opt_clif_file = match &options.emit_opt_clif_to {
-        Some(path) => Some(
-            std::fs::File::create(path)
-                .unwrap_or_else(|e| bug!("unable to create a file to emit optimized clif: {e}")),
-        ),
-        None => None,
-    };
-    let mut emit_cfg_file = match &options.emit_cfg_to {
-        Some(path) => Some(
-            std::fs::File::create(path)
-                .unwrap_or_else(|e| bug!("unable to create a file to emit a DOT diagram: {e}")),
-        ),
-        None => None,
-    };
+    for ast in ast.mods.iter() {
+        compile_module(tcx, ast, module, rcx, table, func_sig)?;
+    }
 
-    let runtime = Runtime::from_object(&mut module);
-    let mut ctx = module.make_context();
-    let defs = ast.defs;
-    for def in defs {
+    Ok(())
+}
+
+/// Files that debug artifacts are written to while defining functions.
+struct EmitFiles {
+    clif: Option<std::fs::File>,
+    opt_clif: Option<std::fs::File>,
+    cfg: Option<std::fs::File>,
+}
+
+/// Lowers and defines every function in the module (and its child modules)
+/// that was declared by `compile_module`.
+fn define_module(
+    tcx: &TyCtxt,
+    ast: ast::AstModule,
+    module: &mut ObjectModule,
+    ctx: &mut cranelift::codegen::Context,
+    runtime: Runtime,
+    rcx: ReprCx,
+    table: &HashMap<defs::DefId, FuncId>,
+    func_sig: &mut HashMap<defs::DefId, Signature>,
+    emit: &mut EmitFiles,
+) -> Result<(), Box<dyn Error + 'static>> {
+    let module_id = tcx
+        .mcx
+        .get_module_id(ast.node_id)
+        .unwrap_or_else(|| bug!("unable to resolve module id of module in codegen"));
+
+    for def in ast.defs {
         let AstDef::Function(func_def) = def else {
             continue;
         };
@@ -365,7 +435,7 @@ pub fn generate_object(
         fbuilder.seal_block(block);
         let codegen = CraneliftCodegen {
             runtime,
-            module: &mut module,
+            module: &mut *module,
             builder: &mut fbuilder,
             locals: HashMap::new(),
             old_values: HashMap::new(),
@@ -376,46 +446,45 @@ pub fn generate_object(
             failure_landing_pad,
             block_type: BlockType::Regular,
             landing_pad,
-            is_main: func_def.is_main,
+            is_main: tcx.is_entry_point(def_id),
             current_scope: None,
             scope_frames: HashMap::new(),
             loops: Vec::new(),
             switches: Vec::new(),
-            fn_name: func_def.name.clone(),
+            fn_name: mangle::qualified_name(tcx, module_id, &func_def.name),
             cx,
             rcx,
         };
 
         codegen.lower(func_def);
 
-        if let Some(file) = &mut emit_cfg_file {
+        if let Some(file) = &mut emit.cfg {
             writeln!(file, "{}", CFGPrinter::new(fbuilder.func).to_string())
                 .unwrap_or_else(|e| bug!("unable to write the DOT diagram to its file: {e}"));
         }
 
         fbuilder.finalize(module.target_config());
 
-        if let Some(file) = &mut emit_clif_file {
+        if let Some(file) = &mut emit.clif {
             writeln!(file, "{}", ctx.func.display())
                 .unwrap_or_else(|e| bug!("unable to write clif to its file: {e}"));
         }
 
-        module.define_function(*id, &mut ctx)?;
+        module.define_function(*id, ctx)?;
 
-        if let Some(file) = &mut emit_opt_clif_file {
+        if let Some(file) = &mut emit.opt_clif {
             writeln!(file, "{}", ctx.func.display())
                 .unwrap_or_else(|e| bug!("unable to write optimized clif to its file: {e}"));
         }
 
-        module.clear_context(&mut ctx);
+        module.clear_context(ctx);
     }
 
-    let product = module.finish();
-    let bytes = product
-        .emit()
-        .map_err(|e| -> Box<dyn std::error::Error> { Box::new(e) })?;
+    for child in ast.mods {
+        define_module(tcx, child, module, ctx, runtime, rcx, table, func_sig, emit)?;
+    }
 
-    Ok(bytes)
+    Ok(())
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -1804,7 +1873,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     .ins()
                     .iconst(types::I64, enum_variant.as_u32() as i64),
             ),
-            Res::Enum(..) => panic!("attempted to resolve an enum directly."),
+            Res::Module(..) => bug!("attempted to resolve a module directly."),
+            Res::Enum(..) => bug!("attempted to resolve an enum directly."),
         }
     }
 
@@ -1861,11 +1931,13 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     /// Checks if the given ident is a direct function reference and returns
     /// the proper cranelift `FuncId` if so.
     fn try_expr_function_ident(&self, ident: &ast::AstExpr) -> Option<FuncId> {
-        if let ast::AstExprKind::Ident(ident) = &ident.kind {
+        if let ast::AstExprKind::Ident(ast::AstIdent { node_id, .. })
+        | ast::AstExprKind::Path(ast::AstPathExpr { node_id, .. }) = &ident.kind
+        {
             let res = &self
                 .cx
                 .body
-                .node_res(ident.node_id)
+                .node_res(*node_id)
                 .unwrap_or_else(|| bug!("an identifier has no resolution"));
             if let Res::Def(def_id) = res {
                 self.cx.def_id_to_function_id(*def_id)

@@ -1,0 +1,34 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail on snapshot mismatches instead of writing `.snap.new` files.
+  INSTA_UPDATE: no
+
+jobs:
+  snapshots:
+    name: snapshot tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            runtime -> target
+
+      # The compiled test programs link against the runtime's static library.
+      - name: Build runtime
+        run: cargo build --release --manifest-path runtime/Cargo.toml
+
+      - name: Run snapshot tests
+        run: cargo test --test snapshots

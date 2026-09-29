@@ -2,11 +2,18 @@ use std::fmt::Display;
 
 indexable_id!(pub NodeId);
 
-pub struct AstProgram {
+#[derive(Debug)]
+pub struct AstModule {
+    pub name: String,
     pub defs: Vec<AstDef>,
     pub enums: Vec<AstEnumDef>,
+    pub mods: Vec<AstModule>,
+    pub node_id: NodeId,
+    /// to be imported?
+    pub is_shell: bool,
 }
 
+#[derive(Debug)]
 pub struct AstEnumDef {
     pub node_id: NodeId,
     pub name: String,
@@ -57,6 +64,11 @@ pub enum AstDef {
 }
 
 impl AstDef {
+    pub fn name(&self) -> &str {
+        match self {
+            AstDef::Function(func) => &func.name,
+        }
+    }
     pub fn node_id(&self) -> NodeId {
         match self {
             AstDef::Function(func) => func.node_id,
@@ -82,7 +94,6 @@ pub struct AstFunctionDef {
     pub throws_node_id: Option<NodeId>,
     pub return_ty: AstType,
     pub body: AstBlockStmt,
-    pub is_main: bool,
     pub constraints: Vec<AstConstraint>,
 }
 
@@ -201,7 +212,7 @@ impl Display for AstArgDef {
     }
 }
 
-impl Display for AstProgram {
+impl Display for AstModule {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         for (i, def) in self.defs.iter().enumerate() {
             if i > 0 {

@@ -7,20 +7,24 @@ use thiserror::Error;
 use crate::{
     ast::{self, NodeId},
     sourcemap::{DiagnoseWith, report::Diagnostic},
-    ty::{Ty, TyCtxt, TyKind, res::Res, typeck::TypeError},
+    ty::{Ty, TyCtxt, TyKind, module::ModuleId, res::Res, typeck::TypeError},
 };
 indexable_id!(pub DefId);
 
 #[derive(Default, Debug)]
 pub struct Defs {
     pub defs: Vec<Def>,
-    pub name_to_def_id: HashMap<String, DefId>,
     pub node_id_to_def_id: HashMap<NodeId, DefId>,
+    pub def_id_to_node_id: HashMap<DefId, NodeId>,
 }
 
 impl Defs {
     pub fn resolve_def_id_for_node_id(&self, node_id: NodeId) -> Option<DefId> {
         self.node_id_to_def_id.get(&node_id).copied()
+    }
+
+    pub fn resolve_node_id_for_def_id(&self, def_id: DefId) -> Option<NodeId> {
+        self.def_id_to_node_id.get(&def_id).copied()
     }
 
     pub fn def(&self, def_id: DefId) -> Option<&Def> {
@@ -30,10 +34,6 @@ impl Defs {
     pub fn resolve_def_for_node_id(&self, node_id: NodeId) -> Option<&Def> {
         self.defs
             .get(self.resolve_def_id_for_node_id(node_id)?.index())
-    }
-
-    pub fn resolve_name(&self, name: &str) -> Option<DefId> {
-        self.name_to_def_id.get(name).copied()
     }
 }
 
@@ -54,26 +54,26 @@ pub struct FuncSig {
     pub throws_ty: Option<Ty>,
 }
 
-pub struct DefCtxt<'d> {
-    tcx: &'d TyCtxt,
+pub struct DefCtxt {
     next_def_id: usize,
     // In reality this could probably just be done by walking the AST in a
     // stable order, but for now that's not what we're doing.
     node_id_to_def_id: HashMap<NodeId, DefId>,
-    name_to_def_id: HashMap<String, DefId>,
+    def_id_to_node_id: HashMap<DefId, NodeId>,
     defs: Vec<Option<Def>>,
+    module_id: ModuleId,
 }
 
-impl_next_id!(DefCtxt<'d>.next_def_id -> DefId);
+impl_next_id!(DefCtxt.next_def_id -> DefId);
 
-impl<'d> DefCtxt<'d> {
-    pub fn new(tcx: &'d TyCtxt) -> Self {
+impl DefCtxt {
+    pub fn new(module_id: ModuleId) -> Self {
         Self {
-            tcx,
             next_def_id: 0,
             node_id_to_def_id: HashMap::new(),
-            name_to_def_id: HashMap::new(),
+            def_id_to_node_id: HashMap::new(),
             defs: Vec::new(),
+            module_id,
         }
     }
 
@@ -86,27 +86,21 @@ impl<'d> DefCtxt<'d> {
         None
     }
 
+    /// The `DefId`s declared so far, keyed by their definition's node.
+    pub fn def_ids(&self) -> &HashMap<NodeId, DefId> {
+        &self.node_id_to_def_id
+    }
+
     fn node_to_def_id(&self, node_id: NodeId) -> Option<DefId> {
         self.node_id_to_def_id.get(&node_id).copied()
     }
 
     // used in first pass just to declare existence of a def and map it up.
-    fn declare(&mut self, node_id: NodeId, name: String) -> Result<DefId, DefError> {
-        match self.name_to_def_id.get(&name) {
-            // again: will cleanup panics later.
-            Some(def_id) => Err(DefError::DuplicateImpl(
-                name,
-                node_id,
-                self.reverse_def_id_to_node_id(*def_id)
-                    .unwrap_or_else(|| bug!("an existing def_id has no associated node id")),
-            )),
-            None => {
-                let def_id = self.next_id();
-                self.node_id_to_def_id.insert(node_id, def_id);
-                self.name_to_def_id.insert(name, def_id);
-                Ok(def_id)
-            }
-        }
+    fn declare(&mut self, node_id: NodeId) -> DefId {
+        let def_id = self.next_id();
+        self.node_id_to_def_id.insert(node_id, def_id);
+        self.def_id_to_node_id.insert(def_id, node_id);
+        def_id
     }
 
     fn prepare_defs(&mut self) {
@@ -124,8 +118,8 @@ impl<'d> DefCtxt<'d> {
                 .into_iter()
                 .map(|d| d.unwrap_or_else(|| bug!("a def_id was allocated but never defined")))
                 .collect::<Vec<_>>(),
-            name_to_def_id: self.name_to_def_id,
             node_id_to_def_id: self.node_id_to_def_id,
+            def_id_to_node_id: self.def_id_to_node_id,
         }
     }
 }
@@ -205,30 +199,49 @@ impl DiagnoseWith<NodeId> for DefError {
 /// type checking)
 ///
 /// It does this in 2 passes:
-/// - first pass: declare all function names and map them to `DefId`s
-/// - second pass: resolve function signatures
+/// - first pass ([`declare`]): declare all function names and map them to `DefId`s
+/// - second pass ([`define`]): resolve function signatures
 ///
-/// This is split into two steps for future custom type resolution.
-pub fn resolve(tcx: &mut TyCtxt, program: &ast::AstProgram) -> Result<(), Vec<DefError>> {
-    let mut dcx = DefCtxt::new(tcx);
+/// The module tree must be built between the two passes, as signatures
+/// resolve their types through it.
+pub fn declare(tcx: &TyCtxt, program: &ast::AstModule) -> Result<DefCtxt, Vec<DefError>> {
+    let mut dcx = DefCtxt::new(
+        tcx.mcx
+            .get_module_id(program.node_id)
+            .unwrap_or_else(|| bug!("unable to resolve module id of module")),
+    );
 
     resolve_names(&mut dcx, program)?;
+    Ok(dcx)
+}
+
+/// Second pass: resolves function signatures and stores the finished defs
+/// in `tcx.defs`.
+pub fn define(
+    tcx: &mut TyCtxt,
+    mut dcx: DefCtxt,
+    program: &ast::AstModule,
+) -> Result<(), Vec<DefError>> {
     dcx.prepare_defs();
     resolve_defs(tcx, &mut dcx, program)?;
     tcx.defs = dcx.finish();
     Ok(())
 }
 
-fn resolve_names(dcx: &mut DefCtxt, program: &ast::AstProgram) -> Result<(), Vec<DefError>> {
+fn resolve_names(dcx: &mut DefCtxt, program: &ast::AstModule) -> Result<(), Vec<DefError>> {
     let mut errors = Vec::new();
     for def in &program.defs {
         match def {
             ast::AstDef::Function(func) => {
-                match dcx.declare(func.node_id, func.name.clone()) {
-                    Ok(_) => {}
-                    Err(err) => errors.push(err),
-                };
+                dcx.declare(func.node_id);
             }
+        }
+    }
+
+    for module in &program.mods {
+        match resolve_names(dcx, module) {
+            Ok(_) => {}
+            Err(mut errs) => errors.append(&mut errs),
         }
     }
     if !errors.is_empty() {
@@ -241,7 +254,7 @@ fn resolve_names(dcx: &mut DefCtxt, program: &ast::AstProgram) -> Result<(), Vec
 fn resolve_defs(
     tcx: &TyCtxt,
     dcx: &mut DefCtxt,
-    program: &ast::AstProgram,
+    program: &ast::AstModule,
 ) -> Result<(), Vec<DefError>> {
     let mut errors = Vec::new();
     for def in &program.defs {
@@ -254,6 +267,20 @@ fn resolve_defs(
             }
         }
     }
+
+    for module in &program.mods {
+        let previous_module_id = dcx.module_id;
+        dcx.module_id = tcx
+            .mcx
+            .get_module_id(module.node_id)
+            .unwrap_or_else(|| bug!("unable to resolve module id of module"));
+        match resolve_defs(tcx, dcx, module) {
+            Ok(_) => {}
+            Err(mut errs) => errors.append(&mut errs),
+        }
+        dcx.module_id = previous_module_id;
+    }
+
     if !errors.is_empty() {
         Err(errors)
     } else {
@@ -301,7 +328,7 @@ fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Result<Ty
         ast::AstType::Int => Ok(tcx.int_ty()),
         ast::AstType::Void => Ok(tcx.void_ty()),
         ast::AstType::Path(path) => {
-            let Some(res) = tcx.resolve_path(path.clone())? else {
+            let Some(res) = tcx.resolve_path(path.clone(), dcx.module_id)? else {
                 return Err(DefError::PathNotFound(path.clone(), path.node_id()));
             };
 
@@ -311,7 +338,8 @@ fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Result<Ty
                 | Res::ConstraintRet
                 | Res::Param(..)
                 | Res::Def(..)
-                | Res::EnumVariant(..) => {
+                | Res::EnumVariant(..)
+                | Res::Module(..) => {
                     Err(DefError::InvalidNamedType(path.to_string(), path.node_id()))
                 }
                 Res::Enum(enum_id) => Ok(tcx.ty(TyKind::Enum(enum_id))),
