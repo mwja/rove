@@ -329,6 +329,7 @@ mod grammar {
     }
 
     pub enum Expr {
+        Unary(Spanned<UnaryExpr>),
         Binary(Spanned<BinaryExpr>),
         Literal(Spanned<Literal>),
         Ident(Spanned<Ident>),
@@ -413,6 +414,13 @@ mod grammar {
         #[rust_sitter::leaf(text = "print")]
         pub _p: (),
         pub expr: Box<Spanned<Expr>>,
+    }
+
+    pub enum UnaryExpr {
+        #[rust_sitter::prec_left(3)]
+        Not(#[rust_sitter::leaf(text = "!")] (), Box<Spanned<Expr>>),
+        #[rust_sitter::prec_left(3)]
+        Neg(#[rust_sitter::leaf(text = "-")] (), Box<Spanned<Expr>>),
     }
 
     pub enum BinaryExpr {
@@ -1121,6 +1129,7 @@ impl<'a> ProgramLowerer<'a> {
 
     fn lower_expr_kind(&mut self, expr: grammar::Expr) -> ast::AstExprKind {
         match expr {
+            grammar::Expr::Unary(unary) => ast::AstExprKind::Unary(self.lower_unary(unary)),
             grammar::Expr::Binary(binary) => ast::AstExprKind::Binary(self.lower_binary(binary)),
             grammar::Expr::Literal(literal) => {
                 ast::AstExprKind::Literal(self.lower_literal(literal))
@@ -1217,6 +1226,21 @@ impl<'a> ProgramLowerer<'a> {
         ast::AstIdent {
             node_id: self.next_id_spanned(ident.span),
             text: ident.value.text,
+        }
+    }
+
+    fn lower_unary(&mut self, unary: Spanned<grammar::UnaryExpr>) -> ast::AstUnaryExpr {
+        match unary.value {
+            grammar::UnaryExpr::Not(_, expr) => ast::AstUnaryExpr {
+                node_id: self.next_id_spanned(unary.span),
+                operator: ast::AstUnaryOperator::Not,
+                expr: Box::new(self.lower_expr(*expr)),
+            },
+            grammar::UnaryExpr::Neg(_, expr) => ast::AstUnaryExpr {
+                node_id: self.next_id_spanned(unary.span),
+                operator: ast::AstUnaryOperator::Negate,
+                expr: Box::new(self.lower_expr(*expr)),
+            },
         }
     }
 

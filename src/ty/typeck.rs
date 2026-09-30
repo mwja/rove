@@ -109,6 +109,10 @@ pub enum TypeError {
     MultipleEntryPoints(NodeId, NodeId),
     #[error("cannot compare booleans")]
     CannotCompareBooleans(NodeId),
+    #[error("cannot negate values of type {0}")]
+    CannotNegate(Ty, NodeId),
+    #[error("cannot perform unary operations on values of type {0}")]
+    CannotUnaryOp(Ty, ast::AstUnaryOperator, NodeId),
 }
 
 impl TypeError {
@@ -158,6 +162,8 @@ impl TypeError {
             GuardElseMustDiverge(..) => Some(1041),
             MultipleEntryPoints(..) => Some(1042),
             CannotCompareBooleans(..) => Some(1043),
+            CannotNegate(..) => Some(1044),
+            CannotUnaryOp(..) => Some(1045),
 
             PathResolutionError(_, err) => Some(err.as_code()),
         }
@@ -669,6 +675,25 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_code(self.as_code())
                         .with_label_from(recorder, node_id, "cannot compare booleans here")
                         .with_help(Some("you cannot compare booleans with <, >, <=, >=, but you can use == and != to compare them")),
+                ]
+            }
+            CannotNegate(_, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "attempted to negate here"),
+                ]
+            }
+            CannotUnaryOp(_, op, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "attempted to perform unary operation here",
+                        )
+                        .with_help(Some(format!("cannot perform {} on this type", op))),
                 ]
             }
         }
@@ -1811,6 +1836,8 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
             ast::AstLiteralKind::Float(_) => Ok(tccx.ty(TyKind::Float)),
             ast::AstLiteralKind::Bool(_) => Ok(tccx.ty(TyKind::Bool)),
         },
+
+        (None, ast::AstExprKind::Unary(un_expr)) => typeck_unary_expr(tccx, &un_expr),
         (None, ast::AstExprKind::Binary(bin_expr)) => typeck_binary_expr(tccx, &bin_expr),
         (None, ast::AstExprKind::Call(call_expr)) => typeck_call_expr(tccx, &call_expr),
         (None, ast::AstExprKind::Path(path_expr)) => typeck_path_expr(tccx, path_expr),
@@ -2052,6 +2079,32 @@ fn typeck_call_expr(tccx: &mut TypeckCtxt, call_expr: &ast::AstCallExpr) -> Resu
                 throws_ty.clone(),
             )))
         }
+    }
+}
+
+fn typeck_unary_expr(tccx: &mut TypeckCtxt, un_expr: &ast::AstUnaryExpr) -> Result<Ty, TypeError> {
+    let expr_ty = typeck_expr(tccx, &un_expr.expr)?;
+
+    if matches!(
+        expr_ty.kind(),
+        TyKind::FullFallible(..)
+            | TyKind::Never
+            | TyKind::Void
+            | TyKind::Func(..)
+            | TyKind::Enum(..)
+    ) {
+        return Err(TypeError::CannotUnaryOp(
+            expr_ty,
+            un_expr.operator,
+            un_expr.node_id,
+        ));
+    }
+
+    match un_expr.operator {
+        ast::AstUnaryOperator::Negate if !expr_ty.is_negatable() => {
+            Err(TypeError::CannotNegate(expr_ty, un_expr.expr.node_id()))
+        }
+        ast::AstUnaryOperator::Negate | ast::AstUnaryOperator::Not => Ok(expr_ty),
     }
 }
 

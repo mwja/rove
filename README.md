@@ -42,12 +42,12 @@ See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The
 🏷️ *v0.0.2* 
 - [x] `module X` and `module Y {}`
 - [x] Real booleans
-- [ ] Unary operators
+- [x] Unary operators
 - [x] Fix float division (int/int should produce an int, truncated. not a float)
 
 🏷️ *v0.0.3* 
-- [ ] `use X::*`, `use X::{X, Y}`
 - [ ] `&&` and `||` with shortcircuiting.
+- [ ] `use X::*`, `use X::{X, Y}`
 - [ ] Make all statements expressions (e.g. `if` and `switch` should return a value)
 
 🏷️ *v0.0.4* 

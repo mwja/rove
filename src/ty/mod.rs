@@ -43,6 +43,11 @@ impl Ty {
         !matches!(*self.kind, TyKind::FullFallible(..))
     }
 
+    // what sort of name is this
+    pub fn is_negatable(&self) -> bool {
+        matches!(*self.kind, TyKind::Int | TyKind::Float)
+    }
+
     pub fn has_value(&self) -> bool {
         !matches!(*self.kind, TyKind::Void | TyKind::Never)
     }

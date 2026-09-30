@@ -621,6 +621,7 @@ impl AstExpr {
     /// of what type of expression it is.
     pub fn node_id(&self) -> NodeId {
         match &self.kind {
+            AstExprKind::Unary(unary_expr) => unary_expr.node_id,
             AstExprKind::Literal(lit) => lit.node_id,
             AstExprKind::Binary(bin_expr) => bin_expr.node_id,
             AstExprKind::Ident(ident) => ident.node_id,
@@ -721,6 +722,7 @@ impl Display for AstIdent {
 
 #[derive(Debug, Clone)]
 pub enum AstExprKind {
+    Unary(AstUnaryExpr),
     Binary(AstBinaryExpr),
     Literal(AstLiteral),
     Ident(AstIdent),
@@ -837,6 +839,7 @@ impl Display for AstCallExpr {
 impl Display for AstExprKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            AstExprKind::Unary(unary) => write!(f, "{}", unary),
             AstExprKind::Binary(binary) => write!(f, "{}", binary),
             AstExprKind::Literal(literal) => write!(f, "{}", literal),
             AstExprKind::Ident(ident) => write!(f, "{}", ident),
@@ -850,6 +853,35 @@ impl Display for AstExprKind {
             AstExprKind::ForcedTry(forced_try) => write!(f, "{}!", forced_try.call_expr),
             AstExprKind::TryCatch(try_catch) => write!(f, "{}", try_catch),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AstUnaryExpr {
+    pub node_id: NodeId,
+    pub expr: Box<AstExpr>,
+    pub operator: AstUnaryOperator,
+}
+
+impl Display for AstUnaryExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "({}{})", self.operator, self.expr)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum AstUnaryOperator {
+    Negate,
+    Not,
+}
+
+impl Display for AstUnaryOperator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let op = match self {
+            AstUnaryOperator::Negate => "-",
+            AstUnaryOperator::Not => "!",
+        };
+        write!(f, "{}", op)
     }
 }
 

@@ -1,0 +1,20 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/unary_precedence.rv
+---
+exit: Some(0)
+--- stdout
+3
+4
+13
+3
+3
+-5
+0
+-4
+-3
+0
+1
+1
+2
+3

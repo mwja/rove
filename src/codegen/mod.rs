@@ -1100,6 +1100,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.lower_constraint_expr_olds(&left);
                 self.lower_constraint_expr_olds(&right);
             }
+            (_, ast::AstExprKind::Unary(ast::AstUnaryExpr { expr, .. })) => {
+                self.lower_constraint_expr_olds(&expr);
+            }
             (_, ast::AstExprKind::TryCatch(..)) => {
                 unreachable!("typeck rejects try/catch inside constraints")
             }
@@ -1661,6 +1664,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
         match expr.kind {
             ast::AstExprKind::Literal(_) => Operand::Scalar(self.lower_lit(expr)),
+            ast::AstExprKind::Unary(unary_expr) => {
+                Operand::Scalar(self.lower_unary_expr(unary_expr))
+            }
             ast::AstExprKind::Binary(_) => Operand::Scalar(self.lower_bin_expr(expr)),
             ast::AstExprKind::Ident(ident) => self.lower_ident(ident),
             ast::AstExprKind::Call(call_expr) => match self.cx.body.node_res(call_expr.node_id) {
@@ -2082,6 +2088,59 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     TyKind::FullFallible(_, _) => unreachable!(),
                 }
             }
+        }
+    }
+
+    fn lower_unary_expr(&mut self, unary_expr: ast::AstUnaryExpr) -> Value {
+        let x_ty = self
+            .cx
+            .body
+            .node_ty(unary_expr.expr.node_id())
+            .unwrap_or_else(|| bug!("the operand of a unary expression has no type"));
+        let x = self
+            .lower_expr(*unary_expr.expr)
+            .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
+        let res_ty = self
+            .cx
+            .body
+            .node_ty(unary_expr.node_id)
+            .unwrap_or_else(|| bug!("a unary expression has no type"));
+        match unary_expr.operator {
+            ast::AstUnaryOperator::Negate => match res_ty.kind() {
+                TyKind::Int => self.builder.ins().ineg(x),
+                TyKind::Float => self.builder.ins().fneg(x),
+                TyKind::Void
+                | TyKind::Never
+                | TyKind::Bool
+                | TyKind::Func(_)
+                | TyKind::FullFallible(_, _)
+                | TyKind::Enum(..) => {
+                    bug!(
+                        "tried to negate a non-numeric type at codegen (typeck failed to check it)"
+                    )
+                }
+            },
+            ast::AstUnaryOperator::Not => match res_ty.kind() {
+                TyKind::Bool => {
+                    let one = self.builder.ins().iconst(
+                        self.rcx
+                            .repr_of(&self.cx.tcx.bool_ty())
+                            .expect_scalar("bool is scalar"),
+                        1,
+                    );
+                    self.builder.ins().bxor(x, one)
+                }
+                TyKind::Int | TyKind::Float => self.builder.ins().bnot(x),
+                TyKind::Void
+                | TyKind::Never
+                | TyKind::Func(_)
+                | TyKind::FullFallible(_, _)
+                | TyKind::Enum(..) => {
+                    bug!(
+                        "tried to do logical or bitwise not on type at codegen (typeck failed to check it)"
+                    )
+                }
+            },
         }
     }
 

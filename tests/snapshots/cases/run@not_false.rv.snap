@@ -1,0 +1,7 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/not_false.rv
+---
+exit: Some(0)
+--- stdout
+1

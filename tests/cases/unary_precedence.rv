@@ -1,0 +1,24 @@
+func main() {
+    // `-` vs sum/product
+    print -2 + 5;         // (-2) + 5, not -(2 + 5)
+    print -2 * 3 + 10;    // ((-2) * 3) + 10, not -(2 * 3 + 10)
+    print 3 - -2 * 5;     // 3 - ((-2) * 5)
+    print 1 - -2;
+    print - -3;
+    print -(2 + 3);
+
+    // `!` vs sum/product
+    print !0 + 1;         // (!0) + 1 = 0, not !(0 + 1) = -2
+    print !1 * 2;         // (!1) * 2 = -4, not !(1 * 2) = -3
+    print !2;
+
+    // mixing `!` and `-`
+    print !-1;            // !(-1) = 0
+    print -!0;            // -(!0) = 1
+
+    // unary vs comparison
+    if -1 < 0 { print 1; }        // (-1) < 0; -(1 < 0) would not typecheck
+    if !0 > 0 { print 999; }      // (!0) > 0 is false; !(0 > 0) would be true
+    if !(1 > 2) { print 2; }
+    if !false == true { print 3; }
+}
