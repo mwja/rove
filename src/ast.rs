@@ -40,6 +40,7 @@ pub enum AstType {
     Int,
     Float,
     Void,
+    Bool,
     Path(AstPath),
 }
 
@@ -52,6 +53,7 @@ impl Display for AstType {
                 AstType::Int => "int".to_owned(),
                 AstType::Float => "float".to_owned(),
                 AstType::Void => "void".to_owned(),
+                AstType::Bool => "bool".to_owned(),
                 AstType::Path(path) => path.to_string(),
             }
         )
@@ -913,20 +915,31 @@ impl Display for AstLiteral {
 pub enum AstLiteralKind {
     Int(i64),
     Float(f64),
+    Bool(bool),
 }
 
 impl AstLiteralKind {
     pub fn as_int(&self) -> i64 {
         match self {
             AstLiteralKind::Int(value) => *value,
-            AstLiteralKind::Float(_) => panic!("Expected int literal, found float"),
+            AstLiteralKind::Bool(_) => bug!("Expected int literal, found bool"),
+            AstLiteralKind::Float(_) => bug!("Expected int literal, found float"),
         }
     }
 
     pub fn as_float(&self) -> f64 {
         match self {
             AstLiteralKind::Int(value) => *value as f64,
+            AstLiteralKind::Bool(_) => bug!("Expected float literal, found bool"),
             AstLiteralKind::Float(value) => *value,
+        }
+    }
+
+    pub fn as_bool(&self) -> bool {
+        match self {
+            AstLiteralKind::Int(_) => bug!("Expected bool literal, found int"),
+            AstLiteralKind::Bool(value) => *value,
+            AstLiteralKind::Float(_) => bug!("Expected bool literal, found float"),
         }
     }
 }
@@ -936,6 +949,7 @@ impl Display for AstLiteralKind {
         match self {
             AstLiteralKind::Int(value) => write!(f, "{}", value),
             AstLiteralKind::Float(value) => write!(f, "{:?}", value),
+            AstLiteralKind::Bool(value) => write!(f, "{}", value),
         }
     }
 }

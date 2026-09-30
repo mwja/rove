@@ -28,7 +28,7 @@ impl Ty {
     }
 
     pub fn is_bool(&self) -> bool {
-        matches!(*self.kind, TyKind::Int)
+        matches!(*self.kind, TyKind::Bool)
     }
 
     pub fn is_enum(&self) -> bool {
@@ -72,6 +72,8 @@ pub enum TyKind {
     Int,
     /// A floating-point type
     Float,
+    /// Boolean
+    Bool,
     /// Function
     Func(FuncSig),
     /// Result of calling a throwing function: (success type, thrown type).
@@ -93,6 +95,7 @@ impl Display for TyKind {
             TyKind::Never => write!(f, "never"),
             TyKind::Int => write!(f, "int"),
             TyKind::Float => write!(f, "float"),
+            TyKind::Bool => write!(f, "bool"),
             TyKind::Func(sig) => write!(
                 f,
                 "func({}) -> {}",
@@ -133,6 +136,10 @@ impl TyCtxt {
 
     pub fn void_ty(&self) -> Ty {
         self.ty(TyKind::Void)
+    }
+
+    pub fn bool_ty(&self) -> Ty {
+        self.ty(TyKind::Bool)
     }
 
     fn int(&self) -> Rc<TyKind> {

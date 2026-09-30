@@ -327,6 +327,7 @@ fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Result<Ty
         ast::AstType::Float => Ok(tcx.float_ty()),
         ast::AstType::Int => Ok(tcx.int_ty()),
         ast::AstType::Void => Ok(tcx.void_ty()),
+        ast::AstType::Bool => Ok(tcx.bool_ty()),
         ast::AstType::Path(path) => {
             let Some(res) = tcx.resolve_path(path.clone(), dcx.module_id)? else {
                 return Err(DefError::PathNotFound(path.clone(), path.node_id()));

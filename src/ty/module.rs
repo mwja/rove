@@ -312,6 +312,7 @@ impl ModuleTree {
             | TyKind::Int
             | TyKind::Void
             | TyKind::Never
+            | TyKind::Bool
             | TyKind::Func(..) => return Err(ResolverError::CannotImplyTy(expected, path)),
         };
 

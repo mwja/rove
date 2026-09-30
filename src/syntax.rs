@@ -24,6 +24,8 @@ mod grammar {
         Float,
         #[rust_sitter::leaf(text = "void")]
         Void,
+        #[rust_sitter::leaf(text = "bool")]
+        Bool,
         Path(Box<Spanned<Path>>),
     }
 
@@ -466,6 +468,23 @@ mod grammar {
             )]
             f64,
         ),
+        Bool(BoolLiteral),
+    }
+
+    pub enum BoolLiteral {
+        #[rust_sitter::leaf(text = "true")]
+        True,
+        #[rust_sitter::leaf(text = "false")]
+        False,
+    }
+
+    impl From<BoolLiteral> for bool {
+        fn from(value: BoolLiteral) -> Self {
+            match value {
+                BoolLiteral::True => true,
+                BoolLiteral::False => false,
+            }
+        }
     }
 
     pub enum ProductOp {
@@ -871,6 +890,7 @@ impl<'a> ProgramLowerer<'a> {
             Some(grammar::Type::Float) => ast::AstType::Float,
             Some(grammar::Type::Int) => ast::AstType::Int,
             Some(grammar::Type::Void) => ast::AstType::Void,
+            Some(grammar::Type::Bool) => ast::AstType::Bool,
             Some(grammar::Type::Path(path)) => ast::AstType::Path(self.lower_path(path.value)),
             None => ast::AstType::Void,
         }
@@ -1261,6 +1281,7 @@ impl<'a> ProgramLowerer<'a> {
                 }))
             }
             grammar::Literal::Float(value) => ast::AstLiteralKind::Float(value),
+            grammar::Literal::Bool(value) => ast::AstLiteralKind::Bool(value.into()),
         }
     }
 

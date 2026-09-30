@@ -107,6 +107,8 @@ pub enum TypeError {
     PathResolutionError(NodeId, ResolverError),
     #[error("multiple entry points defined")]
     MultipleEntryPoints(NodeId, NodeId),
+    #[error("cannot compare booleans")]
+    CannotCompareBooleans(NodeId),
 }
 
 impl TypeError {
@@ -155,6 +157,7 @@ impl TypeError {
             TryCatchInConstraint(..) => Some(1040),
             GuardElseMustDiverge(..) => Some(1041),
             MultipleEntryPoints(..) => Some(1042),
+            CannotCompareBooleans(..) => Some(1043),
 
             PathResolutionError(_, err) => Some(err.as_code()),
         }
@@ -658,6 +661,14 @@ impl DiagnoseWith<NodeId> for TypeError {
                             "...another entry point defined here",
                         )
                         .with_help(Some("there can only be one entry point in a program")),
+                ]
+            }
+            CannotCompareBooleans(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "cannot compare booleans here")
+                        .with_help(Some("you cannot compare booleans with <, >, <=, >=, but you can use == and != to compare them")),
                 ]
             }
         }
@@ -1798,6 +1809,7 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
         (None, ast::AstExprKind::Literal(lit)) => match lit.value {
             ast::AstLiteralKind::Int(_) => Ok(tccx.ty(TyKind::Int)),
             ast::AstLiteralKind::Float(_) => Ok(tccx.ty(TyKind::Float)),
+            ast::AstLiteralKind::Bool(_) => Ok(tccx.ty(TyKind::Bool)),
         },
         (None, ast::AstExprKind::Binary(bin_expr)) => typeck_binary_expr(tccx, &bin_expr),
         (None, ast::AstExprKind::Call(call_expr)) => typeck_call_expr(tccx, &call_expr),
@@ -2048,9 +2060,7 @@ fn typeck_binary_expr(
     bin_expr: &ast::AstBinaryExpr,
 ) -> Result<Ty, TypeError> {
     let left = typeck_expr(tccx, &bin_expr.left)?;
-    let ity = tccx.begin_inferrable_ty(Some(left.clone()));
-    let right = typeck_expr(tccx, &bin_expr.right)?;
-    tccx.end_inferrable_ty(ity);
+    let right = tccx.with_inferrable(&left, |tccx| typeck_expr(tccx, &bin_expr.right))?;
     if left != right {
         return Err(TypeError::IncompatibleTypes(
             left,
@@ -2076,19 +2086,24 @@ fn typeck_binary_expr(
     }
 
     match &bin_expr.operator {
-        ast::AstBinaryOperator::Add | ast::AstBinaryOperator::Sub | ast::AstBinaryOperator::Mul => {
-            Ok(left)
+        ast::AstBinaryOperator::Add
+        | ast::AstBinaryOperator::Sub
+        | ast::AstBinaryOperator::Mul
+        | ast::AstBinaryOperator::Div
+            if left.is_bool() =>
+        {
+            Err(TypeError::CannotCompareBooleans(bin_expr.node_id))
         }
-        ast::AstBinaryOperator::Div => {
-            // div always produced a float
-            Ok(tccx.ty(TyKind::Float))
-        }
+        ast::AstBinaryOperator::Add
+        | ast::AstBinaryOperator::Sub
+        | ast::AstBinaryOperator::Mul
+        | ast::AstBinaryOperator::Div => Ok(left),
         ast::AstBinaryOperator::Eq
         | ast::AstBinaryOperator::Ne
         | ast::AstBinaryOperator::Lt
         | ast::AstBinaryOperator::Le
         | ast::AstBinaryOperator::Gt
-        | ast::AstBinaryOperator::Ge => Ok(tccx.ty(TyKind::Int)), // for now we resolve true as a non zero i64.
+        | ast::AstBinaryOperator::Ge => Ok(tccx.tcx.bool_ty()),
     }
 }
 

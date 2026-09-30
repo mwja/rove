@@ -1,7 +1,6 @@
-// Division always produces a float.
-// Expected output: 3.5, 2.0, 2.0
+// Division produces a type based on its input
 func main() {
     print 7 / 2;
     print 6 / 3;
-    print (1 + 2) / 3 + 1.0;
+    print (1. + 2.) / 3. + 1.;
 }

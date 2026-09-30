@@ -4,6 +4,6 @@ input_file: tests/cases/division.rv
 ---
 exit: Some(0)
 --- stdout
-3.5
-2.0
+3
+2
 2.0

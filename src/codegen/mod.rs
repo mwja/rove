@@ -109,6 +109,8 @@ struct Runtime {
     println_i64: FuncId,
     /// rt_println_f64(value:f64) -> ()
     println_f64: FuncId,
+    /// rt_println_bool(value:i8) -> ()
+    println_bool: FuncId,
     /// rt_abort_constraint(kind:u8, tag:*u8, tag_len:u32, fn_name:*u8, fn_name_len:u32, line:u32) -> !
     abort_constraint: FuncId,
     /// rt_abort_forced_try(fn_name:*u8, fn_name_len:u32, line:u32) -> !
@@ -140,6 +142,17 @@ impl Runtime {
 
                 module
                     .declare_function("rt_println_f64", Linkage::Import, &printf_sig)
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
+            },
+            println_bool: {
+                let mut printf_sig = module.make_signature();
+
+                printf_sig.params.push(AbiParam::new(types::I8));
+
+                printf_sig.returns.push(AbiParam::new(types::I32));
+
+                module
+                    .declare_function("rt_println_bool", Linkage::Import, &printf_sig)
                     .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
             },
             abort_constraint: {
@@ -1974,6 +1987,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 TyKind::Float => self.builder.ins().fadd(x, y),
                 TyKind::Void
                 | TyKind::Never
+                | TyKind::Bool
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..) => {
@@ -1985,6 +1999,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 TyKind::Float => self.builder.ins().fsub(x, y),
                 TyKind::Void
                 | TyKind::Never
+                | TyKind::Bool
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..) => {
@@ -1996,32 +2011,34 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 TyKind::Float => self.builder.ins().fmul(x, y),
                 TyKind::Void
                 | TyKind::Never
+                | TyKind::Bool
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..) => {
                     unreachable!()
                 }
             },
-            ast::AstBinaryOperator::Div => {
-                // In the future this will be defined in the language itself.
-                let (x, y) = match x_ty.kind() {
-                    TyKind::Float => (x, y),
-                    _ => (
-                        self.builder.ins().fcvt_from_sint(types::F64, x),
-                        self.builder.ins().fcvt_from_sint(types::F64, y),
-                    ),
-                };
-                self.builder.ins().fdiv(x, y)
-            }
+            ast::AstBinaryOperator::Div => match res_ty.kind() {
+                TyKind::Int => self.builder.ins().sdiv(x, y),
+                TyKind::Float => self.builder.ins().fdiv(x, y),
+                TyKind::Void
+                | TyKind::Never
+                | TyKind::Bool
+                | TyKind::Func(_)
+                | TyKind::FullFallible(_, _)
+                | TyKind::Enum(..) => {
+                    unreachable!()
+                }
+            },
             ast::AstBinaryOperator::Eq
             | ast::AstBinaryOperator::Ne
             | ast::AstBinaryOperator::Gt
             | ast::AstBinaryOperator::Lt
             | ast::AstBinaryOperator::Ge
             | ast::AstBinaryOperator::Le => {
-                // use left hand side type, cmp always returns i8 that we extend after.
-                let res = match x_ty.kind() {
-                    TyKind::Int => self.builder.ins().icmp(
+                // use left hand side type, returns i8 (bool)
+                match x_ty.kind() {
+                    TyKind::Int | TyKind::Bool => self.builder.ins().icmp(
                         match operator {
                             ast::AstBinaryOperator::Eq => IntCC::Equal,
                             ast::AstBinaryOperator::Ne => IntCC::NotEqual,
@@ -2063,9 +2080,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     TyKind::Func(_) => unreachable!(),
                     TyKind::Void | TyKind::Never => unreachable!(),
                     TyKind::FullFallible(_, _) => unreachable!(),
-                };
-
-                self.builder.ins().sextend(types::I64, res)
+                }
             }
         }
     }
@@ -2104,10 +2119,20 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .node_ty(lit.node_id)
             .unwrap_or_else(|| bug!("a literal has no type"));
         let repr = self.rcx.repr_of(&ty).expect_scalar("literal");
-        match repr {
-            types::I64 => self.builder.ins().iconst(repr, lit.value.as_int()),
-            types::F64 => self.builder.ins().f64const(lit.value.as_float()),
-            _ => unreachable!(),
+        match ty.kind() {
+            TyKind::Int => self.builder.ins().iconst(repr, lit.value.as_int()),
+            TyKind::Float => self.builder.ins().f64const(lit.value.as_float()),
+            TyKind::Bool => self
+                .builder
+                .ins()
+                .iconst(repr, if lit.value.as_bool() { 1 } else { 0 }),
+            TyKind::Enum(..)
+            | TyKind::FullFallible(..)
+            | TyKind::Func(..)
+            | TyKind::Never
+            | TyKind::Void => {
+                bug!("attempted to lower literal of type")
+            }
         }
     }
 
@@ -2133,6 +2158,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             TyKind::Void | TyKind::Never => unreachable!(),
             TyKind::Func(_) => unreachable!(),
             TyKind::FullFallible(_, _) => unreachable!(),
+            TyKind::Bool => self.runtime.println_f64,
         });
         let _call = self.builder.ins().call(printf_ref, &[x]);
     }

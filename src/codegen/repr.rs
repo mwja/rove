@@ -78,6 +78,7 @@ impl ReprCx {
             TyKind::Float => Repr::Scalar(types::F64),
             TyKind::Func(_) => Repr::Scalar(self.ptr()),
             TyKind::Enum(_) => Repr::Scalar(types::I64),
+            TyKind::Bool => Repr::Scalar(types::I8),
             TyKind::FullFallible(ty, throws_ty) => self.fn_return_repr(ty, Some(throws_ty)),
         }
     }
@@ -92,6 +93,7 @@ impl ReprCx {
             TyKind::Float => Repr::Scalar(types::F64),
             TyKind::Func(_) => Repr::Scalar(self.ptr()),
             TyKind::Enum(_) => Repr::Scalar(types::I64),
+            TyKind::Bool => Repr::Scalar(types::I8),
             TyKind::FullFallible(ty, _) => self.repr_of(ty),
         }
     }

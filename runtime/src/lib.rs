@@ -10,6 +10,11 @@ pub extern "C" fn rt_println_f64(value: f64) {
     println!("{:?}", value);
 }
 
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_println_bool(value: bool) {
+    println!("{:?}", value);
+}
+
 #[repr(u8)]
 pub enum Constraint {
     Require = 0,

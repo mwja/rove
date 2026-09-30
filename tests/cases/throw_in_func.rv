@@ -7,8 +7,8 @@ enum PurchaseFailure {
     upstream_error
 }
 
-func c_style_processing_func() -> int {
-    return 1;
+func c_style_processing_func() -> bool {
+    return true;
 }
 
 /// Returns new wallet total

@@ -5,13 +5,13 @@ enum Failure {
 }
 
 func risky() throws Failure -> int
-    guard 0 else ::Bad
+    guard false else ::Bad
 {
     return 1;
 }
 
 func pick(c: int) -> int {
-    if c {
+    if c == 1 {
         1
     }
     return 2;

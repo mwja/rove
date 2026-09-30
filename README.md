@@ -41,9 +41,9 @@ See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The
 
 🏷️ *v0.0.2* 
 - [x] `module X` and `module Y {}`
-- [ ] Fix float division (int/int should produce an int, truncated. not a float)
-- [ ] Real booleans
+- [x] Real booleans
 - [ ] Unary operators
+- [x] Fix float division (int/int should produce an int, truncated. not a float)
 
 🏷️ *v0.0.3* 
 - [ ] `use X::*`, `use X::{X, Y}`
