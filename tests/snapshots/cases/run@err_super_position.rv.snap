@@ -1,0 +1,26 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_super_position.rv
+---
+compile error:
+Error: `super` in an invalid position
+   ╭─[ tests/cases/err_super_position.rv:5:12 ]
+   │
+ 5 │     use m::super::x; // `super` after a name
+   │            ──┬──  
+   │              ╰──── `super` can only start a path or follow another `super`
+───╯
+Error: `super` is not a value
+   ╭─[ tests/cases/err_super_position.rv:9:13 ]
+   │
+ 9 │     let a = super::super; // a module, not a value
+   │             ──────┬─────  
+   │                   ╰─────── this refers to a module
+───╯
+Error: `super` is not a value
+    ╭─[ tests/cases/err_super_position.rv:10:13 ]
+    │
+ 10 │     let b = ::super; // not an implicit enum variant
+    │             ───┬───  
+    │                ╰───── this refers to a module
+────╯

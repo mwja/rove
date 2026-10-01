@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_use_unresolved.rv
+---
+compile error:
+[3007] Error: duplicate definition of f in module 0
+[3003] Error: cannot resolve nope::x
+[3003] Error: cannot resolve m::g
+[3003] Error: cannot resolve missing

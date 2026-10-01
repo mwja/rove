@@ -1,0 +1,35 @@
+// Module-level and statement-level uses, with groups, nested groups, aliases,
+// and uses that resolve through other uses regardless of order.
+use inner::three; // resolves through the `inner` alias below
+use maths::{twice as dbl, inner, nested::{four, five as cinq}};
+
+module maths {
+  func twice(x: int) -> int {
+    return x * 2;
+  }
+
+  module inner {
+    func three() -> int {
+      return 3;
+    }
+  }
+
+  module nested {
+    func four() -> int {
+      return 4;
+    }
+    func five() -> int {
+      return 5;
+    }
+  }
+}
+
+func main() {
+  print dbl(1); // expect 2
+  print three(); // expect 3
+  print four(); // expect 4
+  print cinq(); // expect 5
+
+  use maths::inner::three as drei;
+  print drei() + 3; // expect 6
+}

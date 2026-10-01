@@ -1,0 +1,8 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/use_super.rv
+---
+exit: Some(0)
+--- stdout
+2
+3

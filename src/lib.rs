@@ -83,6 +83,12 @@ pub fn compile(
         .build_tree(&ast, dcx.def_ids(), &ty_ctxt.enums)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
+    // and now fill in all 'uses' now we know where everything is.
+    ty_ctxt
+        .mcx
+        .fill_aliases(&ast, &ty_ctxt.enums)
+        .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
+
     defs::define(&mut ty_ctxt, dcx, &ast)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 

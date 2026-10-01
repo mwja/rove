@@ -115,6 +115,8 @@ pub enum TypeError {
     CannotUnaryOp(Ty, ast::AstUnaryOperator, NodeId),
     #[error("logical operators such as && and || require boolean operands")]
     LogicalOpOnNonBool(Ty, ast::AstBinaryOperator, NodeId),
+    #[error("could not find intended target of use statement")]
+    UseStatementResolutionError(NodeId),
 }
 
 impl TypeError {
@@ -167,6 +169,7 @@ impl TypeError {
             CannotNegate(..) => Some(1044),
             CannotUnaryOp(..) => Some(1045),
             LogicalOpOnNonBool(..) => Some(1046),
+            UseStatementResolutionError(..) => Some(1047),
 
             PathResolutionError(_, err) => Some(err.as_code()),
         }
@@ -711,6 +714,13 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_help(Some("logical operations such as && and || require boolean operands")),
                 ]
             }
+            UseStatementResolutionError(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "use statement here"),
+                ]
+            }
         }
     }
 }
@@ -872,6 +882,17 @@ impl<T> Reported for Result<T, TypeError> {
     }
 }
 
+impl<T> Reported for Result<T, Vec<TypeError>> {
+    type Output = T;
+
+    fn reported(self, tccx: &mut TypeckCtxt) -> Result<T, ()> {
+        match self {
+            Ok(t) => Ok(t),
+            Err(e) => Err(tccx.report_many(e)),
+        }
+    }
+}
+
 indexable_id!(pub ScopeId);
 impl_next_id!(TypeckCtxt<'c>.next_id -> LocalId);
 impl_next_id!(TypeckCtxt<'c>.next_param_id -> ParamId, next_param_id);
@@ -971,6 +992,10 @@ impl<'c> TypeckCtxt<'c> {
 
     fn report(&mut self, err: TypeError) {
         self.errors.push(err);
+    }
+
+    fn report_many(&mut self, errs: Vec<TypeError>) {
+        self.errors.extend(errs);
     }
 
     fn declare_local(&mut self, node_id: NodeId, name: &str, ty: Ty) -> LocalId {
@@ -1405,9 +1430,44 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
             )
             .reported(tccx)?;
         }
+        AstStmtKind::Use(use_stmt) => {
+            typeck_use_stmt(tccx, use_stmt).reported(tccx)?;
+        }
     };
 
     Ok(())
+}
+
+fn typeck_use_stmt(
+    tccx: &mut TypeckCtxt,
+    use_stmt: &ast::AstUseStmt,
+) -> Result<(), Vec<TypeError>> {
+    let mut errors = Vec::new();
+    for entry in &use_stmt.entries {
+        let path_to_resolve = entry.path.clone();
+        let name = entry.name().to_owned();
+        match tccx.tcx.resolve_path(path_to_resolve, tccx.module_id) {
+            Ok(Some(res)) => {
+                tccx.body.set_node_res(entry.node_id, res.clone());
+                tccx.scopes
+                    .last_mut()
+                    .unwrap_or_else(|| bug!("tried to declare a use with no active scope"))
+                    .insert(name, res);
+            }
+            Ok(None) => {
+                errors.push(TypeError::UseStatementResolutionError(entry.node_id));
+            }
+            Err(e) => {
+                errors.push(e);
+            }
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors)
+    }
 }
 
 fn typeck_guard_stmt(tccx: &mut TypeckCtxt, guard_stmt: &ast::AstGuardStmt) -> Result<(), ()> {
@@ -2233,6 +2293,7 @@ fn diverges(stmt: &ast::AstStmt, loops_with_breaks: &HashSet<NodeId>) -> Diverge
         | AstStmtKind::Require(_)
         // A tail is the value of its block, so control continues after it.
         | AstStmtKind::ImplicitReturn(_)
+        | AstStmtKind::Use(_)
         // Compiler isn't yet smart enough to check this.
         | AstStmtKind::While(_) => Diverges::never(),
     }

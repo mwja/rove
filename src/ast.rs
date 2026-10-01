@@ -8,6 +8,7 @@ pub struct AstModule {
     pub defs: Vec<AstDef>,
     pub enums: Vec<AstEnumDef>,
     pub mods: Vec<AstModule>,
+    pub uses: Vec<AstUseStmt>,
     pub node_id: NodeId,
     /// to be imported?
     pub is_shell: bool,
@@ -251,6 +252,7 @@ impl AstStmt {
             AstStmtKind::Throw(throw_stmt) => throw_stmt.node_id,
             AstStmtKind::Guard(guard_stmt) => guard_stmt.node_id,
             AstStmtKind::Require(require) => require.node_id,
+            AstStmtKind::Use(use_stmt) => use_stmt.node_id,
         }
     }
 
@@ -284,6 +286,7 @@ pub enum AstStmtKind {
     Throw(AstThrowStmt),
     Guard(AstGuardStmt),
     Require(AstRequireConstraint),
+    Use(AstUseStmt),
 }
 
 impl Display for AstStmtKind {
@@ -311,7 +314,50 @@ impl Display for AstStmtKind {
                 require.tag.as_deref().unwrap_or(""),
                 require.condition
             ),
+            AstStmtKind::Use(use_stmt) => write!(f, "{};", use_stmt),
         }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AstUseStmt {
+    pub node_id: NodeId,
+    pub entries: Vec<AstUseEntry>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AstUseEntry {
+    pub node_id: NodeId,
+    pub path: AstPath,
+    pub alias: Option<AstIdent>,
+}
+
+impl AstUseEntry {
+    pub fn name(&self) -> &str {
+        self.alias
+            .as_ref()
+            .map(|alias| alias.text.as_str())
+            .unwrap_or_else(|| self.path.name())
+    }
+}
+
+impl Display for AstUseStmt {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "use {};",
+            self.entries
+                .iter()
+                .map(|entry| {
+                    if let Some(alias) = &entry.alias {
+                        format!("{} as {}", entry.path, alias)
+                    } else {
+                        format!("{}", entry.path)
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 
@@ -749,14 +795,38 @@ impl Display for AstPathExpr {
 #[derive(Debug, Clone)]
 pub enum AstPath {
     Path(AstPathExpr),
+    Super(NodeId),
+    QualifiedSuper(AstQualifiedSuper),
     Ident(AstIdent),
+}
+
+/// `base::super`, where `base` is itself `super` or another `QualifiedSuper`.
+#[derive(Debug, Clone)]
+pub struct AstQualifiedSuper {
+    pub node_id: NodeId,
+    pub base: Box<AstPath>,
 }
 
 impl AstPath {
     pub fn node_id(&self) -> NodeId {
         match self {
             AstPath::Path(path_expr) => path_expr.node_id,
+            AstPath::Super(node_id) => *node_id,
+            AstPath::QualifiedSuper(qualified) => qualified.node_id,
             AstPath::Ident(ident) => ident.node_id,
+        }
+    }
+
+    /// Whether this path names a module through `super`.
+    pub fn is_super(&self) -> bool {
+        matches!(self, AstPath::Super(_) | AstPath::QualifiedSuper(_))
+    }
+
+    pub fn name(&self) -> &str {
+        match self {
+            AstPath::Path(path_expr) => &path_expr.field.text,
+            AstPath::Super(_) | AstPath::QualifiedSuper(_) => "super",
+            AstPath::Ident(ident) => &ident.text,
         }
     }
 }
@@ -765,6 +835,8 @@ impl Display for AstPath {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AstPath::Path(path_expr) => write!(f, "{}", path_expr),
+            AstPath::Super(_) => write!(f, "super"),
+            AstPath::QualifiedSuper(qualified) => write!(f, "{}::super", qualified.base),
             AstPath::Ident(ident) => write!(f, "{}", ident),
         }
     }

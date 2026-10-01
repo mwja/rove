@@ -125,6 +125,7 @@ fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
             stmt,
             annotate_expr(body, &require.condition)
         ),
+        ast::AstStmtKind::Use(use_stmt) => format!("{};", use_stmt,),
     }
 }
 

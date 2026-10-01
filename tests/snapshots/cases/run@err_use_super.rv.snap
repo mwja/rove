@@ -1,0 +1,8 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_use_super.rv
+---
+compile error:
+[3009] Error: cannot import super without a name; use `super as <name>`
+[3008] Error: super at the root level is invalid (there is nothing to resolve)
+[3008] Error: super at the root level is invalid (there is nothing to resolve)

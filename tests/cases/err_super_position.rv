@@ -1,0 +1,15 @@
+// `super` may only start a path or follow another `super`, and always names a
+// module, so it is never a value.
+module m {
+  module n {
+    use m::super::x; // `super` after a name
+  }
+
+  func f() -> int {
+    let a = super::super; // a module, not a value
+    let b = ::super; // not an implicit enum variant
+    return 1;
+  }
+}
+
+func main() {}

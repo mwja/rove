@@ -1150,6 +1150,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     require,
                 ));
             }
+            ast::AstStmtKind::Use(_) => {
+                // use statements are lowered to nothing, they are only used for typeck
+            }
         };
     }
 

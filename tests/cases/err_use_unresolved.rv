@@ -1,0 +1,19 @@
+// Uses that cannot be resolved, or that clash with an existing name, are all
+// reported together.
+use nope::x; // no module `nope`
+
+module m {
+  use missing; // nothing called `missing` in `m`
+  func f() -> int {
+    return 1;
+  }
+}
+
+func f() -> int {
+  return 1;
+}
+
+use m::f; // clashes with the function `f` above
+use m::{g}; // `m` has no `g`
+
+func main() {}

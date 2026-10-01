@@ -1,0 +1,23 @@
+// && and || only accept bool operands; each function has one error and all
+// should be reported.
+func int_operands() {
+  if 1 && 2 {}
+}
+
+func float_operands() {
+  if 1.0 || 2.0 {}
+}
+
+func non_bool_left() {
+  if 1 && true {}
+}
+
+func non_bool_right() {
+  if false || 2 {}
+}
+
+func used_as_int() -> int {
+  return true && false;
+}
+
+func main() {}

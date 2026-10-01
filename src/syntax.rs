@@ -33,6 +33,7 @@ mod grammar {
         Function(Spanned<FunctionDef>),
         Enum(Spanned<EnumDef>),
         Module(Spanned<ModuleDef>),
+        Use(Spanned<UseStmt>, #[rust_sitter::leaf(text = ";")] ()),
     }
 
     pub struct ModuleDef {
@@ -199,6 +200,53 @@ mod grammar {
             #[rust_sitter::leaf(text = ";")] (),
         ),
         Return(Spanned<ReturnStmt>, #[rust_sitter::leaf(text = ";")] ()),
+        Use(Spanned<UseStmt>, #[rust_sitter::leaf(text = ";")] ()),
+    }
+
+    pub struct UseStmt {
+        #[rust_sitter::leaf(text = "use")]
+        _use: (),
+        pub tree: Spanned<UseTree>,
+    }
+
+    pub enum UseTree {
+        // a::<rest>
+        Nested {
+            name: Spanned<PathSegment>,
+            #[rust_sitter::leaf(text = "::")]
+            _c: (),
+            rest: Box<Spanned<UseTree>>,
+        },
+        // {b, c::d, e as f}
+        Group {
+            #[rust_sitter::leaf(text = "{")]
+            _l: (),
+            items: Option<UseTreeList>,
+            #[rust_sitter::leaf(text = "}")]
+            _r: (),
+        },
+        // b  /  b as c
+        Leaf {
+            name: Spanned<PathSegment>,
+            alias: Option<UseAlias>,
+        },
+    }
+
+    pub struct UseAlias {
+        #[rust_sitter::leaf(text = "as")]
+        _as: (),
+        pub name: Spanned<Ident>,
+    }
+
+    pub struct UseTreeList {
+        pub head: Box<Spanned<UseTree>>,
+        pub tail: Option<UseTreeListTail>,
+    }
+
+    pub struct UseTreeListTail {
+        #[rust_sitter::leaf(text = ",")]
+        _c: (),
+        pub rest: Option<Box<UseTreeList>>,
     }
 
     pub struct GuardStmt {
@@ -352,11 +400,20 @@ mod grammar {
         pub base: Option<Box<Spanned<Path>>>,
         #[rust_sitter::leaf(text = "::")]
         _colon: (),
-        pub field: Spanned<Ident>,
+        pub field: Spanned<PathSegment>,
+    }
+
+    // `super` is its own segment rather than an identifier, so it can only
+    // ever name a module.
+    pub enum PathSegment {
+        Super(#[rust_sitter::leaf(text = "super")] ()),
+        Ident(Spanned<Ident>),
     }
 
     pub enum Path {
         Path(Spanned<PathExpr>),
+        #[rust_sitter::prec(2)]
+        Super(#[rust_sitter::leaf(text = "super")] Spanned<()>),
         #[rust_sitter::prec(1)]
         Ident(Spanned<Ident>),
     }
@@ -417,14 +474,36 @@ mod grammar {
     }
 
     pub enum UnaryExpr {
-        #[rust_sitter::prec_left(3)]
+        #[rust_sitter::prec_left(6)]
         Not(#[rust_sitter::leaf(text = "!")] (), Box<Spanned<Expr>>),
-        #[rust_sitter::prec_left(3)]
+        #[rust_sitter::prec_left(6)]
         Neg(#[rust_sitter::leaf(text = "-")] (), Box<Spanned<Expr>>),
     }
 
+    // Tightest first, as in C/Rust: product, sum, comparison, &&, ||.
     pub enum BinaryExpr {
+        #[rust_sitter::prec_left(5)]
+        Product {
+            left: Box<Spanned<Expr>>,
+            op: Spanned<ProductOp>,
+            right: Box<Spanned<Expr>>,
+        },
+
         #[rust_sitter::prec_left(4)]
+        Sum {
+            left: Box<Spanned<Expr>>,
+            op: Spanned<SumOp>,
+            right: Box<Spanned<Expr>>,
+        },
+
+        #[rust_sitter::prec_left(3)]
+        Comparison {
+            left: Box<Spanned<Expr>>,
+            op: Spanned<ComparisonOp>,
+            right: Box<Spanned<Expr>>,
+        },
+
+        #[rust_sitter::prec_left(2)]
         LogicalAnd {
             left: Box<Spanned<Expr>>,
             #[rust_sitter::leaf(text = "&&")]
@@ -432,32 +511,11 @@ mod grammar {
             right: Box<Spanned<Expr>>,
         },
 
-        #[rust_sitter::prec_left(3)]
+        #[rust_sitter::prec_left(1)]
         LogicalOr {
             left: Box<Spanned<Expr>>,
             #[rust_sitter::leaf(text = "||")]
             op: (),
-            right: Box<Spanned<Expr>>,
-        },
-
-        #[rust_sitter::prec_left(2)]
-        Product {
-            left: Box<Spanned<Expr>>,
-            op: Spanned<ProductOp>,
-            right: Box<Spanned<Expr>>,
-        },
-
-        #[rust_sitter::prec_left(1)]
-        Sum {
-            left: Box<Spanned<Expr>>,
-            op: Spanned<SumOp>,
-            right: Box<Spanned<Expr>>,
-        },
-
-        #[rust_sitter::prec_left(0)]
-        Comparison {
-            left: Box<Spanned<Expr>>,
-            op: Spanned<ComparisonOp>,
             right: Box<Spanned<Expr>>,
         },
     }
@@ -546,6 +604,21 @@ mod grammar {
     }
 }
 
+/// A use-tree segment, kept owned so a prefix can be shared between siblings.
+enum UseSegment {
+    Super,
+    Ident(String),
+}
+
+impl From<grammar::PathSegment> for UseSegment {
+    fn from(segment: grammar::PathSegment) -> Self {
+        match segment {
+            grammar::PathSegment::Super(()) => UseSegment::Super,
+            grammar::PathSegment::Ident(ident) => UseSegment::Ident(ident.value.text),
+        }
+    }
+}
+
 /// A right-recursive comma-separated list from the grammar.
 trait CommaList: Sized {
     type Item;
@@ -577,6 +650,17 @@ impl CommaList for grammar::ArgDefList {
 
 impl CommaList for grammar::ExprList {
     type Item = Box<Spanned<grammar::Expr>>;
+
+    fn split(self) -> (Self::Item, Option<Self>) {
+        (
+            self.head,
+            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
+        )
+    }
+}
+
+impl CommaList for grammar::UseTreeList {
+    type Item = Box<Spanned<grammar::UseTree>>;
 
     fn split(self) -> (Self::Item, Option<Self>) {
         (
@@ -791,12 +875,14 @@ impl<'a> ProgramLowerer<'a> {
         let mut defs = Vec::new();
         let mut enums = Vec::new();
         let mut modules = Vec::new();
+        let mut uses = Vec::new();
 
         for def in body_defs {
             match def {
                 grammar::Def::Function(..) => defs.push(def),
                 grammar::Def::Enum(..) => enums.push(def),
                 grammar::Def::Module(..) => modules.push(def),
+                grammar::Def::Use(use_, _) => uses.push(use_),
             }
         }
         let program = ast::AstModule {
@@ -810,6 +896,10 @@ impl<'a> ProgramLowerer<'a> {
             enums: enums
                 .into_iter()
                 .map(|def| self.lower_enum_def(def))
+                .collect(),
+            uses: uses
+                .into_iter()
+                .map(|use_| self.lower_use_stmt(use_))
                 .collect(),
             is_shell,
         };
@@ -959,7 +1049,110 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Stmt::Require(require, _) => {
                 ast::AstStmtKind::Require(self.lower_require(require.value, require.span))
             }
+            grammar::Stmt::Use(use_, _) => ast::AstStmtKind::Use(self.lower_use_stmt(use_)),
         }
+    }
+
+    fn lower_use_stmt(&mut self, use_stmt: Spanned<grammar::UseStmt>) -> ast::AstUseStmt {
+        let node_id = self.next_id_spanned(use_stmt.span);
+        let mut entries = Vec::new();
+        self.lower_use_tree(use_stmt.value.tree, &mut Vec::new(), &mut entries);
+        ast::AstUseStmt { node_id, entries }
+    }
+
+    fn lower_use_tree(
+        &mut self,
+        tree: Spanned<grammar::UseTree>,
+        prefix: &mut Vec<(UseSegment, (usize, usize))>,
+        out: &mut Vec<ast::AstUseEntry>,
+    ) {
+        match tree.value {
+            grammar::UseTree::Nested { name, rest, .. } => {
+                prefix.push((name.value.into(), name.span));
+                self.lower_use_tree(*rest, prefix, out);
+                prefix.pop();
+            }
+            grammar::UseTree::Group { items, .. } => {
+                for item in items.flatten_list() {
+                    self.lower_use_tree(*item, prefix, out);
+                }
+            }
+            grammar::UseTree::Leaf { name, alias } => {
+                prefix.push((name.value.into(), name.span));
+                let path = self.build_path(prefix);
+                prefix.pop();
+                out.push(ast::AstUseEntry {
+                    node_id: self.next_id_spanned(tree.span),
+                    path,
+                    alias: alias.map(|a| self.lower_ident(a.name)),
+                });
+            }
+        }
+    }
+
+    // [a, b, c] -> Path(Path(Ident a, b), c), fresh ids each time
+    fn build_path(&mut self, segs: &[(UseSegment, (usize, usize))]) -> ast::AstPath {
+        let ((first, first_span), rest) =
+            segs.split_first().unwrap_or_else(|| bug!("empty use path"));
+        let mut path = match first {
+            UseSegment::Super => ast::AstPath::Super(self.next_id_spanned(*first_span)),
+            UseSegment::Ident(text) => ast::AstPath::Ident(ast::AstIdent {
+                node_id: self.next_id_spanned(*first_span),
+                text: text.clone(),
+            }),
+        };
+        for (segment, span) in rest {
+            let path_span = (first_span.0, span.1);
+            path = match segment {
+                UseSegment::Super => self.qualify_super(path, *span, path_span),
+                UseSegment::Ident(text) => ast::AstPath::Path(ast::AstPathExpr {
+                    node_id: self.next_id_spanned(path_span),
+                    base: Box::new(path),
+                    field: ast::AstIdent {
+                        node_id: self.next_id_spanned(*span),
+                        text: text.clone(),
+                    },
+                }),
+            };
+        }
+        path
+    }
+
+    /// `base::super`. `super` names a parent module, so it may only start a
+    /// path or follow another `super`.
+    fn qualify_super(
+        &mut self,
+        base: ast::AstPath,
+        super_span: (usize, usize),
+        path_span: (usize, usize),
+    ) -> ast::AstPath {
+        if !base.is_super() {
+            self.errors.push(
+                Diagnostic::new("`super` in an invalid position").with_label(
+                    "`super` can only start a path or follow another `super`",
+                    Span::from_span(self.source_file_id, super_span),
+                ),
+            );
+        }
+        ast::AstPath::QualifiedSuper(ast::AstQualifiedSuper {
+            node_id: self.next_id_spanned(path_span),
+            base: Box::new(base),
+        })
+    }
+
+    /// Reports a path ending in `super` used where a value is expected, and
+    /// returns a placeholder; lowering fails, so it is never seen.
+    fn super_as_value(&mut self, node_id: NodeId, span: (usize, usize)) -> ast::AstExprKind {
+        self.errors.push(
+            Diagnostic::new("`super` is not a value").with_label(
+                "this refers to a module",
+                Span::from_span(self.source_file_id, span),
+            ),
+        );
+        ast::AstExprKind::Ident(ast::AstIdent {
+            node_id,
+            text: "super".to_owned(),
+        })
     }
 
     fn lower_guard_stmt(&mut self, guard: Spanned<grammar::GuardStmt>) -> ast::AstGuardStmt {
@@ -1155,15 +1348,25 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Expr::Wrapped(_, expr, _) => self.lower_expr(*expr).kind,
             grammar::Expr::Call(call) => ast::AstExprKind::Call(self.lower_call(call)),
             grammar::Expr::Path(field) => match field.value.base {
-                Some(path_expr) => ast::AstExprKind::Path(ast::AstPathExpr {
-                    node_id: self.next_id_spanned(field.span),
-                    base: Box::new(self.lower_path(path_expr.value)),
-                    field: self.lower_ident(field.value.field),
-                }),
-                None => ast::AstExprKind::ImplicitPath(ast::AstImplicitPathExpr {
-                    node_id: self.next_id_spanned(field.span),
-                    path: self.lower_ident(field.value.field),
-                }),
+                Some(path_expr) => {
+                    let base = self.lower_path(path_expr.value);
+                    match self.qualify_path(base, field.value.field, field.span) {
+                        ast::AstPath::Path(path_expr) => ast::AstExprKind::Path(path_expr),
+                        path => self.super_as_value(path.node_id(), field.span),
+                    }
+                }
+                None => match field.value.field.value {
+                    grammar::PathSegment::Ident(ident) => {
+                        ast::AstExprKind::ImplicitPath(ast::AstImplicitPathExpr {
+                            node_id: self.next_id_spanned(field.span),
+                            path: self.lower_ident(ident),
+                        })
+                    }
+                    grammar::PathSegment::Super(()) => {
+                        let node_id = self.next_id_spanned(field.span);
+                        self.super_as_value(node_id, field.span)
+                    }
+                },
             },
             grammar::Expr::ForcedTry(forced_try) => {
                 ast::AstExprKind::ForcedTry(self.lower_forced_try(forced_try))
@@ -1177,28 +1380,43 @@ impl<'a> ProgramLowerer<'a> {
     fn lower_path(&mut self, path: grammar::Path) -> ast::AstPath {
         match path {
             grammar::Path::Ident(ident) => ast::AstPath::Ident(self.lower_ident(ident)),
-            grammar::Path::Path(path_expr) if path_expr.value.base.is_some() => {
-                ast::AstPath::Path(ast::AstPathExpr {
-                    node_id: self.next_id_spanned(path_expr.span),
-                    base: Box::new(
-                        self.lower_path(
-                            path_expr
-                                .value
-                                .base
-                                .unwrap_or_else(|| {
-                                    bug!("path base was checked to be some, but was none")
-                                })
-                                .value,
-                        ),
-                    ),
-                    field: self.lower_ident(path_expr.value.field),
-                })
-            }
-            grammar::Path::Path(path_expr) => {
-                ast::AstPath::Ident(self.lower_ident(path_expr.value.field))
+            grammar::Path::Path(path_expr) => match path_expr.value.base {
+                Some(base) => {
+                    let base = self.lower_path(base.value);
+                    self.qualify_path(base, path_expr.value.field, path_expr.span)
+                }
+                None => match path_expr.value.field.value {
+                    grammar::PathSegment::Ident(ident) => {
+                        ast::AstPath::Ident(self.lower_ident(ident))
+                    }
+                    grammar::PathSegment::Super(()) => {
+                        ast::AstPath::Super(self.next_id_spanned(path_expr.value.field.span))
+                    }
+                },
+            },
+            grammar::Path::Super(spanned_super) => {
+                ast::AstPath::Super(self.next_id_spanned(spanned_super.span))
             }
         }
     }
+
+    /// `base::segment`, spanning `span`.
+    fn qualify_path(
+        &mut self,
+        base: ast::AstPath,
+        segment: Spanned<grammar::PathSegment>,
+        span: (usize, usize),
+    ) -> ast::AstPath {
+        match segment.value {
+            grammar::PathSegment::Ident(ident) => ast::AstPath::Path(ast::AstPathExpr {
+                node_id: self.next_id_spanned(span),
+                base: Box::new(base),
+                field: self.lower_ident(ident),
+            }),
+            grammar::PathSegment::Super(()) => self.qualify_super(base, segment.span, span),
+        }
+    }
+
     fn lower_forced_try(
         &mut self,
         forced_try: Spanned<grammar::ForcedTryExpr>,

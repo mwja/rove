@@ -22,11 +22,12 @@ See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The
 
 ## Steps towards full language-hood
 
+🏷️ *v0.0.1*
 - [x] Type checker
 - [x] Functions
 - [x] If/else
 
-🏷️ *v0.0.1*
+🏷️ *v0.0.2* 
 - [x] Loops
 - [x] Constraints (guard, require, ensure)
 - [x] Enums
@@ -39,32 +40,33 @@ See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The
 - [x] `guard` inside the function body
   - [x] e.g. `guard x > 0 else { return 0 }`, or `guard x > 0 else ::BiggerThanZero`
 
-🏷️ *v0.0.2* 
+🏷️ *v0.0.3* 
+
 - [x] `module X` and `module Y {}`
 - [x] Real booleans
 - [x] Unary operators
 - [x] Fix float division (int/int should produce an int, truncated. not a float)
 
-🏷️ *v0.0.3* 
+🏷️ *v0.0.4* 
 - [x] `&&` and `||` with shortcircuiting.
-- [ ] `use X::*`, `use X::{X, Y}`
+- [x] `use X::*`, `use X::{X, Y}`
 - [ ] Make all statements expressions (e.g. `if` and `switch` should return a value)
 
-🏷️ *v0.0.4* 
+🏷️ *v0.0.5* 
 - [ ] Structs (with heap alloc)
     - [ ] Field access
 - [ ] ARC memory management
 
-🏷️ *v0.0.5* 
+🏷️ *v0.0.6* 
 - [ ] Defer/errdefer
 - [ ] Managed/unmanaged strings
 - [ ] Arrays
 
-🏷️ *v0.0.6* 
+🏷️ *v0.0.7* 
 - [ ] Generics
 - [ ] Custom linking with C libs (with extern names, or no_mangle)
 
-🏷️ *v0.0.7* 
+🏷️ *v0.0.8* 
 - [ ] `import X`, compiling other libraries into the same binary and a (for now
       unstable) interface to allow linking with other Rove libraries (like
       rmeta)

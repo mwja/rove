@@ -76,6 +76,74 @@ impl ModuleCtxt {
         }
     }
 
+    /// Resolve every `use` in the module tree and insert it as an item of its
+    /// module. Must run after `build_tree`. Loops until everything is found (a fixpoint)
+    pub fn fill_aliases(
+        &mut self,
+        root_module: &ast::AstModule,
+        enums: &Enums,
+    ) -> Result<(), Vec<ResolverError>> {
+        let mut errs = Vec::new();
+
+        let mut pending = Vec::new();
+        let mut queue = VecDeque::from(vec![root_module]);
+        while let Some(module) = queue.pop_front() {
+            let module_id = self
+                .get_module_id(module.node_id)
+                .unwrap_or_else(|| bug!("could not get module id for node id on alias filling"));
+            for use_stmt in &module.uses {
+                for entry in &use_stmt.entries {
+                    // `use super;` would bind the name `super`, which can never be referred to.
+                    if entry.alias.is_none() && entry.path.is_super() {
+                        errs.push(ResolverError::BareUseSuper(entry.path.clone().into()));
+                        continue;
+                    }
+                    pending.push((module_id, entry));
+                }
+            }
+            queue.extend(&module.mods);
+        }
+
+        loop {
+            let mut resolved = Vec::new();
+            let mut unresolved = Vec::new();
+            for (module_id, entry) in pending {
+                let module = self
+                    .get_module(module_id)
+                    .unwrap_or_else(|| bug!("could not get module for module id on alias filling"));
+                match module.resolve_path(entry.path.clone(), self, enums) {
+                    Ok(Some(res)) => resolved.push((module_id, entry.name().to_owned(), res)),
+                    _ => unresolved.push((module_id, entry)),
+                }
+            }
+            pending = unresolved;
+
+            if resolved.is_empty() {
+                break;
+            }
+            // now we don't need to borrow module anymore, we can safely mutate self.
+            for (module_id, name, res) in resolved {
+                let _ = self
+                    .insert_item(module_id, name, res)
+                    .map_err(|err| errs.push(err));
+            }
+        }
+
+        // Anything left can't be resolved; resolve once more for the error.
+        for (module_id, entry) in pending {
+            let module = self
+                .get_module(module_id)
+                .unwrap_or_else(|| bug!("could not get module for module id on alias filling"));
+            match module.resolve_path(entry.path.clone(), self, enums) {
+                Ok(Some(_)) => bug!("use resolved after alias filling reached a fixpoint"),
+                Ok(None) => errs.push(ResolverError::CannotResolve(entry.path.clone().into())),
+                Err(err) => errs.push(err),
+            }
+        }
+
+        if errs.is_empty() { Ok(()) } else { Err(errs) }
+    }
+
     /// Traverse modules and assign them into their modules (used for typeck)
     /// Must run this after name resolution but before definition.
     pub fn build_tree(
@@ -159,6 +227,10 @@ pub struct ModuleTree {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Path {
     Name(String),
+    Super,
+    /// x::super, as Qualified can't represent a trailing super (I could probs change this, but this
+    /// was cleaner imo)
+    QualifiedSuper(Box<Path>),
     Qualified(Box<Path>, String),
 }
 
@@ -166,6 +238,8 @@ impl Display for Path {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Path::Name(name) => write!(f, "{}", name),
+            Path::Super => write!(f, "super"),
+            Path::QualifiedSuper(base) => write!(f, "{}::super", base),
             Path::Qualified(base, path) => write!(f, "{}::{}", base, path),
         }
     }
@@ -175,6 +249,10 @@ impl From<AstPath> for Path {
     fn from(ast_path: AstPath) -> Self {
         match ast_path {
             AstPath::Ident(ident) => Path::Name(ident.to_string()),
+            AstPath::Super(_) => Path::Super,
+            AstPath::QualifiedSuper(qualified) => {
+                Path::QualifiedSuper(Box::new((*qualified.base).into()))
+            }
             AstPath::Path(AstPathExpr { base, field, .. }) => {
                 let base_path: Path = (*base).into();
                 Path::Qualified(Box::new(base_path), field.text)
@@ -215,6 +293,10 @@ pub enum ResolverError {
     CannotImplyTy(Ty, ImplicitPath),
     #[error("duplicate definition of {0} in module {1}")]
     DuplicateDefinition(String, ModuleId),
+    #[error("super at the root level is invalid (there is nothing to resolve)")]
+    SuperAtRootLevel,
+    #[error("cannot import {0} without a name; use `{0} as <name>`")]
+    BareUseSuper(Path),
 }
 
 impl ResolverError {
@@ -227,6 +309,8 @@ impl ResolverError {
             ResolverError::CannotResolveVariantOfType(..) => 3005,
             ResolverError::CannotImplyTy(..) => 3006,
             ResolverError::DuplicateDefinition(..) => 3007,
+            ResolverError::SuperAtRootLevel => 3008,
+            ResolverError::BareUseSuper(..) => 3009,
         }
     }
 }
@@ -257,13 +341,32 @@ impl ModuleTree {
     pub fn resolve_path(
         &self,
         path: impl Into<Path>,
-        tcx: &TyCtxt,
+        mcx: &ModuleCtxt,
+        enums: &Enums,
     ) -> Result<Option<Res>, ResolverError> {
         let path = path.into();
         match path {
+            Path::Super => match self.parent {
+                Some(parent_id) => Ok(Some(Res::Module(parent_id))),
+                None => Err(ResolverError::SuperAtRootLevel),
+            },
+            Path::QualifiedSuper(base) => {
+                // lowering only permits `super` after another `super`, so the
+                // base always resolves to a module.
+                let Some(Res::Module(module_id)) = self.resolve_path(*base, mcx, enums)? else {
+                    bug!("base of a qualified super did not resolve to a module")
+                };
+                let module = mcx.get_module(module_id).unwrap_or_else(|| {
+                    bug!("could not get module for module id on super resolution")
+                });
+                match module.parent {
+                    Some(parent_id) => Ok(Some(Res::Module(parent_id))),
+                    None => Err(ResolverError::SuperAtRootLevel),
+                }
+            }
             Path::Name(name) => Ok(self.resolve_name(&name)),
             Path::Qualified(base, path) => {
-                let Some(base_res) = self.resolve_path(*base.clone(), tcx)? else {
+                let Some(base_res) = self.resolve_path(*base.clone(), mcx, enums)? else {
                     return Ok(None);
                 };
 
@@ -277,7 +380,7 @@ impl ModuleTree {
                         Err(ResolverError::HasNoNamespaceMembers(path, *base))
                     }
                     Res::Enum(enum_id) => {
-                        let Some(enum_) = tcx.enums.get_enum(enum_id) else {
+                        let Some(enum_) = enums.get_enum(enum_id) else {
                             return Err(ResolverError::CannotResolve(Path::Name(path)));
                         };
 
@@ -287,7 +390,7 @@ impl ModuleTree {
                         }
                     }
                     Res::Module(module_id) => {
-                        let Some(module) = tcx.mcx.get_module(module_id) else {
+                        let Some(module) = mcx.get_module(module_id) else {
                             return Err(ResolverError::CannotResolve(Path::Name(path)));
                         };
 

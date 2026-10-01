@@ -1,0 +1,12 @@
+// `super` cannot be imported without a name, and has no meaning at the root.
+use super::x; // the root has no parent
+
+module m {
+  use super; // binds nothing usable
+  use super::super::y; // goes past the root
+  func f() -> int {
+    return 1;
+  }
+}
+
+func main() {}

@@ -1,0 +1,54 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_logical_non_bool.rv
+---
+compile error:
+[1046] Error: logical operators such as && and || require boolean operands
+   ╭─[ tests/cases/err_logical_non_bool.rv:4:6 ]
+   │
+ 4 │   if 1 && 2 {}
+   │      ───┬──  
+   │         ╰──── attempted to perform logical operation && on a non-boolean type int
+   │ 
+   │ Help: logical operations such as && and || require boolean operands
+───╯
+[1046] Error: logical operators such as && and || require boolean operands
+   ╭─[ tests/cases/err_logical_non_bool.rv:8:6 ]
+   │
+ 8 │   if 1.0 || 2.0 {}
+   │      ─────┬────  
+   │           ╰────── attempted to perform logical operation || on a non-boolean type float
+   │ 
+   │ Help: logical operations such as && and || require boolean operands
+───╯
+[1002] Error: types int and bool are incompatible
+    ╭─[ tests/cases/err_logical_non_bool.rv:12:6 ]
+    │
+ 12 │   if 1 && true {}
+    │      ┬    ──┬─  
+    │      ╰────────── this value has type int
+    │             │   
+    │             ╰─── but this value has type bool
+────╯
+[1002] Error: types bool and int are incompatible
+    ╭─[ tests/cases/err_logical_non_bool.rv:16:6 ]
+    │
+ 16 │   if false || 2 {}
+    │      ──┬──    ┬  
+    │        ╰───────── this value has type bool
+    │               │  
+    │               ╰── but this value has type int
+────╯
+[1002] Error: types bool and int are incompatible
+    ╭─[ tests/cases/err_logical_non_bool.rv:20:3 ]
+    │
+ 20 │   return true && false;
+    │   ──────────┬─────────  
+    │             ╰─────────── this value has type bool
+    │
+    ├─[ tests/cases/err_logical_non_bool.rv:19:23 ]
+    │
+ 19 │ func used_as_int() -> int {
+    │                       ─┬─  
+    │                        ╰─── but this value has type int
+────╯

@@ -1,0 +1,29 @@
+// && and || bind looser than comparison and arithmetic, and && binds tighter
+// than ||, so these all parse the way they read.
+func main() {
+  let x = 5;
+
+  if x > 0 && x < 10 { // (x > 0) && (x < 10): expect 1
+    print 1;
+  }
+
+  if x + 1 == 6 && x * 2 == 10 { // arithmetic before comparison before &&: expect 2
+    print 2;
+  }
+
+  if x < 0 || x == 5 { // (x < 0) || (x == 5): expect 3
+    print 3;
+  }
+
+  if true || false && false { // true || (false && false): expect 4
+    print 4;
+  }
+
+  if false && true || true { // (false && true) || true: expect 5
+    print 5;
+  }
+
+  if !false && !(x > 10) { // unary ! binds tighter than &&: expect 6
+    print 6;
+  }
+}

@@ -1,0 +1,34 @@
+// `super` names the parent module, can be chained, and works in uses and in
+// plain paths.
+func one() -> int {
+  return 1;
+}
+
+enum Color { Red, Green }
+
+module a {
+  use super::one;
+
+  func two() -> int {
+    return one() + super::one();
+  }
+
+  module b {
+    use super::super::{one as uno, Color};
+    use super::super as root;
+
+    func is_green(c: Color) -> bool {
+      return c == Color::Green;
+    }
+
+    func three() -> int {
+      guard is_green(Color::Green) else { return 0; }
+      return uno() + super::two() + root::one() - 1;
+    }
+  }
+}
+
+func main() {
+  print a::two(); // expect 2
+  print a::b::three(); // expect 3
+}
