@@ -1,0 +1,31 @@
+func returns_true(x: int) -> bool {
+  print x;
+  return true;
+}
+
+func returns_false(x: int) -> bool {
+  print x;
+  return false;
+}
+
+func main() {
+  if returns_true(1) && returns_false(2) { // expect 1, 2. returns_false should run.
+    print 100;
+  }
+
+  if returns_false(3) && returns_true(4) { // expect 3. returns_true should never run.
+    print 200;
+  }
+
+  if returns_true(5) || returns_false(6) { // expect 5, 300. returns_false should never run.
+    print 300;
+  }
+
+  if returns_false(7) || returns_true(8) { // expect 7, 8. returns_true should run.
+    print 400;
+  }
+
+  if returns_true(9) && returns_false(10) || returns_true(11) { // expect 9, 10, 11 (9 non-sc, 10 sc -> 11),
+    print 500;
+  }
+}

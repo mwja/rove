@@ -911,6 +911,8 @@ pub enum AstBinaryOperator {
     Gt,
     Le,
     Ge,
+    LAnd,
+    LOr,
 }
 
 impl Display for AstBinaryOperator {
@@ -926,6 +928,8 @@ impl Display for AstBinaryOperator {
             AstBinaryOperator::Gt => ">",
             AstBinaryOperator::Le => "<=",
             AstBinaryOperator::Ge => ">=",
+            AstBinaryOperator::LAnd => "&&",
+            AstBinaryOperator::LOr => "||",
         };
         write!(f, "{}", op)
     }

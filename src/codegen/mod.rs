@@ -63,6 +63,11 @@ fn func_ty(om: &ObjectModule) -> Type {
     om.target_config().pointer_type()
 }
 
+enum ShortCircuit {
+    And,
+    Or,
+}
+
 #[derive(Copy, Clone, Debug)]
 enum Operand {
     Empty,
@@ -1977,6 +1982,104 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.lower_value_res(res)
     }
 
+    fn lower_shortcircuit(
+        &mut self,
+        x: ast::AstExpr,
+        y: ast::AstExpr,
+        res_ty: Ty,
+        circuit: ShortCircuit,
+    ) -> Value {
+        let left = self.lower_expr(x);
+
+        let merge_block = self.builder.create_block();
+        let merge_param_val = self.builder.append_block_param(
+            merge_block,
+            self.rcx
+                .repr_of(&res_ty)
+                .expect_scalar("short circuit value cannot be non-scalar"),
+        );
+
+        // check op, brif to merge if short-circuit, otherwise continue. the short circuit condition is different
+        // per condition (ands short-circuit on false, ors shortcircuit on true)
+        let check_right_block = self.builder.create_block();
+
+        // emit a BRIF to either the merge block or the check_right block
+        match circuit {
+            ShortCircuit::And => self.builder.ins().brif(
+                left.expect_scalar("short circuit value cannot be non-scalar"),
+                check_right_block,
+                &[],
+                merge_block,
+                &[BlockArg::Value(left.expect_scalar(
+                    "short circuit value cannot be non-scalar",
+                ))],
+            ),
+            ShortCircuit::Or => self.builder.ins().brif(
+                left.expect_scalar("short circuit value cannot be non-scalar"),
+                merge_block,
+                &[BlockArg::Value(left.expect_scalar(
+                    "short circuit value cannot be non-scalar",
+                ))],
+                check_right_block,
+                &[],
+            ),
+        };
+
+        self.builder.switch_to_block(check_right_block);
+        let right = self.lower_expr(y);
+        self.builder.ins().jump(
+            merge_block,
+            &[BlockArg::Value(right.expect_scalar(
+                "short circuit value cannot be non-scalar",
+            ))],
+        );
+        self.builder.switch_to_block(merge_block);
+        self.builder.seal_block(check_right_block);
+        self.builder.seal_block(merge_block);
+
+        merge_param_val
+    }
+
+    /// Like `lower_cond_direct`, but handles short-circuiting logical operators.
+    ///
+    /// For when you don't know/care what operator is being used. If manually
+    /// constructing a comparison, use `lower_cond_direct` instead.
+    fn lower_cond_indirect(
+        &mut self,
+        x: ast::AstExpr,
+        y: ast::AstExpr,
+        res_ty: Ty,
+        operator: ast::AstBinaryOperator,
+    ) -> Value {
+        // If it's not logical and/or we can just lower directly.
+        match operator {
+            ast::AstBinaryOperator::LAnd | ast::AstBinaryOperator::LOr => self.lower_shortcircuit(
+                x,
+                y,
+                res_ty,
+                match operator {
+                    ast::AstBinaryOperator::LAnd => ShortCircuit::And,
+                    ast::AstBinaryOperator::LOr => ShortCircuit::Or,
+                    _ => unreachable!(),
+                },
+            ),
+            _ => {
+                let x_ty = self
+                    .cx
+                    .body
+                    .node_ty(x.node_id())
+                    .unwrap_or_else(|| bug!("operand of condition has no type"));
+                let x = self
+                    .lower_expr(x)
+                    .expect_scalar("operand of condition must be a scalar");
+                let y = self
+                    .lower_expr(y)
+                    .expect_scalar("operand of condition must be a scalar");
+                self.lower_cond_direct(x_ty, x, y, res_ty, operator)
+            }
+        }
+    }
+
     /// Use only if you need to check a condition yourself
     fn lower_cond_direct(
         &mut self,
@@ -2088,6 +2191,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     TyKind::FullFallible(_, _) => unreachable!(),
                 }
             }
+            ast::AstBinaryOperator::LAnd | ast::AstBinaryOperator::LOr => {
+                bug!(
+                    "attempted to lower and/or as a direct comparison, but they should always be circuited"
+                )
+            }
         }
     }
 
@@ -2148,24 +2256,12 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let ast::AstExprKind::Binary(bin_expr) = expr.kind else {
             unreachable!()
         };
-        let x_ty = self
-            .cx
-            .body
-            .node_ty(bin_expr.left.node_id())
-            .unwrap_or_else(|| bug!("the left operand of a binary expression has no type"));
-        let x = self
-            .lower_expr(*bin_expr.left)
-            .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
-        let y = self
-            .lower_expr(*bin_expr.right)
-            .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
-
         let res_ty = self
             .cx
             .body
             .node_ty(bin_expr.node_id)
             .unwrap_or_else(|| bug!("a binary expression has no type"));
-        self.lower_cond_direct(x_ty, x, y, res_ty, bin_expr.operator)
+        self.lower_cond_indirect(*bin_expr.left, *bin_expr.right, res_ty, bin_expr.operator)
     }
 
     fn lower_lit(&mut self, expr: ast::AstExpr) -> Value {
@@ -2208,7 +2304,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         // enum values are stored as index + 1 (0 is reserved for "no error"),
         // but print the variant's index.
         let x = match x_ty.kind() {
-            TyKind::Enum(..) => self.builder.ins().iadd_imm(x, -1),
+            TyKind::Enum(..) => self.builder.ins().iadd_imm_s(x, -1),
             _ => x,
         };
         let printf_ref = self.get_or_cache_function(match x_ty.kind() {

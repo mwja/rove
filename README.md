@@ -46,7 +46,7 @@ See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The
 - [x] Fix float division (int/int should produce an int, truncated. not a float)
 
 🏷️ *v0.0.3* 
-- [ ] `&&` and `||` with shortcircuiting.
+- [x] `&&` and `||` with shortcircuiting.
 - [ ] `use X::*`, `use X::{X, Y}`
 - [ ] Make all statements expressions (e.g. `if` and `switch` should return a value)
 

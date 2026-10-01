@@ -113,6 +113,8 @@ pub enum TypeError {
     CannotNegate(Ty, NodeId),
     #[error("cannot perform unary operations on values of type {0}")]
     CannotUnaryOp(Ty, ast::AstUnaryOperator, NodeId),
+    #[error("logical operators such as && and || require boolean operands")]
+    LogicalOpOnNonBool(Ty, ast::AstBinaryOperator, NodeId),
 }
 
 impl TypeError {
@@ -164,6 +166,7 @@ impl TypeError {
             CannotCompareBooleans(..) => Some(1043),
             CannotNegate(..) => Some(1044),
             CannotUnaryOp(..) => Some(1045),
+            LogicalOpOnNonBool(..) => Some(1046),
 
             PathResolutionError(_, err) => Some(err.as_code()),
         }
@@ -694,6 +697,18 @@ impl DiagnoseWith<NodeId> for TypeError {
                             "attempted to perform unary operation here",
                         )
                         .with_help(Some(format!("cannot perform {} on this type", op))),
+                ]
+            }
+            LogicalOpOnNonBool(ty, op, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("attempted to perform logical operation {} on a non-boolean type {}", op, ty),
+                        )
+                        .with_help(Some("logical operations such as && and || require boolean operands")),
                 ]
             }
         }
@@ -2147,6 +2162,15 @@ fn typeck_binary_expr(
         {
             Err(TypeError::CannotCompareBooleans(bin_expr.node_id))
         }
+        op @ (ast::AstBinaryOperator::LOr | ast::AstBinaryOperator::LAnd)
+            if !left.is_bool() || !right.is_bool() =>
+        {
+            Err(TypeError::LogicalOpOnNonBool(
+                if !left.is_bool() { left } else { right },
+                *op,
+                bin_expr.node_id,
+            ))
+        }
         ast::AstBinaryOperator::Add
         | ast::AstBinaryOperator::Sub
         | ast::AstBinaryOperator::Mul
@@ -2156,7 +2180,9 @@ fn typeck_binary_expr(
         | ast::AstBinaryOperator::Lt
         | ast::AstBinaryOperator::Le
         | ast::AstBinaryOperator::Gt
-        | ast::AstBinaryOperator::Ge => Ok(tccx.tcx.bool_ty()),
+        | ast::AstBinaryOperator::Ge
+        | ast::AstBinaryOperator::LOr
+        | ast::AstBinaryOperator::LAnd => Ok(tccx.tcx.bool_ty()),
     }
 }
 

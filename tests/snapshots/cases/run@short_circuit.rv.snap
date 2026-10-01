@@ -1,0 +1,18 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/short_circuit.rv
+---
+exit: Some(0)
+--- stdout
+1
+2
+3
+5
+300
+7
+8
+400
+9
+10
+11
+500

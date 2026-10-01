@@ -424,6 +424,22 @@ mod grammar {
     }
 
     pub enum BinaryExpr {
+        #[rust_sitter::prec_left(4)]
+        LogicalAnd {
+            left: Box<Spanned<Expr>>,
+            #[rust_sitter::leaf(text = "&&")]
+            op: (),
+            right: Box<Spanned<Expr>>,
+        },
+
+        #[rust_sitter::prec_left(3)]
+        LogicalOr {
+            left: Box<Spanned<Expr>>,
+            #[rust_sitter::leaf(text = "||")]
+            op: (),
+            right: Box<Spanned<Expr>>,
+        },
+
         #[rust_sitter::prec_left(2)]
         Product {
             left: Box<Spanned<Expr>>,
@@ -1276,6 +1292,18 @@ impl<'a> ProgramLowerer<'a> {
                     grammar::ComparisonOp::Le => ast::AstBinaryOperator::Le,
                     grammar::ComparisonOp::Ge => ast::AstBinaryOperator::Ge,
                 },
+            },
+            grammar::BinaryExpr::LogicalAnd { left, right, .. } => ast::AstBinaryExpr {
+                node_id: self.next_id_spanned(binary.span),
+                left: Box::new(self.lower_expr(*left)),
+                right: Box::new(self.lower_expr(*right)),
+                operator: ast::AstBinaryOperator::LAnd,
+            },
+            grammar::BinaryExpr::LogicalOr { left, right, .. } => ast::AstBinaryExpr {
+                node_id: self.next_id_spanned(binary.span),
+                left: Box::new(self.lower_expr(*left)),
+                right: Box::new(self.lower_expr(*right)),
+                operator: ast::AstBinaryOperator::LOr,
             },
         }
     }
