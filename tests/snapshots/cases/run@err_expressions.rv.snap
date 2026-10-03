@@ -1,0 +1,64 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_expressions.rv
+---
+compile error:
+[1049] Error: control flow is not permitted inside constraints
+   ╭─[ tests/cases/err_expressions.rv:5:19 ]
+   │
+ 5 │     require! pos: if x > 0 { true } else { false }
+   │     ───────────────────────┬──────┬───────────────  
+   │                            ╰──────────────────────── enclosing constraint
+   │                                   │                 
+   │                                   ╰───────────────── control flow here
+───╯
+[1002] Error: types float and int are incompatible
+    ╭─[ tests/cases/err_expressions.rv:10:34 ]
+    │
+ 10 │     let a = if true { 1 } else { 2.0 };
+    │                       ┬          ─┬─  
+    │                       ╰─────────────── but this value has type int
+    │                                   │   
+    │                                   ╰─── this value has type float
+────╯
+[1039] Error: the value of this block is discarded
+    ╭─[ tests/cases/err_expressions.rv:11:23 ]
+    │
+ 11 │     let b = if true { 1 };
+    │                       ┬  
+    │                       ╰── this int is the value of its block, which is unused
+    │ 
+    │ Help: a trailing expression is the value of its own block. did you mean to `return` it, or add a `;`?
+────╯
+[1048] Error: this expression never produces a value
+    ╭─[ tests/cases/err_expressions.rv:12:13 ]
+    │
+ 12 │     let c = return;
+    │             ───┬──  
+    │                ╰──── this always returns, throws or jumps elsewhere, so has no value to use
+────╯
+[1039] Error: the value of this block is discarded
+    ╭─[ tests/cases/err_expressions.rv:13:15 ]
+    │
+ 13 │     if true { 1 } else { 2 }
+    │               ┬  
+    │               ╰── this int is the value of its block, which is unused
+    │ 
+    │ Help: a trailing expression is the value of its own block. did you mean to `return` it, or add a `;`?
+────╯
+[1048] Error: this expression never produces a value
+    ╭─[ tests/cases/err_expressions.rv:15:21 ]
+    │
+ 15 │         let d = 1 + break;
+    │                     ──┬──  
+    │                       ╰──── this always returns, throws or jumps elsewhere, so has no value to use
+────╯
+[1039] Error: the value of this block is discarded
+    ╭─[ tests/cases/err_expressions.rv:26:9 ]
+    │
+ 26 │         5
+    │         ┬  
+    │         ╰── this int is the value of its block, which is unused
+    │ 
+    │ Help: a trailing expression is the value of its own block. did you mean to `return` it, or add a `;`?
+────╯

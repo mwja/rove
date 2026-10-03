@@ -1,0 +1,29 @@
+// Branches of an if must agree, an if without an else has no value, a
+// block-like without a `;` may not have one, and a diverging expression has no
+// value to use.
+func positive(x: int)
+    require! pos: if x > 0 { true } else { false }
+{
+}
+
+func main() {
+    let a = if true { 1 } else { 2.0 };
+    let b = if true { 1 };
+    let c = return;
+    if true { 1 } else { 2 }
+    loop {
+        let d = 1 + break;
+    }
+}
+
+// The value is pointed at in the branch it came from, skipping diverging ones.
+func g(c: bool, d: bool) {
+    if c {
+        return;
+    } else if d {
+        loop {}
+    } else {
+        5
+    }
+    print 1;
+}

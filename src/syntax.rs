@@ -170,36 +170,20 @@ mod grammar {
         pub ty: Spanned<Type>,
     }
 
+    // Block-like expressions (`if`, `loop`, `{}`, ...) need no `;`, so parse as
+    // an `ImplicitReturn` when not followed by one. Lowering turns those that
+    // aren't last back into statements.
     pub enum Stmt {
         Expr(Spanned<Expr>, #[rust_sitter::leaf(text = ";")] ()),
         ImplicitReturn(Spanned<Expr>),
         Decl(Spanned<Decl>, #[rust_sitter::leaf(text = ";")] ()),
         Print(Spanned<PrintStmt>, #[rust_sitter::leaf(text = ";")] ()),
         Assign(Spanned<AssignStmt>, #[rust_sitter::leaf(text = ";")] ()),
-        Block(Spanned<BlockStmt>),
-        If(Spanned<IfStmt>),
-        Loop(Spanned<LoopStmt>),
-        While(Spanned<WhileStmt>),
-        Break(
-            #[rust_sitter::leaf(text = "break")] Spanned<()>,
-            #[rust_sitter::leaf(text = ";")] (),
-        ),
-        Continue(
-            #[rust_sitter::leaf(text = "continue")] Spanned<()>,
-            #[rust_sitter::leaf(text = ";")] (),
-        ),
-        Fallthrough(
-            #[rust_sitter::leaf(text = "fallthrough")] Spanned<()>,
-            #[rust_sitter::leaf(text = ";")] (),
-        ),
-        Switch(Spanned<SwitchStmt>),
-        Throw(Spanned<ThrowStmt>, #[rust_sitter::leaf(text = ";")] ()),
         Guard(Spanned<GuardStmt>),
         Require(
             Spanned<RequireConstraint>,
             #[rust_sitter::leaf(text = ";")] (),
         ),
-        Return(Spanned<ReturnStmt>, #[rust_sitter::leaf(text = ";")] ()),
         Use(Spanned<UseStmt>, #[rust_sitter::leaf(text = ";")] ()),
     }
 
@@ -259,11 +243,14 @@ mod grammar {
     }
 
     pub enum GuardElse {
+        // Over `else ({ .. })(...)`, which is the `Throw` form on a block.
+        #[rust_sitter::prec(1)]
         Block(Spanned<BlockStmt>),
         // Shorthand for `else { throw X; }`, matching the header form.
         Throw(Spanned<Expr>, #[rust_sitter::leaf(text = ";")] ()),
     }
 
+    #[rust_sitter::prec_right(0)]
     pub struct ThrowStmt {
         #[rust_sitter::leaf(text = "throw")]
         pub _switch: (),
@@ -303,12 +290,14 @@ mod grammar {
         pub body: Spanned<BlockStmt>,
     }
 
+    #[rust_sitter::prec_right(0)]
     pub struct ReturnStmt {
         #[rust_sitter::leaf(text = "return")]
         pub _return: (),
-        pub expr: Option<Spanned<Expr>>,
+        pub expr: Option<Box<Spanned<Expr>>>,
     }
 
+    #[rust_sitter::prec_right(0)]
     pub struct IfStmt {
         #[rust_sitter::leaf(text = "if")]
         pub _if: (),
@@ -393,6 +382,16 @@ mod grammar {
         // TryElse(Spanned<TryElseExpr>),
         ForcedTry(Spanned<ForcedTryExpr>),
         TryCatch(Spanned<TryCatchExpr>),
+        Block(Spanned<BlockStmt>),
+        If(Spanned<IfStmt>),
+        Loop(Spanned<LoopStmt>),
+        While(Spanned<WhileStmt>),
+        Switch(Spanned<SwitchStmt>),
+        Return(Spanned<ReturnStmt>),
+        Throw(Spanned<ThrowStmt>),
+        Break(#[rust_sitter::leaf(text = "break")] Spanned<()>),
+        Continue(#[rust_sitter::leaf(text = "continue")] Spanned<()>),
+        Fallthrough(#[rust_sitter::leaf(text = "fallthrough")] Spanned<()>),
     }
 
     #[rust_sitter::prec_left(99)]
@@ -1024,27 +1023,9 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Stmt::Assign(assign, _) => {
                 ast::AstStmtKind::Assign(self.lower_assign_stmt(assign))
             }
-            grammar::Stmt::Block(block) => ast::AstStmtKind::Block(self.lower_block_stmt(block)),
-            grammar::Stmt::If(if_stmt) => ast::AstStmtKind::If(self.lower_if_stmt(if_stmt)),
             grammar::Stmt::ImplicitReturn(expr) => {
                 ast::AstStmtKind::ImplicitReturn(self.lower_expr(expr))
             }
-            grammar::Stmt::Return(return_stmt, _) => {
-                ast::AstStmtKind::Return(self.lower_return_stmt(return_stmt))
-            }
-            grammar::Stmt::Loop(loop_) => ast::AstStmtKind::Loop(self.lower_loop_stmt(loop_)),
-            grammar::Stmt::While(while_) => ast::AstStmtKind::While(self.lower_while_stmt(while_)),
-            grammar::Stmt::Break(v, _) => ast::AstStmtKind::Break(self.lower_break_stmt(v)),
-            grammar::Stmt::Fallthrough(v, _) => {
-                ast::AstStmtKind::Fallthrough(self.lower_fallthrough_stmt(v))
-            }
-            grammar::Stmt::Continue(v, _) => {
-                ast::AstStmtKind::Continue(self.lower_continue_stmt(v))
-            }
-            grammar::Stmt::Switch(switch) => {
-                ast::AstStmtKind::Switch(self.lower_switch_stmt(switch))
-            }
-            grammar::Stmt::Throw(throw, _) => ast::AstStmtKind::Throw(self.lower_throw_stmt(throw)),
             grammar::Stmt::Guard(guard) => ast::AstStmtKind::Guard(self.lower_guard_stmt(guard)),
             grammar::Stmt::Require(require, _) => {
                 ast::AstStmtKind::Require(self.lower_require(require.value, require.span))
@@ -1163,9 +1144,11 @@ impl<'a> ProgramLowerer<'a> {
             grammar::GuardElse::Throw(error, _) => ast::AstBlockStmt {
                 node_id: self.next_id_spanned(error.span),
                 stmts: vec![ast::AstStmt {
-                    kind: ast::AstStmtKind::Throw(ast::AstThrowStmt {
-                        node_id: self.next_id_spanned(error.span),
-                        expr: Box::new(self.lower_expr(error)),
+                    kind: ast::AstStmtKind::Expr(ast::AstExpr {
+                        kind: ast::AstExprKind::Throw(ast::AstThrowStmt {
+                            node_id: self.next_id_spanned(error.span),
+                            expr: Box::new(self.lower_expr(error)),
+                        }),
                     }),
                 }],
             },
@@ -1264,20 +1247,34 @@ impl<'a> ProgramLowerer<'a> {
     ) -> ast::AstReturnStmt {
         ast::AstReturnStmt {
             node_id: self.next_id_spanned(return_stmt.span),
-            expr: return_stmt.value.expr.map(|expr| self.lower_expr(expr)),
+            expr: return_stmt
+                .value
+                .expr
+                .map(|expr| Box::new(self.lower_expr(*expr))),
         }
     }
 
     fn lower_block_stmt(&mut self, block: Spanned<grammar::BlockStmt>) -> ast::AstBlockStmt {
-        ast::AstBlockStmt {
-            node_id: self.next_id_spanned(block.span),
-            stmts: block
-                .value
-                .stmts
-                .into_iter()
-                .map(|stmt| self.lower_stmt(stmt))
-                .collect(),
-        }
+        let node_id = self.next_id_spanned(block.span);
+        let len = block.value.stmts.len();
+        let stmts = block
+            .value
+            .stmts
+            .into_iter()
+            .enumerate()
+            .map(|(i, stmt)| match self.lower_stmt(stmt).kind {
+                // Only the last can be the block's value, earlier block-likes
+                // without a `;` are just statements.
+                ast::AstStmtKind::ImplicitReturn(expr) if i + 1 < len && expr.is_block_like() => {
+                    ast::AstStmt {
+                        kind: ast::AstStmtKind::BlockLike(expr),
+                    }
+                }
+                kind => ast::AstStmt { kind },
+            })
+            .collect();
+
+        ast::AstBlockStmt { node_id, stmts }
     }
 
     fn lower_if_stmt(&mut self, if_stmt: Spanned<grammar::IfStmt>) -> ast::AstIfStmt {
@@ -1373,6 +1370,22 @@ impl<'a> ProgramLowerer<'a> {
             }
             grammar::Expr::TryCatch(try_catch) => {
                 ast::AstExprKind::TryCatch(self.lower_try_catch(try_catch))
+            }
+            grammar::Expr::Block(block) => ast::AstExprKind::Block(self.lower_block_stmt(block)),
+            grammar::Expr::If(if_expr) => ast::AstExprKind::If(self.lower_if_stmt(if_expr)),
+            grammar::Expr::Loop(loop_) => ast::AstExprKind::Loop(self.lower_loop_stmt(loop_)),
+            grammar::Expr::While(while_) => ast::AstExprKind::While(self.lower_while_stmt(while_)),
+            grammar::Expr::Switch(switch) => {
+                ast::AstExprKind::Switch(self.lower_switch_stmt(switch))
+            }
+            grammar::Expr::Return(return_) => {
+                ast::AstExprKind::Return(self.lower_return_stmt(return_))
+            }
+            grammar::Expr::Throw(throw) => ast::AstExprKind::Throw(self.lower_throw_stmt(throw)),
+            grammar::Expr::Break(v) => ast::AstExprKind::Break(self.lower_break_stmt(v)),
+            grammar::Expr::Continue(v) => ast::AstExprKind::Continue(self.lower_continue_stmt(v)),
+            grammar::Expr::Fallthrough(v) => {
+                ast::AstExprKind::Fallthrough(self.lower_fallthrough_stmt(v))
             }
         }
     }

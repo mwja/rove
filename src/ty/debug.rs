@@ -79,11 +79,9 @@ fn display_func(body: &BodyInfo, func_def: &ast::AstFunctionDef) -> String {
 
 fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
     match &stmt.kind {
-        ast::AstStmtKind::Expr(expr) => {
-            format!("{}; // {};", expr, annotate_expr(body, expr))
-        }
-        ast::AstStmtKind::ImplicitReturn(expr) => {
-            format!("{} // {}", expr, annotate_expr(body, expr))
+        ast::AstStmtKind::Expr(expr) => display_expr_stmt(body, expr, ";"),
+        ast::AstStmtKind::BlockLike(expr) | ast::AstStmtKind::ImplicitReturn(expr) => {
+            display_expr_stmt(body, expr, "")
         }
         ast::AstStmtKind::Print(print) => {
             format!("{}; // print {};", print, annotate_expr(body, &print.expr))
@@ -95,24 +93,6 @@ fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
         },
         ast::AstStmtKind::Assign(assign) => {
             format!("{}; // {};", assign, annotate_expr(body, &assign.expr))
-        }
-        ast::AstStmtKind::Block(block) => format!("{};", display_block(body, block)),
-        ast::AstStmtKind::If(if_stmt) => display_if(body, if_stmt),
-        ast::AstStmtKind::Return(return_stmt) => display_return(body, return_stmt),
-        ast::AstStmtKind::Loop(loop_stmt) => display_loop(body, loop_stmt),
-        ast::AstStmtKind::While(while_stmt) => display_while(body, while_stmt),
-        ast::AstStmtKind::Break(break_stmt) => display_break(body, break_stmt),
-        ast::AstStmtKind::Continue(continue_stmt) => display_continue(body, continue_stmt),
-        ast::AstStmtKind::Fallthrough(fallthrough_stmt) => {
-            display_fallthrough(body, fallthrough_stmt)
-        }
-        ast::AstStmtKind::Switch(switch_stmt) => display_switch(body, switch_stmt),
-        ast::AstStmtKind::Throw(throw_stmt) => {
-            format!(
-                "{}; // throw {};",
-                throw_stmt,
-                annotate_expr(body, &throw_stmt.expr)
-            )
         }
         ast::AstStmtKind::Guard(guard_stmt) => format!(
             "guard {} else {} // guard {}",
@@ -126,6 +106,30 @@ fn display_stmt(body: &BodyInfo, stmt: &ast::AstStmt) -> String {
             annotate_expr(body, &require.condition)
         ),
         ast::AstStmtKind::Use(use_stmt) => format!("{};", use_stmt,),
+    }
+}
+
+fn display_expr_stmt(body: &BodyInfo, expr: &ast::AstExpr, semi: &str) -> String {
+    match &expr.kind {
+        ast::AstExprKind::Block(block) => format!("{}{}", display_block(body, block), semi),
+        ast::AstExprKind::If(if_stmt) => format!("{}{}", display_if(body, if_stmt), semi),
+        ast::AstExprKind::Return(return_stmt) => display_return(body, return_stmt),
+        ast::AstExprKind::Loop(loop_stmt) => display_loop(body, loop_stmt),
+        ast::AstExprKind::While(while_stmt) => display_while(body, while_stmt),
+        ast::AstExprKind::Break(break_stmt) => display_break(body, break_stmt),
+        ast::AstExprKind::Continue(continue_stmt) => display_continue(body, continue_stmt),
+        ast::AstExprKind::Fallthrough(fallthrough_stmt) => {
+            display_fallthrough(body, fallthrough_stmt)
+        }
+        ast::AstExprKind::Switch(switch_stmt) => display_switch(body, switch_stmt),
+        ast::AstExprKind::Throw(throw_stmt) => {
+            format!(
+                "{}; // throw {};",
+                throw_stmt,
+                annotate_expr(body, &throw_stmt.expr)
+            )
+        }
+        _ => format!("{}{} // {}{}", expr, semi, annotate_expr(body, expr), semi),
     }
 }
 

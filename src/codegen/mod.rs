@@ -1108,8 +1108,21 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             (_, ast::AstExprKind::Unary(ast::AstUnaryExpr { expr, .. })) => {
                 self.lower_constraint_expr_olds(&expr);
             }
-            (_, ast::AstExprKind::TryCatch(..)) => {
-                unreachable!("typeck rejects try/catch inside constraints")
+            (
+                _,
+                ast::AstExprKind::TryCatch(..)
+                | ast::AstExprKind::Block(..)
+                | ast::AstExprKind::If(..)
+                | ast::AstExprKind::Loop(..)
+                | ast::AstExprKind::While(..)
+                | ast::AstExprKind::Switch(..)
+                | ast::AstExprKind::Return(..)
+                | ast::AstExprKind::Throw(..)
+                | ast::AstExprKind::Break(..)
+                | ast::AstExprKind::Continue(..)
+                | ast::AstExprKind::Fallthrough(..),
+            ) => {
+                unreachable!("typeck rejects try/catch and control flow inside constraints")
             }
             (
                 _,
@@ -1123,27 +1136,15 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
     fn lower_stmt(&mut self, stmt: ast::AstStmt) {
         match stmt.kind {
-            ast::AstStmtKind::Expr(expr) => {
+            ast::AstStmtKind::Expr(expr) | ast::AstStmtKind::BlockLike(expr) => {
                 self.lower_expr(expr);
             }
             ast::AstStmtKind::Print(print) => self.lower_print(print),
             ast::AstStmtKind::Decl(decl) => self.lower_decl(decl),
             ast::AstStmtKind::Assign(assign) => self.lower_assign(assign),
-            ast::AstStmtKind::Block(block) => {
-                self.lower_block_stmt(block);
-            }
-            ast::AstStmtKind::If(if_) => self.lower_if_stmt(if_),
-            ast::AstStmtKind::Return(return_) => self.lower_return_stmt(return_),
             ast::AstStmtKind::ImplicitReturn(_) => {
                 unreachable!("tails are lowered by lower_block_stmt as the block's value")
             }
-            ast::AstStmtKind::Loop(loop_) => self.lower_gen_loop(loop_.body, None),
-            ast::AstStmtKind::While(while_) => self.lower_gen_loop(while_.body, Some(*while_.cond)),
-            ast::AstStmtKind::Break(_) => self.lower_break_stmt(),
-            ast::AstStmtKind::Continue(_) => self.lower_continue_stmt(),
-            ast::AstStmtKind::Fallthrough(_) => self.lower_fallthrough_stmt(),
-            ast::AstStmtKind::Switch(switch_stmt) => self.lower_switch_stmt(switch_stmt),
-            ast::AstStmtKind::Throw(throw_stmt) => self.lower_throw_stmt(throw_stmt),
             ast::AstStmtKind::Guard(guard_stmt) => self.lower_guard_stmt(guard_stmt),
             ast::AstStmtKind::Require(require) => {
                 self.lower_aborting_constraint_param_passthrough(&ast::AstConstraint::Require(
@@ -1196,7 +1197,12 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         );
     }
 
-    fn lower_switch_stmt(&mut self, switch_stmt: ast::AstSwitchStmt) {
+    fn lower_switch_stmt(&mut self, switch_stmt: ast::AstSwitchStmt) -> Operand {
+        let ty = self
+            .cx
+            .body
+            .node_ty(switch_stmt.node_id)
+            .unwrap_or_else(|| bug!("a switch expression has no type"));
         let base_value = self.lower_expr(*switch_stmt.expr.clone());
 
         let (_, else_, cases) = switch_stmt.consume();
@@ -1205,7 +1211,9 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .map(|case| (case, self.builder.create_block()))
             .unzip::<_, _, Vec<_>, Vec<_>>();
         let else_block = else_.as_ref().map(|_| self.builder.create_block());
-        let exit_block = self.builder.create_block();
+        let exit_block = self.value_block(&ty);
+        // Without an else, typeck has checked every variant has a case.
+        let default_block = else_block.unwrap_or_else(|| self.builder.create_block());
 
         // for each condition, evaluate then jump to the jumping block with the
         // right index.
@@ -1215,17 +1223,15 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .append_block_param(switch_landing_pad, types::I32);
 
         let jump_table = {
-            let exit_block_call = self.builder.func.dfg.block_call(exit_block, &[]);
-            let else_block_call = else_block.map(|b| self.builder.func.dfg.block_call(b, &[]));
+            let default_block_call = self.builder.func.dfg.block_call(default_block, &[]);
             let block_calls = bodies
                 .iter()
                 .map(|block| self.builder.func.dfg.block_call(*block, &[]))
                 .collect::<Vec<_>>();
 
-            self.builder.func.create_jump_table(JumpTableData::new(
-                else_block_call.unwrap_or(exit_block_call),
-                &block_calls,
-            ))
+            self.builder
+                .func
+                .create_jump_table(JumpTableData::new(default_block_call, &block_calls))
         };
 
         // an idx we know will trigger the default case
@@ -1298,25 +1304,24 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 upcoming_block: bodies.get(idx + 1).copied().or(else_block),
                 exit: exit_block,
             });
-            self.lower_block_stmt(body.body);
+            let value = self.lower_block_stmt(body.body);
             self.switches.pop();
-            if !self.is_current_block_terminated() {
-                self.builder.ins().jump(exit_block, &[]);
-            }
+            self.yield_to(exit_block, value);
             self.builder.seal_block(*block);
         }
 
         if let (Some(else_), Some(else_block)) = (else_, else_block) {
             self.builder.switch_to_block(else_block);
-            self.lower_block_stmt(else_.body);
-            if !self.is_current_block_terminated() {
-                self.builder.ins().jump(exit_block, &[]);
-            }
+            let value = self.lower_block_stmt(else_.body);
+            self.yield_to(exit_block, value);
             self.builder.seal_block(else_block);
+        } else {
+            self.builder.switch_to_block(default_block);
+            self.builder.seal_block(default_block);
+            self.builder.ins().trap(TrapCode::unwrap_user(7));
         }
 
-        self.builder.seal_block(exit_block);
-        self.builder.switch_to_block(exit_block);
+        self.finish_value_block(exit_block, &ty)
     }
 
     fn lower_fallthrough_stmt(&mut self) {
@@ -1468,7 +1473,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let args: Vec<BlockArg> = match (return_.expr, self.chain_repr(ExitKind::Return)) {
             (None, Repr::Empty) => vec![],
             (Some(e), Repr::Scalar(_)) => vec![BlockArg::Value(
-                self.lower_expr(e)
+                self.lower_expr(*e)
                     .expect_scalar("cannot return pre-made fallible type (yet)"),
             )],
             (e, r) => unreachable!("return arity mismatch: expr={}, repr={r:?}", e.is_some()),
@@ -1555,23 +1560,34 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         value
     }
 
-    fn lower_if_stmt(&mut self, if_stmt: ast::AstIfStmt) {
-        self.loc(&if_stmt.node_id);
+    fn lower_if(&mut self, if_expr: ast::AstIfStmt) -> Operand {
+        let ty = self
+            .cx
+            .body
+            .node_ty(if_expr.node_id)
+            .unwrap_or_else(|| bug!("an if expression has no type"));
+        let merge_block = self.value_block(&ty);
+        self.lower_if_into(if_expr, merge_block);
+        self.finish_value_block(merge_block, &ty)
+    }
+
+    /// Lowers an if whose value goes to `merge_block`, which an `else if`
+    /// shares with the `if` it follows.
+    fn lower_if_into(&mut self, if_expr: ast::AstIfStmt, merge_block: Block) {
+        self.loc(&if_expr.node_id);
         let then_block = self.builder.create_block();
-        let else_block = if let Some(_) = if_stmt.else_ {
+        let else_block = if let Some(_) = if_expr.else_ {
             Some(self.builder.create_block())
         } else {
             None
         };
-        let merge_block = self.builder.create_block();
         let cond = self
-            .lower_expr(*if_stmt.cond)
+            .lower_expr(*if_expr.cond)
             .expect_scalar("cannot return pre-made fallible type (yet)");
+        // Without an else the if is void, so the merge block takes no value.
         self.builder.ins().brif(
             cond,
             then_block,
-            // we don't pass block args yet,though that could be useful for
-            // closures, panics/errors, if statements as values, etc.
             &[],
             else_block.unwrap_or(merge_block),
             &[],
@@ -1579,43 +1595,48 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
         self.builder.switch_to_block(then_block);
         self.builder.seal_block(then_block);
-        self.lower_block_stmt(*if_stmt.then);
-        let then_falls_through = !self.is_current_block_terminated();
-        if then_falls_through {
-            self.builder.ins().jump(merge_block, &[]);
-        }
+        let value = self.lower_block_stmt(*if_expr.then);
+        self.yield_to(merge_block, value);
 
-        // merge_block is only reachable if a branch actually falls through to
-        // it: the implicit "no else" edge, or either arm not terminating.
-        let mut merge_reachable = else_block.is_none() || then_falls_through;
-
-        if let Some(else_) = if_stmt.else_ {
-            self.builder.switch_to_block(else_block.unwrap_or_else(|| {
+        if let Some(else_) = if_expr.else_ {
+            let else_block = else_block.unwrap_or_else(|| {
                 bug!("if statement has an else branch but no else block was created")
-            }));
-            self.builder.seal_block(else_block.unwrap_or_else(|| {
-                bug!("if statement has an else branch but no else block was created")
-            }));
+            });
+            self.builder.switch_to_block(else_block);
+            self.builder.seal_block(else_block);
             match else_ {
                 ast::AstElseBranch::Block(block_stmt) => {
-                    self.lower_block_stmt(block_stmt);
+                    let value = self.lower_block_stmt(block_stmt);
+                    self.yield_to(merge_block, value);
                 }
-                ast::AstElseBranch::If(if_stmt) => {
-                    self.lower_if_stmt(*if_stmt);
-                }
-            }
-            if !self.is_current_block_terminated() {
-                self.builder.ins().jump(merge_block, &[]);
-                merge_reachable = true;
+                ast::AstElseBranch::If(if_expr) => self.lower_if_into(*if_expr, merge_block),
             }
         }
+    }
 
-        self.builder.switch_to_block(merge_block);
-        self.builder.seal_block(merge_block);
-        if !merge_reachable {
-            // Both arms terminate (e.g. both return): this block is dead code
-            // with no predecessors, but Cranelift still requires a terminator.
+    /// A block that branches of a value of type `ty` (e.g. an if's) yield to.
+    fn value_block(&mut self, ty: &Ty) -> Block {
+        let block = self.builder.create_block();
+        for param_ty in self.rcx.repr_of(ty).types() {
+            self.builder.append_block_param(block, param_ty);
+        }
+        block
+    }
+
+    /// Continues from a [value_block] once every branch has yielded to it,
+    /// returning the value.
+    fn finish_value_block(&mut self, block: Block, ty: &Ty) -> Operand {
+        self.builder.switch_to_block(block);
+        self.builder.seal_block(block);
+        if *ty.kind() == TyKind::Never {
+            // Every branch diverges, so this block is dead code with no
+            // predecessors, but Cranelift still requires a terminator.
             self.builder.ins().trap(TrapCode::unwrap_user(7));
+        }
+        match self.builder.block_params(block) {
+            [] => Operand::Empty,
+            [v] => Operand::Scalar(*v),
+            _ => unreachable!("block values are single-slot"),
         }
     }
 
@@ -1687,6 +1708,38 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             }
             ast::AstExprKind::ForcedTry(forced_try_expr) => self.lower_forced_try(forced_try_expr),
             ast::AstExprKind::TryCatch(try_catch_expr) => self.lower_try_catch(try_catch_expr),
+            ast::AstExprKind::Block(block) => self.lower_block_stmt(block),
+            ast::AstExprKind::If(if_expr) => self.lower_if(if_expr),
+            ast::AstExprKind::Switch(switch_expr) => self.lower_switch_stmt(switch_expr),
+            ast::AstExprKind::Loop(loop_expr) => {
+                self.lower_gen_loop(loop_expr.body, None);
+                Operand::Empty
+            }
+            ast::AstExprKind::While(while_expr) => {
+                self.lower_gen_loop(while_expr.body, Some(*while_expr.cond));
+                Operand::Empty
+            }
+            // Anything that goes away is never (typeck)
+            ast::AstExprKind::Return(return_expr) => {
+                self.lower_return_stmt(return_expr);
+                Operand::Empty
+            }
+            ast::AstExprKind::Throw(throw_expr) => {
+                self.lower_throw_stmt(throw_expr);
+                Operand::Empty
+            }
+            ast::AstExprKind::Break(_) => {
+                self.lower_break_stmt();
+                Operand::Empty
+            }
+            ast::AstExprKind::Continue(_) => {
+                self.lower_continue_stmt();
+                Operand::Empty
+            }
+            ast::AstExprKind::Fallthrough(_) => {
+                self.lower_fallthrough_stmt();
+                Operand::Empty
+            }
         }
     }
 

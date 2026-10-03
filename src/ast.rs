@@ -236,28 +236,15 @@ impl AstStmt {
     pub fn inner_node_id(&self) -> NodeId {
         match &self.kind {
             AstStmtKind::Expr(expr) => expr.node_id(),
+            AstStmtKind::BlockLike(expr) => expr.node_id(),
             AstStmtKind::Print(print) => print.node_id,
             AstStmtKind::Decl(decl) => decl.inner_node_id(),
             AstStmtKind::Assign(assign) => assign.node_id,
-            AstStmtKind::Block(block) => block.node_id,
-            AstStmtKind::If(if_stmt) => if_stmt.node_id,
-            AstStmtKind::Return(return_stmt) => return_stmt.node_id,
-            AstStmtKind::Loop(loop_stmt) => loop_stmt.node_id,
-            AstStmtKind::While(while_stmt) => while_stmt.node_id,
-            AstStmtKind::Break(break_stmt) => break_stmt.node_id,
-            AstStmtKind::Continue(continue_stmt) => continue_stmt.node_id,
-            AstStmtKind::Fallthrough(fallthrough_stmt) => fallthrough_stmt.node_id,
             AstStmtKind::ImplicitReturn(expr) => expr.node_id(),
-            AstStmtKind::Switch(switch_stmt) => switch_stmt.node_id,
-            AstStmtKind::Throw(throw_stmt) => throw_stmt.node_id,
             AstStmtKind::Guard(guard_stmt) => guard_stmt.node_id,
             AstStmtKind::Require(require) => require.node_id,
             AstStmtKind::Use(use_stmt) => use_stmt.node_id,
         }
-    }
-
-    pub fn is_loop(&self) -> bool {
-        matches!(self.kind, AstStmtKind::Loop(_) | AstStmtKind::While(_))
     }
 }
 
@@ -269,21 +256,16 @@ impl Display for AstStmt {
 
 #[derive(Debug, Clone)]
 pub enum AstStmtKind {
+    /// `expr;`, which discards the value.
     Expr(AstExpr),
+    /// A block-like expression (`if`, `switch`, `loop`, ...) in statement
+    /// position without a `;`. It has nowhere to send a value, so may not have
+    /// one.
+    BlockLike(AstExpr),
     Print(AstPrintStmt),
     Decl(AstDecl),
     Assign(AstAssignStmt),
-    Block(AstBlockStmt),
-    If(AstIfStmt),
-    Loop(AstLoopStmt),
-    While(AstWhileStmt),
-    Break(AstBreakStmt),
-    Continue(AstContinueStmt),
-    Fallthrough(AstFallthroughStmt),
-    Return(AstReturnStmt),
     ImplicitReturn(AstExpr),
-    Switch(AstSwitchStmt),
-    Throw(AstThrowStmt),
     Guard(AstGuardStmt),
     Require(AstRequireConstraint),
     Use(AstUseStmt),
@@ -293,20 +275,11 @@ impl Display for AstStmtKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AstStmtKind::Expr(expr) => write!(f, "{};", expr),
+            AstStmtKind::BlockLike(expr) => write!(f, "{}", expr),
             AstStmtKind::Print(print) => write!(f, "{};", print),
             AstStmtKind::Decl(decl) => write!(f, "{};", decl),
             AstStmtKind::Assign(assign) => write!(f, "{};", assign),
-            AstStmtKind::Block(block) => write!(f, "{};", block),
-            AstStmtKind::If(if_stmt) => write!(f, "{}", if_stmt),
-            AstStmtKind::Return(return_stmt) => write!(f, "{};", return_stmt),
-            AstStmtKind::Loop(loop_stmt) => write!(f, "{};", loop_stmt),
-            AstStmtKind::While(while_stmt) => write!(f, "{};", while_stmt),
-            AstStmtKind::Break(break_stmt) => write!(f, "{};", break_stmt),
-            AstStmtKind::Continue(continue_stmt) => write!(f, "{};", continue_stmt),
-            AstStmtKind::Fallthrough(fallthrough_stmt) => write!(f, "{};", fallthrough_stmt),
             AstStmtKind::ImplicitReturn(expr) => write!(f, "{}", expr),
-            AstStmtKind::Switch(switch_stmt) => write!(f, "{}", switch_stmt),
-            AstStmtKind::Throw(throw_stmt) => write!(f, "{};", throw_stmt),
             AstStmtKind::Guard(guard_stmt) => write!(f, "{}", guard_stmt),
             AstStmtKind::Require(require) => write!(
                 f,
@@ -576,7 +549,7 @@ impl Display for AstContinueStmt {
 pub struct AstReturnStmt {
     /// Only for diagnostics, do NOT type this
     pub node_id: NodeId,
-    pub expr: Option<AstExpr>,
+    pub expr: Option<Box<AstExpr>>,
 }
 
 impl Display for AstReturnStmt {
@@ -594,6 +567,15 @@ impl Display for AstReturnStmt {
 pub struct AstBlockStmt {
     pub node_id: NodeId,
     pub stmts: Vec<AstStmt>,
+}
+
+impl AstBlockStmt {
+    pub fn tail(&self) -> Option<&AstExpr> {
+        match self.stmts.last().map(|stmt| &stmt.kind) {
+            Some(AstStmtKind::ImplicitReturn(tail)) => Some(tail),
+            _ => None,
+        }
+    }
 }
 
 impl Display for AstBlockStmt {
@@ -676,7 +658,30 @@ impl AstExpr {
             AstExprKind::ImplicitPath(implicit_field_access) => implicit_field_access.node_id, // AstExprKind::ForcedTry(forced_try) => forced_try.node_id,
             AstExprKind::ForcedTry(forced_try) => forced_try.node_id,
             AstExprKind::TryCatch(try_catch) => try_catch.node_id,
+            AstExprKind::Block(block) => block.node_id,
+            AstExprKind::If(if_expr) => if_expr.node_id,
+            AstExprKind::Loop(loop_expr) => loop_expr.node_id,
+            AstExprKind::While(while_expr) => while_expr.node_id,
+            AstExprKind::Switch(switch_expr) => switch_expr.node_id,
+            AstExprKind::Return(return_expr) => return_expr.node_id,
+            AstExprKind::Break(break_expr) => break_expr.node_id,
+            AstExprKind::Continue(continue_expr) => continue_expr.node_id,
+            AstExprKind::Fallthrough(fallthrough_expr) => fallthrough_expr.node_id,
+            AstExprKind::Throw(throw_expr) => throw_expr.node_id,
         }
+    }
+
+    /// Block-like expressions end in a `}`, so need no `;` in statement
+    /// position.
+    pub fn is_block_like(&self) -> bool {
+        matches!(
+            self.kind,
+            AstExprKind::Block(_)
+                | AstExprKind::If(_)
+                | AstExprKind::Loop(_)
+                | AstExprKind::While(_)
+                | AstExprKind::Switch(_)
+        )
     }
 }
 
@@ -777,6 +782,16 @@ pub enum AstExprKind {
     ImplicitPath(AstImplicitPathExpr),
     ForcedTry(AstForcedTryExpr),
     TryCatch(AstTryCatchExpr),
+    Block(AstBlockStmt),
+    If(AstIfStmt),
+    Loop(AstLoopStmt),
+    While(AstWhileStmt),
+    Switch(AstSwitchStmt),
+    Return(AstReturnStmt),
+    Break(AstBreakStmt),
+    Continue(AstContinueStmt),
+    Fallthrough(AstFallthroughStmt),
+    Throw(AstThrowStmt),
 }
 
 #[derive(Debug, Clone)]
@@ -924,6 +939,16 @@ impl Display for AstExprKind {
             }
             AstExprKind::ForcedTry(forced_try) => write!(f, "{}!", forced_try.call_expr),
             AstExprKind::TryCatch(try_catch) => write!(f, "{}", try_catch),
+            AstExprKind::Block(block) => write!(f, "{}", block),
+            AstExprKind::If(if_expr) => write!(f, "{}", if_expr),
+            AstExprKind::Loop(loop_expr) => write!(f, "{}", loop_expr),
+            AstExprKind::While(while_expr) => write!(f, "{}", while_expr),
+            AstExprKind::Switch(switch_expr) => write!(f, "{}", switch_expr),
+            AstExprKind::Return(return_expr) => write!(f, "{}", return_expr),
+            AstExprKind::Break(break_expr) => write!(f, "{}", break_expr),
+            AstExprKind::Continue(continue_expr) => write!(f, "{}", continue_expr),
+            AstExprKind::Fallthrough(fallthrough_expr) => write!(f, "{}", fallthrough_expr),
+            AstExprKind::Throw(throw_expr) => write!(f, "{}", throw_expr),
         }
     }
 }

@@ -52,8 +52,8 @@ impl Ty {
         !matches!(*self.kind, TyKind::Void | TyKind::Never)
     }
 
-    /// Can a value of this type be used where `expected` is wanted?
-    /// `never` fits anywhere, as control never actually produces one.
+    /// Can a value of this type be used where `expected` is wanted, or is
+    /// never. Like Rust's ! doesn't mess with inferrence
     pub fn coerces_to(&self, expected: &Ty) -> bool {
         self == expected || matches!(*self.kind, TyKind::Never)
     }

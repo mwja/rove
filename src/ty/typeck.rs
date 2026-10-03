@@ -5,7 +5,7 @@ use thiserror::Error;
 use super::*;
 use crate::{
     ast::{
-        self, AstExpr, AstForcedTryExpr, AstFunctionDef, AstGuardConstraint, AstIdent,
+        self, AstExpr, AstExprKind, AstForcedTryExpr, AstFunctionDef, AstGuardConstraint, AstIdent,
         AstImplicitPathExpr, AstLetDecl, AstPath, AstPathExpr, AstRequireConstraint, AstStmtKind,
         AstSwitchCase, AstSwitchCaseItem, AstSwitchElseCase, AstTryCatchExpr,
     },
@@ -117,6 +117,10 @@ pub enum TypeError {
     LogicalOpOnNonBool(Ty, ast::AstBinaryOperator, NodeId),
     #[error("could not find intended target of use statement")]
     UseStatementResolutionError(NodeId),
+    #[error("this expression never produces a value")]
+    NeverValue(NodeId),
+    #[error("control flow is not permitted inside constraints")]
+    ControlFlowInConstraint(NodeId, NodeId),
 }
 
 impl TypeError {
@@ -170,6 +174,8 @@ impl TypeError {
             CannotUnaryOp(..) => Some(1045),
             LogicalOpOnNonBool(..) => Some(1046),
             UseStatementResolutionError(..) => Some(1047),
+            NeverValue(..) => Some(1048),
+            ControlFlowInConstraint(..) => Some(1049),
 
             PathResolutionError(_, err) => Some(err.as_code()),
         }
@@ -636,6 +642,18 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
+            ControlFlowInConstraint(node_id, enclosing_constraint_node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(recorder, node_id, "control flow here")
+                        .with_label_from(
+                            recorder,
+                            enclosing_constraint_node_id,
+                            "enclosing constraint",
+                        ),
+                ]
+            }
             GuardElseMustDiverge(guard_node_id, else_node_id) => {
                 vec![
                     Diagnostic::new(message)
@@ -719,6 +737,17 @@ impl DiagnoseWith<NodeId> for TypeError {
                     Diagnostic::new(message)
                         .with_code(self.as_code())
                         .with_label_from(recorder, node_id, "use statement here"),
+                ]
+            }
+            NeverValue(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "this always returns, throws or jumps elsewhere, so has no value to use",
+                        ),
                 ]
             }
         }
@@ -1140,14 +1169,18 @@ fn typeck_module(
                         // The body's scope is already open (from new_with_func_sig) as
                         // it also holds the params, hence not using typeck_block.
                         let body = &ast_func_def.body;
-                        let body_ty = typeck_block_stmts(&mut tccx, body, &sig.return_ty);
-                        let tail = match body.stmts.last().map(|stmt| &stmt.kind) {
-                            Some(AstStmtKind::ImplicitReturn(tail)) => Some(tail),
-                            _ => None,
-                        };
+                        let body_ty = typeck_block_stmts(&mut tccx, body, Some(&sig.return_ty));
+                        // A block-like without a value is just the last statement (not a returning
+                        // expression, like implicitreturn) so we should mark it as a missing return
+                        // and not a mismatched type.
+                        let tail = body.tail().filter(|tail| {
+                            !(tail.is_block_like()
+                                && body_ty.as_ref().is_ok_and(|ty| *ty.kind() == TyKind::Void))
+                        });
                         if let (Ok(ty), Some(tail)) = (body_ty, tail) {
-                            let _ = typeck_tail_return(&mut tccx, tail.node_id(), ty)
-                                .reported(&mut tccx);
+                            let tail_node_id = value_node_id(&tccx.body, tail);
+                            let _ =
+                                typeck_tail_return(&mut tccx, tail_node_id, ty).reported(&mut tccx);
                         }
                         let _ = typeck_post_constraint(&mut tccx, &ast_func_def.constraints);
 
@@ -1366,6 +1399,7 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
         AstStmtKind::Expr(expr) => {
             typeck_expr(tccx, expr).reported(tccx)?;
         }
+        AstStmtKind::BlockLike(expr) => typeck_block_like_stmt(tccx, expr)?,
         AstStmtKind::Decl(decl) => {
             typeck_decl(tccx, decl).reported(tccx)?;
         }
@@ -1376,51 +1410,25 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
                 .reported(tccx)?;
 
             tccx.body.set_node_res(ass.node_id, target);
-            let ty = typeck_expr(tccx, &ass.expr).reported(tccx)?;
+            let ty = typeck_value_expr(tccx, &ass.expr).reported(tccx)?;
             if ty.is_fallible() {
                 return Err(TypeError::FallibleTypesNotYetStored(ass.expr.node_id()))
                     .reported(tccx);
             }
         }
-        AstStmtKind::If(stmt) => typeck_if(tccx, stmt)?,
-        AstStmtKind::Block(block) => typeck_stmt_block(tccx, block, true)?,
         AstStmtKind::Print(stmt) => {
             // for now can only print expressions
-            let ty = typeck_expr(tccx, &stmt.expr).reported(tccx)?;
+            let ty = typeck_value_expr(tccx, &stmt.expr).reported(tccx)?;
 
             // Cannot print voids and funcs
             if matches!(ty.kind(), TyKind::Func(..) | TyKind::Void) {
                 return Err(TypeError::CannotPrintFuncOrVoid(stmt.node_id)).reported(tccx);
             }
         }
-        AstStmtKind::Return(return_stmt) => typeck_return(tccx, return_stmt).reported(tccx)?,
         // typeck_block_stmts handles the tail itself, so any here are misplaced.
         AstStmtKind::ImplicitReturn(expr) => {
             return Err(TypeError::ImplicitReturnNotLast(expr.node_id())).reported(tccx);
         }
-        // Loops are generic enough that both can be handled here.
-        AstStmtKind::Loop(loop_stmt) => {
-            typeck_gen_loop(tccx, loop_stmt.node_id, &loop_stmt.body, None)?;
-        }
-        AstStmtKind::While(while_stmt) => {
-            typeck_gen_loop(
-                tccx,
-                while_stmt.node_id,
-                &while_stmt.body,
-                Some(&while_stmt.cond),
-            )?;
-        }
-        AstStmtKind::Break(break_stmt) => typeck_break(tccx, break_stmt).reported(tccx)?,
-        AstStmtKind::Continue(continue_stmt) => {
-            typeck_continue(tccx, continue_stmt).reported(tccx)?
-        }
-        AstStmtKind::Switch(switch_stmt) => {
-            typeck_switch(tccx, switch_stmt)?;
-        }
-        AstStmtKind::Fallthrough(fallthrough_stmt) => {
-            typeck_fallthrough(tccx, fallthrough_stmt).reported(tccx)?;
-        }
-        AstStmtKind::Throw(throw_stmt) => typeck_throw(tccx, throw_stmt).reported(tccx)?,
         AstStmtKind::Guard(guard_stmt) => typeck_guard_stmt(tccx, guard_stmt)?,
         AstStmtKind::Require(require) => {
             typeck_constraint_condition(
@@ -1436,6 +1444,36 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
     };
 
     Ok(())
+}
+
+/// A block-like without a `;` has nowhere to send its value, so may not have
+/// one.
+fn typeck_block_like_stmt(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<(), ()> {
+    let void_ty = tccx.tcx.void_ty();
+    let ty = tccx
+        .with_inferrable(&void_ty, |tccx| typeck_expr(tccx, expr))
+        .reported(tccx)?;
+    if ty.has_value() {
+        return Err(TypeError::DiscardedBlockValue(
+            value_node_id(&tccx.body, expr),
+            ty,
+        ))
+        .reported(tccx);
+    }
+
+    Ok(())
+}
+
+/// Typechecks an expression whose value is used, which a `never` one lacks.
+fn typeck_value_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeError> {
+    let errors = tccx.errors.len();
+    let ty = typeck_expr(tccx, expr)?;
+    // An expression with errors is `never` to avoid more (see [recover]).
+    if *ty.kind() == TyKind::Never && tccx.errors.len() == errors {
+        return Err(TypeError::NeverValue(expr.node_id()));
+    }
+
+    Ok(ty)
 }
 
 fn typeck_use_stmt(
@@ -1482,7 +1520,7 @@ fn typeck_guard_stmt(tccx: &mut TypeckCtxt, guard_stmt: &ast::AstGuardStmt) -> R
 
     // Code after the guard relies on the condition holding.
     let void_ty = tccx.tcx.void_ty();
-    let else_ty = typeck_block(tccx, &guard_stmt.else_, false, &void_ty)?;
+    let else_ty = typeck_block(tccx, &guard_stmt.else_, false, Some(&void_ty))?;
     if !matches!(else_ty.kind(), TyKind::Never) {
         return Err(TypeError::GuardElseMustDiverge(
             guard_stmt.node_id,
@@ -1529,8 +1567,12 @@ fn typeck_fallthrough(
     Ok(())
 }
 
-fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Result<(), ()> {
+/// Returns the type of the cases' values, which must agree.
+fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Result<Ty, ()> {
     let switch_ty = typeck_expr(tccx, &switch_stmt.expr).reported(tccx)?;
+    let expected = tccx.inferrable_ty();
+    // Every case so far has diverged, so has no value to agree with.
+    let mut value: Option<(Ty, NodeId)> = None;
 
     let cases_len = switch_stmt.cases.len();
     for (i, case) in switch_stmt.cases.iter().enumerate() {
@@ -1556,9 +1598,25 @@ fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Res
             }
         }
 
-        typeck_stmt_block(tccx, &case.body(), true)?;
+        let body_ty = typeck_block(tccx, case.body(), true, expected.as_ref());
         tccx.inside_switch_case = old_switch_case;
         tccx.inside_fallthroughable_case = old_fallthroughable_case;
+
+        let body_node_id = block_value_node_id(&tccx.body, case.body());
+        match (body_ty?, &value) {
+            (body_ty, _) if *body_ty.kind() == TyKind::Never => {}
+            (body_ty, None) => value = Some((body_ty, body_node_id)),
+            (body_ty, Some((value_ty, value_node_id))) if body_ty != *value_ty => {
+                return Err(TypeError::IncompatibleTypes(
+                    body_ty,
+                    value_ty.clone(),
+                    body_node_id,
+                    *value_node_id,
+                ))
+                .reported(tccx);
+            }
+            _ => {}
+        }
     }
 
     // do we have several elses? or is the else not last
@@ -1664,7 +1722,7 @@ fn typeck_switch(tccx: &mut TypeckCtxt, switch_stmt: &ast::AstSwitchStmt) -> Res
         }
     }
 
-    Ok(())
+    Ok(value.map_or_else(|| tccx.ty(TyKind::Never), |(ty, _)| ty))
 }
 
 fn typeck_gen_loop(
@@ -1721,7 +1779,7 @@ fn typeck_tail_return(
     return_ty: Ty,
 ) -> Result<(), TypeError> {
     match (return_ty.kind(), tccx.body.return_ty.kind()) {
-        (TyKind::Void, TyKind::Void) => Ok(()),
+        (TyKind::Void, TyKind::Void) | (TyKind::Never, _) => Ok(()),
         (TyKind::Void, _) => Err(TypeError::ExpectedReturn(
             node_id,
             tccx.return_node_id
@@ -1742,17 +1800,12 @@ fn typeck_tail_return(
 }
 
 fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Result<(), TypeError> {
-    let ity = tccx.begin_inferrable_ty(Some(tccx.body.return_ty.clone()));
+    let return_ty = tccx.body.return_ty.clone();
     let return_ty = return_stmt
         .expr
         .as_ref()
-        .map(|expr| {
-            let res = typeck_expr(tccx, expr);
-            tccx.end_inferrable_ty(ity);
-            res
-        })
-        .map_or(Ok(None), |v| v.map(Some))?
-        .map(|ty| ty); // returns always follow success path.
+        .map(|expr| tccx.with_inferrable(&return_ty, |tccx| typeck_expr(tccx, expr)))
+        .transpose()?; // returns always follow success path.
 
     match (&return_ty, tccx.body.return_ty.kind()) {
         // Returns but didn't expect return (non-void return in void context)
@@ -1783,20 +1836,47 @@ fn typeck_return(tccx: &mut TypeckCtxt, return_stmt: &ast::AstReturnStmt) -> Res
     }
 }
 
-fn typeck_if(tccx: &mut TypeckCtxt, stmt: &ast::AstIfStmt) -> Result<(), ()> {
-    let res = typeck_expr(tccx, &stmt.cond).reported(tccx)?;
+/// Returns the type of the branches' values, which must agree.
+fn typeck_if(tccx: &mut TypeckCtxt, if_expr: &ast::AstIfStmt) -> Result<Ty, ()> {
+    let res = typeck_expr(tccx, &if_expr.cond).reported(tccx)?;
     if !res.is_bool() {
-        return Err(TypeError::IfConditionNotValid(stmt.cond.node_id(), res)).reported(tccx);
-    }
-    typeck_stmt_block(tccx, &stmt.then, false)?;
-    if let Some(else_) = &stmt.else_ {
-        match else_ {
-            ast::AstElseBranch::If(stmt) => typeck_if(tccx, stmt)?,
-            ast::AstElseBranch::Block(block) => typeck_stmt_block(tccx, block, false)?,
-        }
+        return Err(TypeError::IfConditionNotValid(if_expr.cond.node_id(), res)).reported(tccx);
     }
 
-    Ok(())
+    // Without an else there is no value when the condition fails.
+    let Some(else_) = &if_expr.else_ else {
+        typeck_stmt_block(tccx, &if_expr.then, false)?;
+        return Ok(tccx.tcx.void_ty());
+    };
+
+    let expected = tccx.inferrable_ty();
+    let then_ty = typeck_block(tccx, &if_expr.then, false, expected.as_ref());
+    let (else_ty, else_node_id) = match else_ {
+        ast::AstElseBranch::Block(block) => (
+            typeck_block(tccx, block, false, expected.as_ref()),
+            block_value_node_id(&tccx.body, block),
+        ),
+        ast::AstElseBranch::If(nested) => {
+            let ty = typeck_if(tccx, nested);
+            (ty, if_value_node_id(&tccx.body, nested))
+        }
+    };
+    let (then_ty, else_ty) = (then_ty?, else_ty?);
+
+    // A branch that diverges doesn't have to conform (as it doesn't yield)
+    if else_ty.coerces_to(&then_ty) {
+        Ok(then_ty)
+    } else if then_ty.coerces_to(&else_ty) {
+        Ok(else_ty)
+    } else {
+        Err(TypeError::IncompatibleTypes(
+            else_ty,
+            then_ty,
+            else_node_id,
+            block_value_node_id(&tccx.body, &if_expr.then),
+        ))
+        .reported(tccx)
+    }
 }
 
 /// Returns the type the block evaluates to (see [typeck_block_stmts]).
@@ -1804,7 +1884,7 @@ fn typeck_block(
     tccx: &mut TypeckCtxt,
     block: &ast::AstBlockStmt,
     is_loop: bool,
-    expected: &Ty,
+    expected: Option<&Ty>,
 ) -> Result<Ty, ()> {
     let scope_id = tccx.open_scope(block.node_id);
     if is_loop {
@@ -1813,7 +1893,50 @@ fn typeck_block(
     let ty = typeck_block_stmts(tccx, block, expected);
     tccx.close_scope();
 
+    // Kept so diagnostics can find which branch a value came from.
+    if let Ok(ty) = &ty {
+        tccx.body.set_node_ty(block.node_id, ty.clone());
+    }
     ty
+}
+
+/// The node to point at for an expression's value. A block-like's comes from
+/// a tail, so look through to the first one that has a value.
+fn value_node_id(body: &BodyInfo, expr: &ast::AstExpr) -> NodeId {
+    match &expr.kind {
+        AstExprKind::Block(block) => block_value_node_id(body, block),
+        AstExprKind::If(if_expr) => if_value_node_id(body, if_expr),
+        AstExprKind::Switch(switch_expr) => switch_expr
+            .cases
+            .iter()
+            .map(|case| case.body())
+            .find(|block| block_has_value(body, block))
+            .map_or(expr.node_id(), |block| block_value_node_id(body, block)),
+        _ => expr.node_id(),
+    }
+}
+
+fn block_value_node_id(body: &BodyInfo, block: &ast::AstBlockStmt) -> NodeId {
+    block
+        .tail()
+        .map_or(block.node_id, |tail| value_node_id(body, tail))
+}
+
+/// Skips branches without a value (e.g. `{ return 1; }`) as they aren't
+/// where it came from.
+fn if_value_node_id(body: &BodyInfo, if_expr: &ast::AstIfStmt) -> NodeId {
+    match &if_expr.else_ {
+        _ if block_has_value(body, &if_expr.then) => block_value_node_id(body, &if_expr.then),
+        Some(ast::AstElseBranch::Block(block)) if block_has_value(body, block) => {
+            block_value_node_id(body, block)
+        }
+        Some(ast::AstElseBranch::If(nested)) => if_value_node_id(body, nested),
+        _ => block_value_node_id(body, &if_expr.then),
+    }
+}
+
+fn block_has_value(body: &BodyInfo, block: &ast::AstBlockStmt) -> bool {
+    body.node_ty(block.node_id).is_some_and(|ty| ty.has_value())
 }
 
 /// A block in statement position has nowhere to send its value, so it may not
@@ -1824,7 +1947,7 @@ fn typeck_stmt_block(
     is_loop: bool,
 ) -> Result<(), ()> {
     let void_ty = tccx.tcx.void_ty();
-    let ty = typeck_block(tccx, block, is_loop, &void_ty)?;
+    let ty = typeck_block(tccx, block, is_loop, Some(&void_ty))?;
     if ty.has_value() {
         let tail = block
             .stmts
@@ -1841,15 +1964,16 @@ fn typeck_stmt_block(
 fn typeck_block_stmts(
     tccx: &mut TypeckCtxt,
     block: &ast::AstBlockStmt,
-    expected: &Ty,
+    expected: Option<&Ty>,
 ) -> Result<Ty, ()> {
     for (i, stmt) in block.stmts.iter().enumerate() {
         if i + 1 == block.stmts.len()
             && let AstStmtKind::ImplicitReturn(tail) = &stmt.kind
         {
-            return tccx
-                .with_inferrable(expected, |tccx| typeck_expr(tccx, tail))
-                .reported(tccx);
+            let ity = tccx.begin_inferrable_ty(expected.cloned());
+            let ty = typeck_expr(tccx, tail);
+            tccx.end_inferrable_ty(ity);
+            return ty.reported(tccx);
         }
         let _ = typeck_stmt(tccx, stmt);
     }
@@ -1869,7 +1993,7 @@ fn typeck_decl(tccx: &mut TypeckCtxt, decl: &ast::AstDecl) -> Result<(), TypeErr
                 node_id,
             },
         }) => {
-            let ty = typeck_expr(tccx, expr)?;
+            let ty = typeck_value_expr(tccx, expr)?;
             if ty.is_fallible() {
                 return Err(TypeError::FallibleTypesNotYetStored(*node_id));
             }
@@ -1925,10 +2049,62 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
         (None, ast::AstExprKind::TryCatch(try_catch_expr)) => {
             typeck_try_catch_expr(tccx, try_catch_expr)
         }
+        (None, ast::AstExprKind::Block(block)) => {
+            let expected = tccx.inferrable_ty();
+            Ok(recover(tccx, |tccx| {
+                typeck_block(tccx, block, false, expected.as_ref())
+            }))
+        }
+        (None, ast::AstExprKind::If(if_expr)) => Ok(recover(tccx, |tccx| typeck_if(tccx, if_expr))),
+        (None, ast::AstExprKind::Switch(switch_expr)) => {
+            Ok(recover(tccx, |tccx| typeck_switch(tccx, switch_expr)))
+        }
+        (None, ast::AstExprKind::Loop(loop_expr)) => {
+            let _ = typeck_gen_loop(tccx, loop_expr.node_id, &loop_expr.body, None);
+            // Only a `break` ends a `loop`, whatever its body does.
+            Ok(if tccx.loops_with_breaks.contains(&loop_expr.node_id) {
+                tccx.tcx.void_ty()
+            } else {
+                tccx.ty(TyKind::Never)
+            })
+        }
+        (None, ast::AstExprKind::While(while_expr)) => {
+            let _ = typeck_gen_loop(
+                tccx,
+                while_expr.node_id,
+                &while_expr.body,
+                Some(&while_expr.cond),
+            );
+            Ok(tccx.tcx.void_ty())
+        }
+        (None, ast::AstExprKind::Return(return_expr)) => {
+            typeck_return(tccx, return_expr).map(|()| tccx.ty(TyKind::Never))
+        }
+        (None, ast::AstExprKind::Throw(throw_expr)) => {
+            typeck_throw(tccx, throw_expr).map(|()| tccx.ty(TyKind::Never))
+        }
+        (None, ast::AstExprKind::Break(break_expr)) => {
+            typeck_break(tccx, break_expr).map(|()| tccx.ty(TyKind::Never))
+        }
+        (None, ast::AstExprKind::Continue(continue_expr)) => {
+            typeck_continue(tccx, continue_expr).map(|()| tccx.ty(TyKind::Never))
+        }
+        (None, ast::AstExprKind::Fallthrough(fallthrough_expr)) => {
+            typeck_fallthrough(tccx, fallthrough_expr).map(|()| tccx.ty(TyKind::Never))
+        }
     }?;
 
     tccx.body.set_node_ty(expr.node_id(), ty.clone());
     Ok(ty)
+}
+
+/// Errors inside a block-like are already reported, so it is given the type
+/// `never`, which fits anywhere, rather than report more about its value.
+fn recover<F>(tccx: &mut TypeckCtxt, typeck: F) -> Ty
+where
+    F: FnOnce(&mut TypeckCtxt) -> Result<Ty, ()>,
+{
+    typeck(tccx).unwrap_or_else(|()| tccx.ty(TyKind::Never))
 }
 
 fn typeck_forced_try_expr(
@@ -1952,7 +2128,7 @@ fn typeck_try_catch_expr(
     if let Some(binding) = &try_catch_expr.binding {
         tccx.declare_local(binding.node_id, &binding.text, throws_ty);
     }
-    let body_ty = typeck_block(tccx, &try_catch_expr.body, false, &success_ty);
+    let body_ty = typeck_block(tccx, &try_catch_expr.body, false, Some(&success_ty));
     tccx.close_scope();
 
     // Errors inside the body are already reported, the expression still has its type.
@@ -2053,6 +2229,22 @@ fn typeck_constraint_expr(
         ast::AstExprKind::TryCatch(try_catch_expr) => {
             return Err(TypeError::TryCatchInConstraint(
                 try_catch_expr.node_id,
+                constraint_type.node_id(),
+            ));
+        }
+
+        ast::AstExprKind::Block(_)
+        | ast::AstExprKind::If(_)
+        | ast::AstExprKind::Loop(_)
+        | ast::AstExprKind::While(_)
+        | ast::AstExprKind::Switch(_)
+        | ast::AstExprKind::Return(_)
+        | ast::AstExprKind::Throw(_)
+        | ast::AstExprKind::Break(_)
+        | ast::AstExprKind::Continue(_)
+        | ast::AstExprKind::Fallthrough(_) => {
+            return Err(TypeError::ControlFlowInConstraint(
+                expr.node_id(),
                 constraint_type.node_id(),
             ));
         }
@@ -2187,8 +2379,8 @@ fn typeck_binary_expr(
     tccx: &mut TypeckCtxt,
     bin_expr: &ast::AstBinaryExpr,
 ) -> Result<Ty, TypeError> {
-    let left = typeck_expr(tccx, &bin_expr.left)?;
-    let right = tccx.with_inferrable(&left, |tccx| typeck_expr(tccx, &bin_expr.right))?;
+    let left = typeck_value_expr(tccx, &bin_expr.left)?;
+    let right = tccx.with_inferrable(&left, |tccx| typeck_value_expr(tccx, &bin_expr.right))?;
     if left != right {
         return Err(TypeError::IncompatibleTypes(
             left,
@@ -2275,27 +2467,44 @@ impl Diverges {
 /// comes from typeck, as a `break` may be hidden anywhere in a loop's body.
 fn diverges(stmt: &ast::AstStmt, loops_with_breaks: &HashSet<NodeId>) -> Diverges {
     match &stmt.kind {
-        AstStmtKind::Return(_)
-        | AstStmtKind::Throw(_)
-        | AstStmtKind::Break(_)
-        | AstStmtKind::Continue(_)
-        | AstStmtKind::Fallthrough(_) => Diverges::always(),
-        AstStmtKind::Block(b) => block_diverges(b, loops_with_breaks),
-        AstStmtKind::If(s) => if_diverges(s, loops_with_breaks),
-        AstStmtKind::Loop(l) => loop_diverges(l, loops_with_breaks),
-        AstStmtKind::Switch(s) => switch_diverges(s, loops_with_breaks),
+        AstStmtKind::Expr(expr)
+        | AstStmtKind::BlockLike(expr)
+        | AstStmtKind::ImplicitReturn(expr) => expr_diverges(expr, loops_with_breaks),
 
-        AstStmtKind::Expr(_)
-        | AstStmtKind::Print(_)
+        // These can't contain a diverging expression without it being used
+        // as a value, which typeck rejects.
+        AstStmtKind::Print(_)
         | AstStmtKind::Decl(_)
         | AstStmtKind::Assign(_)
         | AstStmtKind::Guard(_)
         | AstStmtKind::Require(_)
-        // A tail is the value of its block, so control continues after it.
-        | AstStmtKind::ImplicitReturn(_)
-        | AstStmtKind::Use(_)
+        | AstStmtKind::Use(_) => Diverges::never(),
+    }
+}
+
+fn expr_diverges(expr: &ast::AstExpr, loops_with_breaks: &HashSet<NodeId>) -> Diverges {
+    match &expr.kind {
+        AstExprKind::Return(_)
+        | AstExprKind::Throw(_)
+        | AstExprKind::Break(_)
+        | AstExprKind::Continue(_)
+        | AstExprKind::Fallthrough(_) => Diverges::always(),
+        AstExprKind::Block(b) => block_diverges(b, loops_with_breaks),
+        AstExprKind::If(s) => if_diverges(s, loops_with_breaks),
+        AstExprKind::Loop(l) => loop_diverges(l, loops_with_breaks),
+        AstExprKind::Switch(s) => switch_diverges(s, loops_with_breaks),
+
         // Compiler isn't yet smart enough to check this.
-        | AstStmtKind::While(_) => Diverges::never(),
+        AstExprKind::While(_)
+        | AstExprKind::Unary(_)
+        | AstExprKind::Binary(_)
+        | AstExprKind::Literal(_)
+        | AstExprKind::Ident(_)
+        | AstExprKind::Call(_)
+        | AstExprKind::Path(_)
+        | AstExprKind::ImplicitPath(_)
+        | AstExprKind::ForcedTry(_)
+        | AstExprKind::TryCatch(_) => Diverges::never(),
     }
 }
 

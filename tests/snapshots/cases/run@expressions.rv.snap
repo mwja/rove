@@ -1,0 +1,15 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/expressions.rv
+---
+exit: Some(0)
+--- stdout
+-1
+0
+1
+30
+7
+2
+10
+4
+5

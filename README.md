@@ -50,7 +50,7 @@ See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The
 🏷️ *v0.0.4* 
 - [x] `&&` and `||` with shortcircuiting.
 - [x] `use X::*`, `use X::{X, Y}`
-- [ ] Make all statements expressions (e.g. `if` and `switch` should return a value)
+- [x] Make all statements expressions (e.g. `if` and `switch` should return a value)
 
 🏷️ *v0.0.5* 
 - [ ] Structs (with heap alloc)
