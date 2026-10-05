@@ -121,6 +121,10 @@ pub enum TypeError {
     NeverValue(NodeId),
     #[error("control flow is not permitted inside constraints")]
     ControlFlowInConstraint(NodeId, NodeId),
+    #[error("{1} is not mutable")]
+    NotMutable(NodeId, String),
+    #[error("cannot assign")]
+    CannotAssign(NodeId, Res),
 }
 
 impl TypeError {
@@ -176,6 +180,8 @@ impl TypeError {
             UseStatementResolutionError(..) => Some(1047),
             NeverValue(..) => Some(1048),
             ControlFlowInConstraint(..) => Some(1049),
+            NotMutable(..) => Some(1050),
+            CannotAssign(..) => Some(1051),
 
             PathResolutionError(_, err) => Some(err.as_code()),
         }
@@ -750,6 +756,30 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
+            NotMutable(node_id, name) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("attempted to mutate `{name}` here"),
+                        )
+                        .with_help(Some("did you forget to declare it as `var`?")),
+                ]
+            }
+            CannotAssign(node_id, res) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("attempted to assign to {} here", res.as_name()),
+                        )
+                        .with_help(Some("did you mean to refer to a local variable?")),
+                ]
+            }
         }
     }
 }
@@ -758,6 +788,7 @@ impl DiagnoseWith<NodeId> for TypeError {
 pub struct BodyInfo {
     pub node_res: HashMap<ast::NodeId, Res>,
     pub local_tys: Vec<Ty>,
+    pub local_mut: Vec<bool>,
     pub old_tys: Vec<Ty>,
     pub param_tys: Vec<Ty>,
     pub node_tys: HashMap<ast::NodeId, Ty>,
@@ -776,6 +807,7 @@ impl BodyInfo {
         Self {
             node_res: HashMap::new(),
             local_tys: Vec::new(),
+            local_mut: Vec::new(),
             old_tys: Vec::new(),
             param_tys: Vec::new(),
             node_tys: HashMap::new(),
@@ -793,6 +825,10 @@ impl BodyInfo {
 
     pub fn local_ty(&self, local_id: LocalId) -> Option<Ty> {
         self.local_tys.get(*local_id).cloned()
+    }
+
+    pub fn local_mut(&self, local_id: LocalId) -> Option<bool> {
+        self.local_mut.get(*local_id).cloned()
     }
 
     pub fn param_ty(&self, param_id: ParamId) -> Option<Ty> {
@@ -1027,9 +1063,10 @@ impl<'c> TypeckCtxt<'c> {
         self.errors.extend(errs);
     }
 
-    fn declare_local(&mut self, node_id: NodeId, name: &str, ty: Ty) -> LocalId {
+    fn declare_local(&mut self, node_id: NodeId, name: &str, ty: Ty, mutable: bool) -> LocalId {
         let local_id = self.next_id();
         self.body.local_tys.push(ty);
+        self.body.local_mut.push(mutable);
         self.body.set_node_res(node_id, Res::Local(local_id));
         self.scopes
             .last_mut()
@@ -1409,6 +1446,7 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
                 .ok_or_else(|| TypeError::CannotResolve(ass.name.text.clone(), ass.name.node_id))
                 .reported(tccx)?;
 
+            typeck_assignment_local_mut(tccx, &target, ass).reported(tccx)?;
             tccx.body.set_node_res(ass.node_id, target);
             let ty = typeck_value_expr(tccx, &ass.expr).reported(tccx)?;
             if ty.is_fallible() {
@@ -1459,6 +1497,25 @@ fn typeck_block_like_stmt(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<
             ty,
         ))
         .reported(tccx);
+    }
+
+    Ok(())
+}
+
+fn typeck_assignment_local_mut(
+    tccx: &mut TypeckCtxt,
+    target: &Res,
+    ass: &ast::AstAssignStmt,
+) -> Result<(), TypeError> {
+    match target {
+        Res::Local(local_id) => {
+            if !tccx.body.local_mut(*local_id).unwrap_or(false) {
+                return Err(TypeError::NotMutable(ass.node_id, ass.name.text.clone()));
+            }
+        }
+        _ => {
+            return Err(TypeError::CannotAssign(ass.node_id, target.clone()));
+        }
     }
 
     Ok(())
@@ -1988,6 +2045,7 @@ fn typeck_decl(tccx: &mut TypeckCtxt, decl: &ast::AstDecl) -> Result<(), TypeErr
     match &decl.kind {
         ast::AstDeclKind::Let(AstLetDecl {
             expr,
+            mutable,
             name: AstIdent {
                 text: name,
                 node_id,
@@ -1997,7 +2055,7 @@ fn typeck_decl(tccx: &mut TypeckCtxt, decl: &ast::AstDecl) -> Result<(), TypeErr
             if ty.is_fallible() {
                 return Err(TypeError::FallibleTypesNotYetStored(*node_id));
             }
-            tccx.declare_local(*node_id, name, ty);
+            tccx.declare_local(*node_id, name, ty, *mutable);
         }
     };
 
@@ -2126,7 +2184,8 @@ fn typeck_try_catch_expr(
     // The binding gets its own scope around the body's, keyed by this expression.
     tccx.open_scope(try_catch_expr.node_id);
     if let Some(binding) = &try_catch_expr.binding {
-        tccx.declare_local(binding.node_id, &binding.text, throws_ty);
+        // false because the binding is never mutable.
+        tccx.declare_local(binding.node_id, &binding.text, throws_ty, false);
     }
     let body_ty = typeck_block(tccx, &try_catch_expr.body, false, Some(&success_ty));
     tccx.close_scope();

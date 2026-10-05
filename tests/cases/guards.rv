@@ -38,8 +38,8 @@ func main() {
     print scale(500);
     print scale(5000);
 
-    let total = 0;
-    let i = 0;
+    var total = 0;
+    var i = 0;
     while i < 6 {
         i = i + 1;
         guard i != 3 else {

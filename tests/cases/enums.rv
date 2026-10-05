@@ -27,7 +27,7 @@ func xor(left: Boolean, right: Boolean) -> Boolean {
 }
 
 func main() {
-    let v = 0;
+    var v = 0;
     v = step(v, ::Up);
     v = step(v, ::Up);
     v = step(v, Direction::Down);

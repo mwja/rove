@@ -1,0 +1,32 @@
+enum Failure {
+    Bad
+}
+
+func fails() throws Failure -> int
+    guard false else ::Bad
+{
+    return 1;
+}
+
+func assign_let() {
+    let a = 1;
+    a = 2;
+}
+
+func assign_shadowed_var() {
+    var b = 1;
+    {
+        let b = 2;
+        b = 3;
+    }
+    b = 4;
+}
+
+func assign_catch_binding() {
+    let c = try fails() catch |err| {
+        err = ::Bad;
+        0
+    };
+}
+
+func main() {}

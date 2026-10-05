@@ -1,0 +1,29 @@
+enum Direction {
+    Up
+}
+
+module math {
+    func add(a: int, b: int) -> int {
+        return a + b;
+    }
+}
+
+func helper() {}
+
+func assign_param(p: int) {
+    p = 2;
+}
+
+func assign_function() {
+    helper = 1;
+}
+
+func assign_enum() {
+    Direction = 1;
+}
+
+func assign_module() {
+    math = 1;
+}
+
+func main() {}

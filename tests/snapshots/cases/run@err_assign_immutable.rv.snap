@@ -1,0 +1,32 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_assign_immutable.rv
+---
+compile error:
+[1050] Error: a is not mutable
+    ╭─[ tests/cases/err_assign_immutable.rv:13:5 ]
+    │
+ 13 │     a = 2;
+    │     ──┬──  
+    │       ╰──── attempted to mutate `a` here
+    │ 
+    │ Help: did you forget to declare it as `var`?
+────╯
+[1050] Error: b is not mutable
+    ╭─[ tests/cases/err_assign_immutable.rv:20:9 ]
+    │
+ 20 │         b = 3;
+    │         ──┬──  
+    │           ╰──── attempted to mutate `b` here
+    │ 
+    │ Help: did you forget to declare it as `var`?
+────╯
+[1050] Error: err is not mutable
+    ╭─[ tests/cases/err_assign_immutable.rv:27:9 ]
+    │
+ 27 │         err = ::Bad;
+    │         ─────┬─────  
+    │              ╰─────── attempted to mutate `err` here
+    │ 
+    │ Help: did you forget to declare it as `var`?
+────╯

@@ -7,7 +7,7 @@ func main() {
         let a = 2;
         print a;
         {
-            let a = 3;
+            var a = 3;
             print a;
             a = 4;
             print a;

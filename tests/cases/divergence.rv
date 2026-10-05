@@ -2,7 +2,7 @@
 // and a function ending in one needs no trailing return.
 // Expected output: 6
 func first_over_five(start: int) -> int {
-    let n = start;
+    var n = start;
     loop {
         n = n + 1;
         if n > 5 {

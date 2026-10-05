@@ -724,6 +724,7 @@ impl Display for AstDecl {
 
 #[derive(Debug, Clone)]
 pub enum AstDeclKind {
+    /// Misnomer, let is any slot declaration. The decl has a mutable flag.
     Let(AstLetDecl),
 }
 
@@ -738,6 +739,7 @@ impl Display for AstDeclKind {
 #[derive(Debug, Clone)]
 pub struct AstLetDecl {
     pub name: AstIdent,
+    pub mutable: bool,
     pub expr: Box<AstExpr>,
 }
 
@@ -749,7 +751,13 @@ impl AstLetDecl {
 
 impl Display for AstLetDecl {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "let {} = {}", self.name, self.expr)
+        write!(
+            f,
+            "{} {} = {}",
+            if self.mutable { "var" } else { "let" },
+            self.name,
+            self.expr
+        )
     }
 }
 

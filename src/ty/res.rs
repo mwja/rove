@@ -40,3 +40,19 @@ impl Display for Res {
         }
     }
 }
+
+impl Res {
+    /// I.e. "cannot assign to ..."
+    pub fn as_name(&self) -> &str {
+        match self {
+            Res::Local(..) => "a local variable",
+            Res::Param(..) => "a parameter",
+            Res::Def(..) => "a definition",
+            Res::ConstraintOld(..) => "an old(...) reference in a constraint",
+            Res::ConstraintRet => "ret in a constraint",
+            Res::Enum(..) => "an enum",
+            Res::EnumVariant(..) => "an enum variant",
+            Res::Module(..) => "a module",
+        }
+    }
+}

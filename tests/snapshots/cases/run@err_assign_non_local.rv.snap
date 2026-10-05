@@ -1,0 +1,41 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_assign_non_local.rv
+---
+compile error:
+[1051] Error: cannot assign
+    ╭─[ tests/cases/err_assign_non_local.rv:14:5 ]
+    │
+ 14 │     p = 2;
+    │     ──┬──  
+    │       ╰──── attempted to assign to a parameter here
+    │ 
+    │ Help: did you mean to refer to a local variable?
+────╯
+[1051] Error: cannot assign
+    ╭─[ tests/cases/err_assign_non_local.rv:18:5 ]
+    │
+ 18 │     helper = 1;
+    │     ─────┬────  
+    │          ╰────── attempted to assign to a definition here
+    │ 
+    │ Help: did you mean to refer to a local variable?
+────╯
+[1051] Error: cannot assign
+    ╭─[ tests/cases/err_assign_non_local.rv:22:5 ]
+    │
+ 22 │     Direction = 1;
+    │     ──────┬──────  
+    │           ╰──────── attempted to assign to an enum here
+    │ 
+    │ Help: did you mean to refer to a local variable?
+────╯
+[1051] Error: cannot assign
+    ╭─[ tests/cases/err_assign_non_local.rv:26:5 ]
+    │
+ 26 │     math = 1;
+    │     ────┬───  
+    │         ╰───── attempted to assign to a module here
+    │ 
+    │ Help: did you mean to refer to a local variable?
+────╯

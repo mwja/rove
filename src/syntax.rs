@@ -349,11 +349,21 @@ mod grammar {
 
     pub enum Decl {
         Let(Spanned<LetDecl>),
+        Var(Spanned<VarDecl>),
     }
 
     pub struct LetDecl {
         #[rust_sitter::leaf(text = "let")]
         _l: (),
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = "=")]
+        _e: (),
+        pub expr: Box<Spanned<Expr>>,
+    }
+
+    pub struct VarDecl {
+        #[rust_sitter::leaf(text = "var")]
+        _v: (),
         pub name: Spanned<Ident>,
         #[rust_sitter::leaf(text = "=")]
         _e: (),
@@ -1124,12 +1134,11 @@ impl<'a> ProgramLowerer<'a> {
     /// Reports a path ending in `super` used where a value is expected, and
     /// returns a placeholder; lowering fails, so it is never seen.
     fn super_as_value(&mut self, node_id: NodeId, span: (usize, usize)) -> ast::AstExprKind {
-        self.errors.push(
-            Diagnostic::new("`super` is not a value").with_label(
+        self.errors
+            .push(Diagnostic::new("`super` is not a value").with_label(
                 "this refers to a module",
                 Span::from_span(self.source_file_id, span),
-            ),
-        );
+            ));
         ast::AstExprKind::Ident(ast::AstIdent {
             node_id,
             text: "super".to_owned(),
@@ -1317,12 +1326,22 @@ impl<'a> ProgramLowerer<'a> {
     fn lower_decl_kind(&mut self, decl: grammar::Decl) -> ast::AstDeclKind {
         match decl {
             grammar::Decl::Let(let_decl) => ast::AstDeclKind::Let(self.lower_let_decl(let_decl)),
+            grammar::Decl::Var(var_decl) => ast::AstDeclKind::Let(self.lower_var_decl(var_decl)),
+        }
+    }
+
+    fn lower_var_decl(&mut self, var_decl: Spanned<grammar::VarDecl>) -> ast::AstLetDecl {
+        ast::AstLetDecl {
+            name: self.lower_ident(var_decl.value.name),
+            mutable: true,
+            expr: Box::new(self.lower_expr(*var_decl.value.expr)),
         }
     }
 
     fn lower_let_decl(&mut self, let_decl: Spanned<grammar::LetDecl>) -> ast::AstLetDecl {
         ast::AstLetDecl {
             name: self.lower_ident(let_decl.value.name),
+            mutable: false,
             expr: Box::new(self.lower_expr(*let_decl.value.expr)),
         }
     }

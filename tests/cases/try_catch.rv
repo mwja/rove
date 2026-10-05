@@ -39,15 +39,15 @@ func main() {
     print describe(3);
 
     // `continue` and `break` from a catch reach the enclosing loop
-    let total = 0;
-    let i = 0;
+    var total = 0;
+    var i = 0;
     while i < 5 {
         i = i + 1;
         total = total + try stock(i) catch |err| { continue; };
     }
     print total;
 
-    let found = 0;
+    var found = 0;
     loop {
         found = found + 1;
         let units = try stock(found - 2) catch |err| { 0 };
