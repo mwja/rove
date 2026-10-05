@@ -66,13 +66,30 @@ impl ModuleCtxt {
         module_id: ModuleId,
         name: String,
         res: Res,
+        node_id: NodeId,
     ) -> Result<(), ResolverError> {
         let module_tree = self.tree.get_mut(&module_id).unwrap_or_else(|| {
             bug!("could not get module tree for module id on module tree building")
         });
+
+        if let Some(existing_node_id) = module_tree.node_ids.get(&name) {
+            return Err(ResolverError::DuplicateDefinition(
+                name,
+                module_id,
+                *existing_node_id,
+                node_id,
+            ));
+        }
+
         match module_tree.items.insert(name.clone(), res) {
-            Some(_) => Err(ResolverError::DuplicateDefinition(name, module_id)),
-            None => Ok(()),
+            Some(_) => bug!(
+                "attempted to insert item into module tree that already had an item with the same name (according to node ids)"
+            ),
+            None => {
+                module_tree.node_ids.insert(name, node_id);
+
+                Ok(())
+            }
         }
     }
 
@@ -98,7 +115,7 @@ impl ModuleCtxt {
                         errs.push(ResolverError::BareUseSuper(entry.path.clone().into()));
                         continue;
                     }
-                    pending.push((module_id, entry));
+                    pending.push((module_id, entry, entry.node_id));
                 }
             }
             queue.extend(&module.mods);
@@ -107,13 +124,15 @@ impl ModuleCtxt {
         loop {
             let mut resolved = Vec::new();
             let mut unresolved = Vec::new();
-            for (module_id, entry) in pending {
+            for (module_id, entry, node_id) in pending {
                 let module = self
                     .get_module(module_id)
                     .unwrap_or_else(|| bug!("could not get module for module id on alias filling"));
-                match module.resolve_path(entry.path.clone(), self, enums) {
-                    Ok(Some(res)) => resolved.push((module_id, entry.name().to_owned(), res)),
-                    _ => unresolved.push((module_id, entry)),
+                match module.resolve_path(entry.path.clone(), self, enums, node_id) {
+                    Ok(Some(res)) => {
+                        resolved.push((module_id, entry.name().to_owned(), res, node_id))
+                    }
+                    _ => unresolved.push((module_id, entry, node_id)),
                 }
             }
             pending = unresolved;
@@ -122,21 +141,24 @@ impl ModuleCtxt {
                 break;
             }
             // now we don't need to borrow module anymore, we can safely mutate self.
-            for (module_id, name, res) in resolved {
+            for (module_id, name, res, node_id) in resolved {
                 let _ = self
-                    .insert_item(module_id, name, res)
+                    .insert_item(module_id, name, res, node_id)
                     .map_err(|err| errs.push(err));
             }
         }
 
         // Anything left can't be resolved; resolve once more for the error.
-        for (module_id, entry) in pending {
+        for (module_id, entry, node_id) in pending {
             let module = self
                 .get_module(module_id)
                 .unwrap_or_else(|| bug!("could not get module for module id on alias filling"));
-            match module.resolve_path(entry.path.clone(), self, enums) {
+            match module.resolve_path(entry.path.clone(), self, enums, node_id) {
                 Ok(Some(_)) => bug!("use resolved after alias filling reached a fixpoint"),
-                Ok(None) => errs.push(ResolverError::CannotResolve(entry.path.clone().into())),
+                Ok(None) => errs.push(ResolverError::CannotResolve(
+                    entry.path.clone().into(),
+                    node_id,
+                )),
                 Err(err) => errs.push(err),
             }
         }
@@ -166,7 +188,7 @@ impl ModuleCtxt {
                 let res = Res::Module(inner_module_id);
 
                 let _ = self
-                    .insert_item(module_id, name.to_owned(), res)
+                    .insert_item(module_id, name.to_owned(), res, node_id)
                     .map_err(|err| errs.push(err));
                 queue.push_back((inner_module_id, module));
             }
@@ -183,7 +205,7 @@ impl ModuleCtxt {
                 };
 
                 let _ = self
-                    .insert_item(module_id, name.to_owned(), res)
+                    .insert_item(module_id, name.to_owned(), res, node_id)
                     .map_err(|err| errs.push(err));
             }
 
@@ -197,7 +219,7 @@ impl ModuleCtxt {
                 let res = Res::Enum(enum_id);
 
                 let _ = self
-                    .insert_item(module_id, name.to_owned(), res)
+                    .insert_item(module_id, name.to_owned(), res, node_id)
                     .map_err(|err| errs.push(err));
             }
         }
@@ -220,6 +242,8 @@ impl ModuleCtxt {
 pub struct ModuleTree {
     pub parent: Option<ModuleId>,
     pub name: String,
+    /// NodeID to the binding (so, the use statement, not the original definition.)
+    pub node_ids: HashMap<String, NodeId>,
     /// Not initially populated with data until the resolve pass occurs.
     pub items: HashMap<String, Res>,
 }
@@ -283,7 +307,7 @@ pub enum ResolverError {
     #[error("cannot imply a type from {0} (nor its members)")]
     CannotImplyTypeFrom(Path),
     #[error("cannot resolve {0}")]
-    CannotResolve(Path),
+    CannotResolve(Path, NodeId),
     #[error("cannot resolve variant {0} of enum {1}")]
     CannotResolveEnumVariant(String, Path),
     #[error("cannot resolve variant {0} of type {1}")]
@@ -291,8 +315,8 @@ pub enum ResolverError {
     CannotResolveVariantOfType(String, Ty),
     #[error("cannot imply {1} for type {0}")]
     CannotImplyTy(Ty, ImplicitPath),
-    #[error("duplicate definition of {0} in module {1}")]
-    DuplicateDefinition(String, ModuleId),
+    #[error("duplicate definition of {0}")]
+    DuplicateDefinition(String, ModuleId, NodeId, NodeId),
     #[error("super at the root level is invalid (there is nothing to resolve)")]
     SuperAtRootLevel,
     #[error("cannot import {0} without a name; use `{0} as <name>`")]
@@ -321,7 +345,33 @@ impl DiagnoseWith<NodeId> for ResolverError {
         recorder: &mut crate::sourcemap::SpanRecorder<NodeId>,
     ) -> Vec<Diagnostic> {
         let message = self.to_string();
-        vec![Diagnostic::new(message).with_code(Some(self.as_code()))]
+        match self {
+            ResolverError::DuplicateDefinition(
+                name,
+                _module,
+                original_def_node_id,
+                new_node_id,
+            ) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(Some(self.as_code()))
+                        .with_label_from(recorder, original_def_node_id, "original definition here")
+                        .with_label_from(
+                            recorder,
+                            new_node_id,
+                            format!("conflicting definition of same name here"),
+                        ),
+                ]
+            }
+            ResolverError::CannotResolve(path, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(Some(self.as_code()))
+                        .with_label_from(recorder, node_id, format!("cannot resolve {path} here")),
+                ]
+            }
+            _ => vec![Diagnostic::new(message).with_code(Some(self.as_code()))],
+        }
     }
 }
 
@@ -330,6 +380,7 @@ impl ModuleTree {
         Self {
             parent,
             name,
+            node_ids: HashMap::new(),
             items: HashMap::new(),
         }
     }
@@ -343,6 +394,7 @@ impl ModuleTree {
         path: impl Into<Path>,
         mcx: &ModuleCtxt,
         enums: &Enums,
+        node_id: NodeId,
     ) -> Result<Option<Res>, ResolverError> {
         let path = path.into();
         match path {
@@ -353,7 +405,8 @@ impl ModuleTree {
             Path::QualifiedSuper(base) => {
                 // lowering only permits `super` after another `super`, so the
                 // base always resolves to a module.
-                let Some(Res::Module(module_id)) = self.resolve_path(*base, mcx, enums)? else {
+                let Some(Res::Module(module_id)) = self.resolve_path(*base, mcx, enums, node_id)?
+                else {
                     bug!("base of a qualified super did not resolve to a module")
                 };
                 let module = mcx.get_module(module_id).unwrap_or_else(|| {
@@ -366,7 +419,7 @@ impl ModuleTree {
             }
             Path::Name(name) => Ok(self.resolve_name(&name)),
             Path::Qualified(base, path) => {
-                let Some(base_res) = self.resolve_path(*base.clone(), mcx, enums)? else {
+                let Some(base_res) = self.resolve_path(*base.clone(), mcx, enums, node_id)? else {
                     return Ok(None);
                 };
 
@@ -381,7 +434,7 @@ impl ModuleTree {
                     }
                     Res::Enum(enum_id) => {
                         let Some(enum_) = enums.get_enum(enum_id) else {
-                            return Err(ResolverError::CannotResolve(Path::Name(path)));
+                            return Err(ResolverError::CannotResolve(Path::Name(path), node_id));
                         };
 
                         match enum_.get_variant_by_name(&path) {
@@ -391,7 +444,7 @@ impl ModuleTree {
                     }
                     Res::Module(module_id) => {
                         let Some(module) = mcx.get_module(module_id) else {
-                            return Err(ResolverError::CannotResolve(Path::Name(path)));
+                            return Err(ResolverError::CannotResolve(Path::Name(path), node_id));
                         };
 
                         Ok(module.resolve_name(&path))

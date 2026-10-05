@@ -184,7 +184,7 @@ impl TyCtxt {
     ) -> Result<Option<Res>, TypeError> {
         let node_id = path.node_id();
         self.get_module_for_module_id(module_id)
-            .resolve_path(path, &self.mcx, &self.enums)
+            .resolve_path(path, &self.mcx, &self.enums, node_id)
             .map_err(|e| TypeError::PathResolutionError(node_id, e))
     }
 

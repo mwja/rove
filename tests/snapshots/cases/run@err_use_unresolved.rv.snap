@@ -3,7 +3,37 @@ source: tests/snapshots.rs
 input_file: tests/cases/err_use_unresolved.rv
 ---
 compile error:
-[3007] Error: duplicate definition of f in module 0
+[3007] Error: duplicate definition of f
+    ╭─[ tests/cases/err_use_unresolved.rv:12:1 ]
+    │
+ 12 │ ╭─▶ func f() -> int {
+    ┆ ┆   
+ 14 │ ├─▶ }
+    │ │       
+    │ ╰─────── original definition here
+    │ 
+ 16 │     use m::f; // clashes with the function `f` above
+    │            ┬  
+    │            ╰── conflicting definition of same name here
+────╯
 [3003] Error: cannot resolve nope::x
+   ╭─[ tests/cases/err_use_unresolved.rv:3:11 ]
+   │
+ 3 │ use nope::x; // no module `nope`
+   │           ┬  
+   │           ╰── cannot resolve nope::x here
+───╯
 [3003] Error: cannot resolve m::g
+    ╭─[ tests/cases/err_use_unresolved.rv:17:9 ]
+    │
+ 17 │ use m::{g}; // `m` has no `g`
+    │         ┬  
+    │         ╰── cannot resolve m::g here
+────╯
 [3003] Error: cannot resolve missing
+   ╭─[ tests/cases/err_use_unresolved.rv:6:7 ]
+   │
+ 6 │   use missing; // nothing called `missing` in `m`
+   │       ───┬───  
+   │          ╰───── cannot resolve missing here
+───╯
