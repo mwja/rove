@@ -629,13 +629,45 @@ impl Display for AstElseBranch {
 #[derive(Debug, Clone)]
 pub struct AstAssignStmt {
     pub node_id: NodeId,
-    pub name: AstIdent,
+    pub name: AstPlace,
     pub expr: Box<AstExpr>,
 }
 
 impl Display for AstAssignStmt {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{} = {}", self.name, self.expr)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum AstPlace {
+    Ident(AstIdent),
+    FieldAccess {
+        node_id: NodeId,
+        base: Box<AstPlace>,
+        field: AstIdent,
+    },
+}
+
+impl AstPlace {
+    pub fn node_id(&self) -> NodeId {
+        match self {
+            AstPlace::Ident(ident) => ident.node_id,
+            AstPlace::FieldAccess { node_id, .. } => *node_id,
+        }
+    }
+}
+
+impl Display for AstPlace {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AstPlace::Ident(ident) => write!(f, "{}", ident),
+            AstPlace::FieldAccess {
+                base,
+                field,
+                node_id: _node_id,
+            } => write!(f, "{}.{}", base, field),
+        }
     }
 }
 

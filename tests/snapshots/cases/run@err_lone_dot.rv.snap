@@ -4,9 +4,9 @@ input_file: tests/cases/err_lone_dot.rv
 ---
 compile error:
 Error: failed to parse
-   ╭─[ tests/cases/err_lone_dot.rv:3:13 ]
+   ╭─[ tests/cases/err_lone_dot.rv:3:5 ]
    │
  3 │     let a = .;
-   │             ┬  
-   │             ╰── did not expect . in this location
+   │     ─────┬────  
+   │          ╰────── error occured here
 ───╯

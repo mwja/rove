@@ -341,10 +341,20 @@ mod grammar {
     }
 
     pub struct AssignStmt {
-        pub name: Spanned<Ident>,
+        pub name: Spanned<Place>,
         #[rust_sitter::leaf(text = "=")]
         _e: (),
         pub expr: Box<Spanned<Expr>>,
+    }
+
+    pub enum Place {
+        Ident(Spanned<Ident>),
+        FieldAccess {
+            base: Box<Spanned<Place>>,
+            #[rust_sitter::leaf(text = ".")]
+            _dot: (),
+            field: Spanned<Ident>,
+        },
     }
 
     pub enum Decl {
@@ -1312,8 +1322,19 @@ impl<'a> ProgramLowerer<'a> {
     fn lower_assign_stmt(&mut self, assign: Spanned<grammar::AssignStmt>) -> ast::AstAssignStmt {
         ast::AstAssignStmt {
             node_id: self.next_id_spanned(assign.span),
-            name: self.lower_ident(assign.value.name),
+            name: self.lower_place(assign.value.name.value),
             expr: Box::new(self.lower_expr(*assign.value.expr)),
+        }
+    }
+
+    fn lower_place(&mut self, place: grammar::Place) -> ast::AstPlace {
+        match place {
+            grammar::Place::Ident(ident) => ast::AstPlace::Ident(self.lower_ident(ident)),
+            grammar::Place::FieldAccess { base, _dot, field } => ast::AstPlace::FieldAccess {
+                node_id: self.next_id_spanned(field.span),
+                base: Box::new(self.lower_place(base.value)),
+                field: self.lower_ident(field),
+            },
         }
     }
 

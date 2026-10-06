@@ -6,8 +6,8 @@ use super::*;
 use crate::{
     ast::{
         self, AstExpr, AstExprKind, AstForcedTryExpr, AstFunctionDef, AstGuardConstraint, AstIdent,
-        AstImplicitPathExpr, AstLetDecl, AstPath, AstPathExpr, AstRequireConstraint, AstStmtKind,
-        AstSwitchCase, AstSwitchCaseItem, AstSwitchElseCase, AstTryCatchExpr,
+        AstImplicitPathExpr, AstLetDecl, AstPath, AstPathExpr, AstPlace, AstRequireConstraint,
+        AstStmtKind, AstSwitchCase, AstSwitchCaseItem, AstSwitchElseCase, AstTryCatchExpr,
     },
     defs::{self, FuncSig},
     sourcemap::{DiagnoseWith, report::Diagnostic},
@@ -125,6 +125,8 @@ pub enum TypeError {
     NotMutable(NodeId, String),
     #[error("cannot assign")]
     CannotAssign(NodeId, Res),
+    #[error("value of type {0} has no field {1}")]
+    TypeHasNoField(Ty, String, NodeId),
 }
 
 impl TypeError {
@@ -182,6 +184,7 @@ impl TypeError {
             ControlFlowInConstraint(..) => Some(1049),
             NotMutable(..) => Some(1050),
             CannotAssign(..) => Some(1051),
+            TypeHasNoField(..) => Some(1052),
 
             PathResolutionError(_, err) => Some(err.as_code()),
         }
@@ -780,6 +783,17 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_help(Some("did you mean to refer to a local variable?")),
                 ]
             }
+            TypeHasNoField(ty, field_name, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("attempted to access field `{field_name}` of type {ty} here"),
+                        ),
+                ]
+            }
         }
     }
 }
@@ -1107,6 +1121,29 @@ impl<'c> TypeckCtxt<'c> {
                 s.get(name).cloned()
             })
             .or_else(|| self.tcx.resolve_single_path(name, self.module_id))
+    }
+
+    fn resolve_place(&self, place: &AstPlace) -> Result<Option<Res>, TypeError> {
+        match place {
+            AstPlace::Ident(ident) => Ok(self.resolve_local(&ident.text)),
+            AstPlace::FieldAccess {
+                base,
+                field,
+                node_id: _node_id,
+            } => {
+                let Some(base) = self.resolve_place(base)? else {
+                    return Ok(None);
+                };
+
+                Err(TypeError::TypeHasNoField(
+                    self.res_ty(&base).unwrap_or_else(|| {
+                        bug!("unable to get res type when reporting error on field access")
+                    }),
+                    field.text.clone(),
+                    place.node_id(),
+                ))
+            }
+        }
     }
 
     fn res_ty(&self, res: &Res) -> Option<Ty> {
@@ -1442,8 +1479,12 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
         }
         AstStmtKind::Assign(ass) => {
             let target = tccx
-                .resolve_local(&ass.name.text)
-                .ok_or_else(|| TypeError::CannotResolve(ass.name.text.clone(), ass.name.node_id))
+                .resolve_place(&ass.name)
+                .and_then(|r| {
+                    r.ok_or_else(|| {
+                        TypeError::CannotResolve(ass.name.to_string(), ass.name.node_id())
+                    })
+                })
                 .reported(tccx)?;
 
             typeck_assignment_local_mut(tccx, &target, ass).reported(tccx)?;
@@ -1510,7 +1551,7 @@ fn typeck_assignment_local_mut(
     match target {
         Res::Local(local_id) => {
             if !tccx.body.local_mut(*local_id).unwrap_or(false) {
-                return Err(TypeError::NotMutable(ass.node_id, ass.name.text.clone()));
+                return Err(TypeError::NotMutable(ass.node_id, ass.name.to_string()));
             }
         }
         _ => {
