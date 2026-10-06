@@ -1,0 +1,12 @@
+name = "Rove"
+grammar = "rove"
+path_suffixes = ["rv"]
+line_comments = ["// "]
+block_comment = ["/* ", " */"]
+tab_size = 4
+hard_tabs = false
+brackets = [
+    { start = "{", end = "}", close = true, newline = true },
+    { start = "(", end = ")", close = true, newline = false },
+    { start = "|", end = "|", close = false, newline = false },
+]

@@ -1,0 +1,29 @@
+// Tasks for working on Rove in Zed. `rove-main` tasks also appear on the run
+// button next to `func main` (see editors/zed/languages/rove/runnables.scm).
+[
+  {
+    "label": "rove: run $ZED_STEM",
+    "command": "cargo run -q -- \"$ZED_FILE\" -o \"/tmp/rove-$ZED_STEM\" && \"/tmp/rove-$ZED_STEM\"; echo \"[exit $?]\"",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "tags": ["rove-main"],
+    "reveal": "always",
+    "use_new_terminal": false,
+    "allow_concurrent_runs": false
+  },
+  {
+    "label": "rove: emit debug artifacts for $ZED_STEM",
+    "command": "cargo run -q -- \"$ZED_FILE\" -o \"/tmp/rove-$ZED_STEM\" --emit ast,typed,clif,opt-clif",
+    "cwd": "$ZED_WORKTREE_ROOT",
+    "tags": ["rove-main"]
+  },
+  {
+    "label": "rove: snapshot tests",
+    "command": "cargo test --test snapshots",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  },
+  {
+    "label": "rove: regenerate tree-sitter grammar",
+    "command": "editors/zed/sync-grammar.sh",
+    "cwd": "$ZED_WORKTREE_ROOT"
+  }
+]

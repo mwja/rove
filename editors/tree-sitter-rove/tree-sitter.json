@@ -1,0 +1,17 @@
+{
+  "grammars": [
+    {
+      "name": "rove",
+      "camelcase": "Rove",
+      "scope": "source.rove",
+      "path": ".",
+      "file-types": ["rv"],
+      "highlights": "queries/highlights.scm"
+    }
+  ],
+  "metadata": {
+    "version": "0.0.4",
+    "license": "MIT",
+    "description": "Rove grammar for tree-sitter, generated from the compiler's rust-sitter grammar"
+  }
+}

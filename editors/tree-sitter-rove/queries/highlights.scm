@@ -1,0 +1,1 @@
+../../zed/languages/rove/highlights.scm

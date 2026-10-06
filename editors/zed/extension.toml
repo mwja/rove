@@ -1,0 +1,16 @@
+id = "rove"
+name = "Rove"
+description = "Syntax highlighting for the Rove programming language."
+version = "0.0.4"
+schema_version = 1
+authors = ["Jacob MacKenzie"]
+repository = "https://github.com/mwja/rove"
+
+# The grammar is generated from src/syntax.rs into editors/tree-sitter-rove
+# (see editors/README.md).
+#
+# Local path for now so I don't have to push before testing :)
+[grammars.rove]
+repository = "file:///home/jacob/Documents/rove"
+rev = "0000000000000000000000000000000000000000"
+path = "editors/tree-sitter-rove"
