@@ -4,3 +4,6 @@
 examples/*
 !examples/*.rv
 !examples/*.rs
+
+# zed extension
+editors/**/*.wasm
