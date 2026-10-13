@@ -29,6 +29,12 @@ macro_rules! indexable_id {
     };
 }
 
+/// Example:
+/// ```no_run
+/// impl_next_id!(MyStruct.field -> MyId);
+/// // with custom function name
+/// impl_next_id!(MyStruct.field -> MyId, pub next_my_id);
+/// ```
 macro_rules! impl_next_id {
     ($struct:ident $(<$($lt:lifetime),+>)?.$field:ident -> $name:ident) => {
         impl$(<$($lt),+>)? $struct$(<$($lt),+>)? {

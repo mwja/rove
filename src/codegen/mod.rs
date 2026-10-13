@@ -3,6 +3,7 @@
 //! Currently just takes Ast as everything is a i64, will eventually
 //! take a ctxt with sidetables from a type pass.
 
+mod layout;
 mod repr;
 use cranelift::{
     codegen::{
@@ -1955,6 +1956,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             ),
             Res::Module(..) => bug!("attempted to resolve a module directly."),
             Res::Enum(..) => bug!("attempted to resolve an enum directly."),
+            Res::Struct(..) => bug!("attempted to resolve a struct directly."),
         }
     }
 
@@ -2155,7 +2157,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Bool
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
-                | TyKind::Enum(..) => {
+                | TyKind::Enum(..)
+                | TyKind::Struct(..) => {
                     unreachable!()
                 }
             },
@@ -2167,7 +2170,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Bool
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
-                | TyKind::Enum(..) => {
+                | TyKind::Enum(..)
+                | TyKind::Struct(..) => {
                     unreachable!()
                 }
             },
@@ -2179,7 +2183,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Bool
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
-                | TyKind::Enum(..) => {
+                | TyKind::Enum(..)
+                | TyKind::Struct(..) => {
                     unreachable!()
                 }
             },
@@ -2191,7 +2196,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Bool
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
-                | TyKind::Enum(..) => {
+                | TyKind::Enum(..)
+                | TyKind::Struct(..) => {
                     unreachable!()
                 }
             },
@@ -2245,6 +2251,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     TyKind::Func(_) => unreachable!(),
                     TyKind::Void | TyKind::Never => unreachable!(),
                     TyKind::FullFallible(_, _) => unreachable!(),
+                    TyKind::Struct(..) => unreachable!(),
                 }
             }
             ast::AstBinaryOperator::LAnd | ast::AstBinaryOperator::LOr => {
@@ -2256,11 +2263,6 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_unary_expr(&mut self, unary_expr: ast::AstUnaryExpr) -> Value {
-        let x_ty = self
-            .cx
-            .body
-            .node_ty(unary_expr.expr.node_id())
-            .unwrap_or_else(|| bug!("the operand of a unary expression has no type"));
         let x = self
             .lower_expr(*unary_expr.expr)
             .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
@@ -2278,7 +2280,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Bool
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
-                | TyKind::Enum(..) => {
+                | TyKind::Enum(..)
+                | TyKind::Struct(..) => {
                     bug!(
                         "tried to negate a non-numeric type at codegen (typeck failed to check it)"
                     )
@@ -2299,7 +2302,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Never
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
-                | TyKind::Enum(..) => {
+                | TyKind::Enum(..)
+                | TyKind::Struct(..) => {
                     bug!(
                         "tried to do logical or bitwise not on type at codegen (typeck failed to check it)"
                     )
@@ -2341,7 +2345,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             | TyKind::FullFallible(..)
             | TyKind::Func(..)
             | TyKind::Never
-            | TyKind::Void => {
+            | TyKind::Void
+            | TyKind::Struct(..) => {
                 bug!("attempted to lower literal of type")
             }
         }
@@ -2370,6 +2375,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             TyKind::Func(_) => unreachable!(),
             TyKind::FullFallible(_, _) => unreachable!(),
             TyKind::Bool => self.runtime.println_f64,
+            TyKind::Struct(_) => unreachable!(),
         });
         let _call = self.builder.ins().call(printf_ref, &[x]);
     }

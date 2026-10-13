@@ -7,7 +7,12 @@ use thiserror::Error;
 use crate::{
     ast::{self, NodeId},
     sourcemap::{DiagnoseWith, report::Diagnostic},
-    ty::{Ty, TyCtxt, TyKind, module::ModuleId, res::Res, typeck::TypeError},
+    ty::{
+        Ty, TyCtxt, TyKind,
+        module::ModuleId,
+        res::{ModuleContext, Res, TyResolutionError, resolve_type},
+        typeck::TypeError,
+    },
 };
 indexable_id!(pub DefId);
 
@@ -124,6 +129,12 @@ impl DefCtxt {
     }
 }
 
+impl ModuleContext for &DefCtxt {
+    fn module_id(&self) -> ModuleId {
+        self.module_id
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum DefError {
     #[error("duplicate definitions of {0}")]
@@ -134,6 +145,8 @@ pub enum DefError {
     PathNotFound(ast::AstPath, NodeId),
     #[error("the given named type is invalid as a type: {0}")]
     InvalidNamedType(String, NodeId),
+    #[error(transparent)]
+    TyResolutionError(#[from] TyResolutionError),
 }
 
 impl DefError {
@@ -144,6 +157,7 @@ impl DefError {
             TypeError(err) => err.as_code(),
             PathNotFound(_, _) => Some(2003),
             InvalidNamedType(_, _) => Some(2004),
+            TyResolutionError(err) => Some(err.as_code()),
         }
     }
 }
@@ -191,6 +205,7 @@ impl DiagnoseWith<NodeId> for DefError {
                         .with_label_from(recorder, node_id, format!("invalid named type: {name}")),
                 ]
             }
+            TyResolutionError(err) => err.diagnose_with(recorder),
         }
     }
 }
@@ -293,16 +308,16 @@ fn resolve_func(
     dcx: &mut DefCtxt,
     func: &ast::AstFunctionDef,
 ) -> Result<(), DefError> {
-    let return_ty = resolve_type(tcx, dcx, &func.return_ty)?;
+    let return_ty = resolve_type(tcx, &*dcx, &func.return_ty)?;
     let param_tys = func
         .args
         .iter()
-        .map(|p| resolve_type(tcx, dcx, &p.ty))
-        .collect::<Result<Vec<_>, DefError>>()?;
+        .map(|p| resolve_type(tcx, &*dcx, &p.ty))
+        .collect::<Result<Vec<_>, TyResolutionError>>()?;
     let throws_ty = func
         .throws
         .as_ref()
-        .map(|name| resolve_type(tcx, dcx, &name))
+        .map(|name| resolve_type(tcx, &*dcx, &name))
         .transpose()?;
 
     let sig = FuncSig {
@@ -320,31 +335,4 @@ fn resolve_func(
     );
 
     Ok(())
-}
-
-fn resolve_type(tcx: &TyCtxt, dcx: &mut DefCtxt, ty: &ast::AstType) -> Result<Ty, DefError> {
-    match ty {
-        ast::AstType::Float => Ok(tcx.float_ty()),
-        ast::AstType::Int => Ok(tcx.int_ty()),
-        ast::AstType::Void => Ok(tcx.void_ty()),
-        ast::AstType::Bool => Ok(tcx.bool_ty()),
-        ast::AstType::Path(path) => {
-            let Some(res) = tcx.resolve_path(path.clone(), dcx.module_id)? else {
-                return Err(DefError::PathNotFound(path.clone(), path.node_id()));
-            };
-
-            match res {
-                Res::Local(..)
-                | Res::ConstraintOld(..)
-                | Res::ConstraintRet
-                | Res::Param(..)
-                | Res::Def(..)
-                | Res::EnumVariant(..)
-                | Res::Module(..) => {
-                    Err(DefError::InvalidNamedType(path.to_string(), path.node_id()))
-                }
-                Res::Enum(enum_id) => Ok(tcx.ty(TyKind::Enum(enum_id))),
-            }
-        }
-    }
 }

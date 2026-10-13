@@ -222,6 +222,20 @@ impl ModuleCtxt {
                     .insert_item(module_id, name.to_owned(), res, node_id)
                     .map_err(|err| errs.push(err));
             }
+
+            for struct_ in &module.structs {
+                let node_id = struct_.node_id;
+                let def_id = def_ids.get(&node_id).copied().unwrap_or_else(|| {
+                    bug!("could not get def id for node id on module tree building")
+                });
+
+                let name = &struct_.name;
+                let res = Res::Def(def_id);
+
+                let _ = self
+                    .insert_item(module_id, name.to_owned(), res, node_id)
+                    .map_err(|err| errs.push(err));
+            }
         }
 
         if errs.is_empty() { Ok(()) } else { Err(errs) }
@@ -429,6 +443,7 @@ impl ModuleTree {
                     | Res::ConstraintRet
                     | Res::Param(..)
                     | Res::Def(..)
+                    | Res::Struct(..) // for now, struct's may later have static members
                     | Res::EnumVariant(..) => {
                         Err(ResolverError::HasNoNamespaceMembers(path, *base))
                     }
@@ -469,7 +484,8 @@ impl ModuleTree {
             | TyKind::Void
             | TyKind::Never
             | TyKind::Bool
-            | TyKind::Func(..) => return Err(ResolverError::CannotImplyTy(expected, path)),
+            | TyKind::Func(..)
+            | TyKind::Struct(..) => return Err(ResolverError::CannotImplyTy(expected, path)),
         };
 
         match base {

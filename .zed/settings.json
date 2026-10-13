@@ -1,0 +1,11 @@
+{
+  "lsp": {
+    "rust-analyzer": {
+      "initialization_options": {
+        "cargo": { "targetDir": true, "features": "all" },
+        "check": { "command": "clippy" }
+      }
+    }
+  },
+  "format_on_save": "on"
+}

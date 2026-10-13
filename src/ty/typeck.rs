@@ -127,6 +127,8 @@ pub enum TypeError {
     CannotAssign(NodeId, Res),
     #[error("value of type {0} has no field {1}")]
     TypeHasNoField(Ty, String, NodeId),
+    #[error("operator is not implemented on this type")]
+    OperatorNotImplementedOnType(Ty, ast::AstBinaryOperator, NodeId),
 }
 
 impl TypeError {
@@ -185,6 +187,7 @@ impl TypeError {
             NotMutable(..) => Some(1050),
             CannotAssign(..) => Some(1051),
             TypeHasNoField(..) => Some(1052),
+            OperatorNotImplementedOnType(..) => Some(1053),
 
             PathResolutionError(_, err) => Some(err.as_code()),
         }
@@ -794,6 +797,18 @@ impl DiagnoseWith<NodeId> for TypeError {
                         ),
                 ]
             }
+            OperatorNotImplementedOnType(ty, op, node) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node,
+                            format!("attempted to perform operator {} on type {ty} here", op),
+                        )
+                        .with_help(Some("this operator is not implemented for this type (and may not be implemented yet)")),
+                ]
+            }
         }
     }
 }
@@ -1160,6 +1175,7 @@ impl<'c> TypeckCtxt<'c> {
             Res::Param(param_id) => self.body.param_ty(*param_id),
             Res::Enum(enum_id) => Some(self.ty(TyKind::Enum(*enum_id))),
             Res::EnumVariant(enum_variant) => Some(self.ty(TyKind::Enum(enum_variant.enum_id()))),
+            Res::Struct(struct_id) => Some(self.ty(TyKind::Struct(*struct_id))),
             Res::Module(..) => None,
         }
     }
@@ -2490,15 +2506,8 @@ fn typeck_binary_expr(
         ));
     }
 
-    if *left.kind() == TyKind::Void {
-        return Err(TypeError::ExpressionOnVoid(
-            bin_expr.operator,
-            bin_expr.node_id,
-        ));
-    }
-
-    if matches!(*left.kind(), TyKind::Func(..)) {
-        return Err(TypeError::ExpressionOnFunc(
+    if !left.can_perform_operations() {
+        return Err(TypeError::OperatorNotImplementedOnType(
             left,
             bin_expr.operator,
             bin_expr.node_id,

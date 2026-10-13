@@ -1,0 +1,7 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/point.rv
+---
+exit: Some(0)
+--- stdout
+0

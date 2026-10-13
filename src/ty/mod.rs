@@ -5,6 +5,7 @@ use crate::{
     ast::{AstImplicitPathExpr, AstPath, AstPathExpr, NodeId},
     defs::{DefId, Defs, FuncSig},
     enums::{EnumId, Enums},
+    structs::{StructId, Structs},
     ty::{
         module::{ModuleCtxt, ModuleId, ModuleTree},
         res::Res,
@@ -52,6 +53,13 @@ impl Ty {
         !matches!(*self.kind, TyKind::Void | TyKind::Never)
     }
 
+    /// You may need to further check what operations, but this is a blanket
+    /// check for types that MAY implement operators at the compilation
+    /// level. Runtime operators are not yet planned.
+    pub fn can_perform_operations(&self) -> bool {
+        matches!(*self.kind, TyKind::Int | TyKind::Float | TyKind::Bool)
+    }
+
     /// Can a value of this type be used where `expected` is wanted, or is
     /// never. Like Rust's ! doesn't mess with inferrence
     pub fn coerces_to(&self, expected: &Ty) -> bool {
@@ -85,6 +93,8 @@ pub enum TyKind {
     FullFallible(Ty, Ty),
     /// Variant of the given enum
     Enum(EnumId),
+    /// Struct
+    Struct(StructId),
 }
 
 impl From<Ty> for Rc<TyKind> {
@@ -113,6 +123,7 @@ impl Display for TyKind {
             ),
             TyKind::FullFallible(ty, throws_ty) => write!(f, "{} (throws {})", ty, throws_ty),
             TyKind::Enum(enum_id) => write!(f, "enum_variant({})", enum_id),
+            TyKind::Struct(struct_id) => write!(f, "struct({})", struct_id),
         }
     }
 }
@@ -125,6 +136,7 @@ pub struct TyCtxt {
     /// Not initially populated with data until the resolve pass occurs.
     pub defs: Defs,
     pub enums: Enums,
+    pub structs: Structs,
     pub mcx: ModuleCtxt,
     pub entry_point: Option<DefId>,
 }
@@ -214,6 +226,7 @@ impl TyCtxt {
             bodies: HashMap::new(),
             defs: Defs::default(),
             enums: Enums::default(),
+            structs: Structs::default(),
             mcx: ModuleCtxt::default(),
             entry_point: None,
         }

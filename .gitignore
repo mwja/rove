@@ -7,3 +7,4 @@ examples/*
 
 # zed extension
 editors/**/*.wasm
+editors/zed/grammars/

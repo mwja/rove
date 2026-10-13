@@ -17,6 +17,7 @@ mod defs;
 mod enums;
 mod mangle;
 mod sourcemap;
+mod structs;
 mod syntax;
 mod ty;
 
@@ -71,11 +72,18 @@ pub fn compile(
     // Collect all modules and give each module node_id a corresponding module_id.
     ty_ctxt.mcx.collect_modules(&ast);
 
+    // resolve on enums (they depend on nothing else)
     enums::resolve(&ast, &mut ty_ctxt.enums)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
+    // declare structs (they depend on themselves and nothing else, but they need
+    // the module tree so we declare here, build the tree then define them).
+    structs::declare(&ast, &mut ty_ctxt.structs);
+
+    // Declare defs but no details about them
     let dcx =
         defs::declare(&ty_ctxt, &ast).map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
+
     // Fill each module's items now that every def has a `DefId`, so that
     // signatures can resolve their types through the module tree.
     ty_ctxt
@@ -89,9 +97,14 @@ pub fn compile(
         .fill_aliases(&ast, &ty_ctxt.enums)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
+    structs::define(&mut ty_ctxt, &ast)
+        .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
+
+    // Now define the defs with their param types.
     defs::define(&mut ty_ctxt, dcx, &ast)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
+    // Typeck everything now we have all details
     ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 

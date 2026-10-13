@@ -7,11 +7,54 @@ pub struct AstModule {
     pub name: String,
     pub defs: Vec<AstDef>,
     pub enums: Vec<AstEnumDef>,
+    pub structs: Vec<AstStructDef>,
     pub mods: Vec<AstModule>,
     pub uses: Vec<AstUseStmt>,
     pub node_id: NodeId,
     /// to be imported?
     pub is_shell: bool,
+}
+
+#[derive(Debug)]
+pub struct AstStructDef {
+    pub node_id: NodeId,
+    pub name: String,
+    pub fields: Vec<AstStructField>,
+}
+
+impl Display for AstStructDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "struct {} {{ {} }}",
+            self.name,
+            self.fields
+                .iter()
+                .map(|f| f.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+#[derive(Debug)]
+pub struct AstStructField {
+    pub node_id: NodeId,
+    pub mutable: bool,
+    pub name: String,
+    pub ty: AstType,
+}
+
+impl Display for AstStructField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} {}: {}",
+            if self.mutable { "var" } else { "let" },
+            self.name,
+            self.ty
+        )
+    }
 }
 
 #[derive(Debug)]

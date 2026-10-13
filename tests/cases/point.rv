@@ -1,0 +1,9 @@
+struct Point {
+    let x: int,
+    let y: int
+}
+
+
+func main() {
+    print 0;
+}

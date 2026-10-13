@@ -33,6 +33,7 @@ mod grammar {
         Function(Spanned<FunctionDef>),
         Enum(Spanned<EnumDef>),
         Module(Spanned<ModuleDef>),
+        Struct(Spanned<StructDef>),
         Use(Spanned<UseStmt>, #[rust_sitter::leaf(text = ";")] ()),
     }
 
@@ -81,9 +82,46 @@ mod grammar {
         pub body: Spanned<BlockStmt>,
     }
 
+    pub struct StructDef {
+        #[rust_sitter::leaf(text = "struct")]
+        _s: (),
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = "{")]
+        _l: (),
+        pub fields: Option<StructFieldList>,
+        #[rust_sitter::leaf(text = "}")]
+        _r: (),
+    }
+
+    pub enum MutabilityDecl {
+        #[rust_sitter::leaf(text = "let")]
+        Immutable,
+        #[rust_sitter::leaf(text = "var")]
+        Mutable,
+    }
+
     // Comma-separated lists, which permit a trailing comma. These are right
     // recursive (`item [, [list]]`) as tree-sitter can't otherwise decide
     // whether a comma is a separator or trailing with a single token lookahead.
+    pub struct StructFieldList {
+        pub head: Spanned<StructField>,
+        pub tail: Option<StructFieldListTail>,
+    }
+
+    pub struct StructField {
+        pub mutability: MutabilityDecl,
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = ":")]
+        _c: (),
+        pub ty: Spanned<Type>,
+    }
+
+    pub struct StructFieldListTail {
+        #[rust_sitter::leaf(text = ",")]
+        _c: (),
+        pub rest: Option<Box<StructFieldList>>,
+    }
+
     pub struct IdentList {
         pub head: Spanned<Ident>,
         pub tail: Option<IdentListTail>,
@@ -357,14 +395,8 @@ mod grammar {
         },
     }
 
-    pub enum Decl {
-        Let(Spanned<LetDecl>),
-        Var(Spanned<VarDecl>),
-    }
-
-    pub struct LetDecl {
-        #[rust_sitter::leaf(text = "let")]
-        _l: (),
+    pub struct Decl {
+        pub mutability: MutabilityDecl,
         pub name: Spanned<Ident>,
         #[rust_sitter::leaf(text = "=")]
         _e: (),
@@ -689,6 +721,17 @@ impl CommaList for grammar::UseTreeList {
     }
 }
 
+impl CommaList for grammar::StructFieldList {
+    type Item = Spanned<grammar::StructField>;
+
+    fn split(self) -> (Self::Item, Option<Self>) {
+        (
+            self.head,
+            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
+        )
+    }
+}
+
 trait FlattenList {
     type Item;
 
@@ -893,6 +936,7 @@ impl<'a> ProgramLowerer<'a> {
     ) -> ast::AstModule {
         let mut defs = Vec::new();
         let mut enums = Vec::new();
+        let mut structs = Vec::new();
         let mut modules = Vec::new();
         let mut uses = Vec::new();
 
@@ -900,6 +944,7 @@ impl<'a> ProgramLowerer<'a> {
             match def {
                 grammar::Def::Function(..) => defs.push(def),
                 grammar::Def::Enum(..) => enums.push(def),
+                grammar::Def::Struct(..) => structs.push(def),
                 grammar::Def::Module(..) => modules.push(def),
                 grammar::Def::Use(use_, _) => uses.push(use_),
             }
@@ -916,6 +961,10 @@ impl<'a> ProgramLowerer<'a> {
                 .into_iter()
                 .map(|def| self.lower_enum_def(def))
                 .collect(),
+            structs: structs
+                .into_iter()
+                .map(|def| self.lower_struct_def(def))
+                .collect(),
             uses: uses
                 .into_iter()
                 .map(|use_| self.lower_use_stmt(use_))
@@ -924,6 +973,33 @@ impl<'a> ProgramLowerer<'a> {
         };
 
         program
+    }
+
+    fn lower_struct_def(&mut self, def: grammar::Def) -> ast::AstStructDef {
+        let grammar::Def::Struct(struct_def) = def else {
+            unreachable!();
+        };
+
+        ast::AstStructDef {
+            node_id: self.next_id_spanned(struct_def.span),
+            name: struct_def.value.name.value.text.clone(),
+            fields: struct_def
+                .value
+                .fields
+                .flatten_list()
+                .into_iter()
+                .map(|field| self.lower_struct_field(field))
+                .collect(),
+        }
+    }
+
+    fn lower_struct_field(&mut self, field: Spanned<grammar::StructField>) -> ast::AstStructField {
+        ast::AstStructField {
+            node_id: self.next_id_spanned(field.span),
+            mutable: Self::is_mutable(field.value.mutability),
+            name: field.value.name.value.text.clone(),
+            ty: self.lower_type(Some(field.value.ty)),
+        }
     }
 
     fn lower_enum_def(&mut self, def: grammar::Def) -> ast::AstEnumDef {
@@ -1344,27 +1420,16 @@ impl<'a> ProgramLowerer<'a> {
         }
     }
 
+    fn is_mutable(mutability: grammar::MutabilityDecl) -> bool {
+        matches!(mutability, grammar::MutabilityDecl::Mutable)
+    }
+
     fn lower_decl_kind(&mut self, decl: grammar::Decl) -> ast::AstDeclKind {
-        match decl {
-            grammar::Decl::Let(let_decl) => ast::AstDeclKind::Let(self.lower_let_decl(let_decl)),
-            grammar::Decl::Var(var_decl) => ast::AstDeclKind::Let(self.lower_var_decl(var_decl)),
-        }
-    }
-
-    fn lower_var_decl(&mut self, var_decl: Spanned<grammar::VarDecl>) -> ast::AstLetDecl {
-        ast::AstLetDecl {
-            name: self.lower_ident(var_decl.value.name),
-            mutable: true,
-            expr: Box::new(self.lower_expr(*var_decl.value.expr)),
-        }
-    }
-
-    fn lower_let_decl(&mut self, let_decl: Spanned<grammar::LetDecl>) -> ast::AstLetDecl {
-        ast::AstLetDecl {
-            name: self.lower_ident(let_decl.value.name),
-            mutable: false,
-            expr: Box::new(self.lower_expr(*let_decl.value.expr)),
-        }
+        ast::AstDeclKind::Let(ast::AstLetDecl {
+            name: self.lower_ident(decl.name),
+            mutable: Self::is_mutable(decl.mutability),
+            expr: Box::new(self.lower_expr(*decl.expr)),
+        })
     }
 
     fn lower_expr(&mut self, expr: Spanned<grammar::Expr>) -> ast::AstExpr {
