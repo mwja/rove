@@ -88,7 +88,7 @@ pub fn compile(
     // signatures can resolve their types through the module tree.
     ty_ctxt
         .mcx
-        .build_tree(&ast, dcx.def_ids(), &ty_ctxt.enums)
+        .build_tree(&ast, dcx.def_ids(), &ty_ctxt.structs, &ty_ctxt.enums)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
 
     // and now fill in all 'uses' now we know where everything is.
@@ -228,4 +228,20 @@ macro_rules! compileq {
             }
         }
     }};
+}
+
+pub(crate) trait UnwrapBug<T> {
+    fn unwrap_bug(self, message: &str) -> T;
+}
+
+impl<T, E> UnwrapBug<T> for Result<T, E> {
+    fn unwrap_bug(self, message: &str) -> T {
+        self.unwrap_or_else(|_| bug!("{}", message))
+    }
+}
+
+impl<T> UnwrapBug<T> for Option<T> {
+    fn unwrap_bug(self, message: &str) -> T {
+        self.unwrap_or_else(|| bug!("{}", message))
+    }
 }

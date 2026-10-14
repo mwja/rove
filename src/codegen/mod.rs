@@ -10,8 +10,8 @@ use cranelift::{
         cfg_printer::CFGPrinter,
         ir::{
             AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTable, JumpTableData,
-            SigRef, Signature, SourceLoc, StackSlotData, StackSlotKind, TrapCode, Type,
-            UserExternalName, Value,
+            MemFlags, MemFlagsData, SigRef, Signature, SourceLoc, StackSlotData, StackSlotKind,
+            TrapCode, Type, UserExternalName, Value,
             condcodes::{FloatCC, IntCC},
             types,
         },
@@ -22,13 +22,17 @@ use cranelift::{
     module::{DataDescription, FuncId, Linkage, Module, default_libcall_names},
     object::{ObjectBuilder, ObjectModule},
 };
-use std::{collections::HashMap, error::Error, io::Write as _, path::PathBuf};
+use std::{collections::HashMap, error::Error, io::Write as _, path::PathBuf, rc::Rc};
 
 use crate::{
     ast::{self, AstDef, AstForcedTryExpr, NodeId},
-    codegen::repr::{Repr, ReprCx},
+    codegen::{
+        layout::{StructLayout, calculate_layout},
+        repr::{Repr, ReprCx},
+    },
     defs::{self, Def, DefKind, FuncSig},
     mangle,
+    structs::StructId,
     ty::{
         Ty, TyCtxt, TyKind,
         res::{LocalId, OldId, Res},
@@ -123,6 +127,9 @@ struct Runtime {
     abort_forced_try: FuncId,
     /// rt_start(ptr) -> i32
     start: FuncId,
+    // for now type info is never passed as I don't currently have rt_release, but once passed it'll be useful
+    /// rt_alloc(size: ptr, tinfo: ptr) -> ptr
+    alloc: FuncId,
 }
 
 impl Runtime {
@@ -203,6 +210,24 @@ impl Runtime {
 
                 module
                     .declare_function("rt_start", Linkage::Import, &start_sig)
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
+            },
+            alloc: {
+                let mut alloc_sig = module.make_signature();
+
+                alloc_sig
+                    .params
+                    .push(AbiParam::new(module.target_config().pointer_type()));
+                alloc_sig
+                    .params
+                    .push(AbiParam::new(module.target_config().pointer_type()));
+
+                alloc_sig
+                    .returns
+                    .push(AbiParam::new(module.target_config().pointer_type()));
+
+                module
+                    .declare_function("rt_alloc", Linkage::Import, &alloc_sig)
                     .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
             },
         }
@@ -460,6 +485,7 @@ fn define_module(
             old_values: HashMap::new(),
             cached_functions: HashMap::new(),
             cached_signatures: HashMap::new(),
+            cached_layouts: HashMap::new(),
             entry_block: block,
             success_landing_pad,
             failure_landing_pad,
@@ -562,6 +588,7 @@ struct CraneliftCodegen<'a, 'o> {
     old_values: HashMap<OldId, Operand>,
     cached_functions: HashMap<FuncId, FuncRef>,
     cached_signatures: HashMap<FuncSig, SigRef>,
+    cached_layouts: HashMap<StructId, Rc<StructLayout>>,
     // Used to retrieve parameters from the entry block (hence function)
     entry_block: Block,
     success_landing_pad: Block,
@@ -591,6 +618,24 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             Res::Local(local_id) => self.locals.get(local_id).copied(),
             _ => None,
         }
+    }
+
+    fn get_cached_layout(&mut self, struct_id: StructId) -> Rc<StructLayout> {
+        if let Some(layout) = self.cached_layouts.get(&struct_id) {
+            return layout.clone();
+        }
+
+        let struct_ = self
+            .cx
+            .tcx
+            .structs
+            .get_struct(struct_id)
+            .unwrap_or_else(|| bug!("unable to find struct for struct_id {struct_id:?}"));
+
+        let layout = calculate_layout(&self.rcx, struct_);
+        let rc_layout = Rc::new(layout);
+        self.cached_layouts.insert(struct_id, rc_layout.clone());
+        rc_layout
     }
 
     fn lower_sig_cached(&mut self, def_sig: FuncSig) -> SigRef {
@@ -1108,6 +1153,14 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             }
             (_, ast::AstExprKind::Unary(ast::AstUnaryExpr { expr, .. })) => {
                 self.lower_constraint_expr_olds(&expr);
+            }
+            (_, ast::AstExprKind::StructInit(struct_init)) => {
+                for field in struct_init.fields.iter() {
+                    self.lower_constraint_expr_olds(&field.expr);
+                }
+            }
+            (_, ast::AstExprKind::FieldAccess(field_access)) => {
+                self.lower_constraint_expr_olds(&field_access.base);
             }
             (
                 _,
@@ -1643,19 +1696,71 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
     fn lower_assign(&mut self, assign: ast::AstAssignStmt) {
         self.loc(&assign.node_id);
-        let target = self
-            .lookup_local(
-                &self
-                    .cx
-                    .body
-                    .node_res(assign.node_id)
-                    .unwrap_or_else(|| bug!("an assignment target has no resolution")),
-            )
-            .unwrap_or_else(|| bug!("an assignment target does not resolve to a local variable"));
+
         let value = self
             .lower_expr(*assign.expr)
             .expect_scalar("cannot store fallible types in variables (yet)");
+
+        let res = self
+            .cx
+            .body
+            .node_res(assign.name.node_id())
+            .unwrap_or_else(|| bug!("a place has no resolution"));
+
+        match res {
+            res @ Res::Local(_) => self.lower_simple_assign(res, value),
+            Res::Field {
+                base,
+                field,
+                struct_id,
+            } => self.lower_field_assign(*base, &field, struct_id, value),
+            Res::Param(..)
+            | Res::Def(..)
+            | Res::ConstraintOld(..)
+            | Res::ConstraintRet
+            | Res::Enum(..)
+            | Res::EnumVariant(..)
+            | Res::Struct(..)
+            | Res::StructField(..)
+            | Res::Module(..) => bug!("attempted to assign to non-assignable value"),
+        }
+    }
+
+    fn lower_simple_assign(&mut self, res: Res, value: Value) {
+        let target = self
+            .lookup_local(&res)
+            .unwrap_or_else(|| bug!("a place does not resolve to a local variable"));
         self.builder.def_var(target, value);
+    }
+
+    fn lower_field_assign(&mut self, base: Res, field: &str, struct_id: StructId, value: Value) {
+        // here...
+        let base = self.lower_value_res(base);
+        let struct_ = self
+            .cx
+            .tcx
+            .structs
+            .get_struct(struct_id)
+            .unwrap_or_else(|| bug!("unable to resolve struct id for field assignment"));
+
+        let layout = self.get_cached_layout(struct_id);
+        let idx = struct_.get_field_index(field).unwrap_or_else(|| {
+            bug!("unable to find field {} in struct {}", field, struct_.name);
+        });
+        let f = layout.fields.get(idx).unwrap_or_else(|| {
+            bug!(
+                "unable to find field {} in struct {} layout",
+                field,
+                struct_.name
+            );
+        });
+
+        self.builder.ins().store(
+            MemFlagsData::new(),
+            value,
+            base.expect_scalar("must be scalar to store into field"),
+            f.offset as i32,
+        );
     }
 
     fn lower_decl(&mut self, decl: ast::AstDecl) {
@@ -1741,7 +1846,75 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.lower_fallthrough_stmt();
                 Operand::Empty
             }
+            ast::AstExprKind::StructInit(struct_init) => self.lower_struct_init(struct_init),
+            ast::AstExprKind::FieldAccess(field_access) => self.lower_field_access(field_access),
         }
+    }
+
+    fn lower_field_access(&mut self, field_access: ast::AstFieldAccessExpr) -> Operand {
+        let base_ty = self
+            .cx
+            .body
+            .node_ty(field_access.base.node_id())
+            .unwrap_or_else(|| bug!("a field access base has no type"));
+        let TyKind::Struct(struct_id) = *base_ty.kind() else {
+            bug!("a field access base is not a struct");
+        };
+
+        let base = self.lower_expr(*field_access.base);
+        self.lower_field_value_access(base, field_access.field.text, struct_id)
+    }
+
+    fn lower_struct_init(&mut self, struct_init: ast::AstStructInitExpr) -> Operand {
+        let Some(Res::Struct(struct_id)) = self.cx.body.node_res(struct_init.path.node_id()) else {
+            bug!("a struct init expression has no resolution (or its resolution is not a struct)");
+        };
+
+        let struct_ = self
+            .cx
+            .tcx
+            .structs
+            .get_struct(struct_id)
+            .unwrap_or_else(|| {
+                bug!("unable to resolve struct id for init lowering");
+            });
+
+        let layout = calculate_layout(&self.rcx, struct_);
+        let ptr_ty = self.module.target_config().pointer_type();
+        let size = self.builder.ins().iconst(ptr_ty, layout.total_size as i64);
+        let tinfo = self.builder.ins().iconst(ptr_ty, 0); // real TypeInfo when I have rt_release and ARC
+        let func = self.get_or_cache_function(self.runtime.alloc);
+        let call = self.builder.ins().call(func, &[size, tinfo]);
+        let obj = self.builder.inst_results(call)[0];
+
+        let vals = struct_init
+            .fields
+            .into_iter()
+            .map(|field| {
+                let idx = struct_
+                    .fields
+                    .iter()
+                    .position(|f| f.name == field.name)
+                    .unwrap_or_else(|| {
+                        bug!(
+                            "unable to find field {} in struct {}",
+                            field.name,
+                            struct_.name
+                        );
+                    });
+                let v = self.lower_expr(*field.expr);
+                (idx, v.expect_scalar("struct fields must be scalar"))
+            })
+            .collect::<Vec<_>>();
+
+        for (idx, v) in vals {
+            let f = &layout.fields[idx];
+            self.builder
+                .ins()
+                .store(MemFlagsData::trusted(), v, obj, f.offset as i32);
+        }
+
+        Operand::Scalar(obj)
     }
 
     /// Lowers a throwing call, splitting its result into (success, error).
@@ -1916,7 +2089,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     self.cx
                         .def_id_to_function_id(def_id)
                         .unwrap_or_else(|| bug!("a function def_id has no cranelift function id")),
-                    &mut self.builder.func,
+                    self.builder.func,
                 );
                 let def = self
                     .cx
@@ -1954,9 +2127,59 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     .ins()
                     .iconst(types::I64, enum_variant.as_u32() as i64),
             ),
+            Res::Field {
+                base,
+                field,
+                struct_id,
+            } => {
+                let base = self.lower_value_res(*base);
+
+                self.lower_field_value_access(base, field, struct_id)
+            }
             Res::Module(..) => bug!("attempted to resolve a module directly."),
             Res::Enum(..) => bug!("attempted to resolve an enum directly."),
             Res::Struct(..) => bug!("attempted to resolve a struct directly."),
+            Res::StructField(..) => bug!("attempted to resolve a struct field directly."),
+        }
+    }
+
+    fn lower_field_value_access(
+        &mut self,
+        base: Operand,
+        field: String,
+        struct_id: StructId,
+    ) -> Operand {
+        let struct_ = self
+            .cx
+            .tcx
+            .structs
+            .get_struct(struct_id)
+            .unwrap_or_else(|| {
+                bug!("unable to resolve struct id for field access lowering");
+            });
+
+        let layout = self.get_cached_layout(struct_id);
+        let idx = struct_
+            .fields
+            .iter()
+            .position(|f| f.name == field)
+            .unwrap_or_else(|| {
+                bug!("unable to find field {} in struct {}", field, struct_.name);
+            });
+        let f = &layout.fields[idx];
+
+        match base {
+            Operand::Scalar(base_val) => {
+                let v = self.builder.ins().load(
+                    f.ty,
+                    MemFlagsData::trusted(),
+                    base_val,
+                    f.offset as i32,
+                );
+
+                Operand::Scalar(v)
+            }
+            _ => bug!("field access base must be a scalar"),
         }
     }
 

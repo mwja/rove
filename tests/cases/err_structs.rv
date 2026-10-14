@@ -1,0 +1,31 @@
+// Each statement in main contains one struct error; all should be reported.
+struct Point {
+    var x: int,
+    let y: int
+}
+
+enum Colour {
+    Red,
+    Blue
+}
+
+func main() {
+    var missing = Point.{ x = 1 };
+    var duplicate = Point.{ x = 1, x = 2, y = 3 };
+    var unknown = Point.{ x = 1, y = 2, z = 3 };
+    var wrong_type = Point.{ x = true, y = 2 };
+
+    let fixed = Point.{ x = 1, y = 2 };
+    fixed.x = 2;
+
+    var p = Point.{ x = 1, y = 2 };
+    p.y = 2;
+    p.x = true;
+    print p.z;
+    print p.x.y;
+
+    var a = 1;
+    a = true;
+
+    let c = Colour::Red + Colour::Blue;
+}

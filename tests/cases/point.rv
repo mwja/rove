@@ -1,9 +1,37 @@
+// Struct init, field reads and field assignment.
+// Expected output: 0, 3, 5, 4, 7
 struct Point {
-    let x: int,
+    var x: int,
     let y: int
 }
 
+struct Line {
+    var start: Point,
+    let end: Point
+}
+
+func add(left: Point, right: Point) -> Point {
+    return Point.{
+        x = left.x + right.x,
+        y = left.y + right.y
+    };
+}
 
 func main() {
-    print 0;
+    var zero = Point.{
+        x = 0,
+        y = 0
+    };
+    print zero.x;
+
+    zero.x = 3;
+    print zero.x;
+
+    let sum = add(zero, Point.{ y = 5, x = 1 });
+    print sum.y;
+    print sum.x;
+
+    var line = Line.{ start = zero, end = sum };
+    line.start.x = line.end.y + 2;
+    print line.start.x;
 }

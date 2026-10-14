@@ -4,16 +4,19 @@ use thiserror::Error;
 
 use super::*;
 use crate::{
+    UnwrapBug,
     ast::{
         self, AstExpr, AstExprKind, AstForcedTryExpr, AstFunctionDef, AstGuardConstraint, AstIdent,
         AstImplicitPathExpr, AstLetDecl, AstPath, AstPathExpr, AstPlace, AstRequireConstraint,
-        AstStmtKind, AstSwitchCase, AstSwitchCaseItem, AstSwitchElseCase, AstTryCatchExpr,
+        AstStmtKind, AstStructInitExpr, AstStructInitField, AstSwitchCase, AstSwitchCaseItem,
+        AstSwitchElseCase, AstTryCatchExpr,
     },
     defs::{self, FuncSig},
     sourcemap::{DiagnoseWith, report::Diagnostic},
+    structs::Struct,
     ty::{
         module::{ModuleId, ResolverError},
-        res::{LocalId, OldId, ParamId, Res},
+        res::{LocalId, OldId, ParamId, Res, resolve_type},
     },
 };
 
@@ -129,6 +132,14 @@ pub enum TypeError {
     TypeHasNoField(Ty, String, NodeId),
     #[error("operator is not implemented on this type")]
     OperatorNotImplementedOnType(Ty, ast::AstBinaryOperator, NodeId),
+    #[error("struct field {0} not found")]
+    StructFieldNotFound(String, NodeId),
+    #[error("attempted to use non-struct as a struct constructor")]
+    AttemptedToUseNonStructAsConstructor(NodeId),
+    #[error("struct field {0} is initialised more than once")]
+    DuplicateStructInitField(String, NodeId, NodeId),
+    #[error("missing struct fields: {}", .0.join(", "))]
+    MissingStructInitFields(Vec<String>, NodeId),
 }
 
 impl TypeError {
@@ -188,6 +199,10 @@ impl TypeError {
             CannotAssign(..) => Some(1051),
             TypeHasNoField(..) => Some(1052),
             OperatorNotImplementedOnType(..) => Some(1053),
+            StructFieldNotFound(..) => Some(1054),
+            AttemptedToUseNonStructAsConstructor(..) => Some(1055),
+            DuplicateStructInitField(..) => Some(1056),
+            MissingStructInitFields(..) => Some(1057),
 
             PathResolutionError(_, err) => Some(err.as_code()),
         }
@@ -809,6 +824,61 @@ impl DiagnoseWith<NodeId> for TypeError {
                         .with_help(Some("this operator is not implemented for this type (and may not be implemented yet)")),
                 ]
             }
+            StructFieldNotFound(field_name, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("attempted to access field `{field_name}` of a struct here"),
+                        )
+                        .with_help(Some("this field does not exist on this struct")),
+                ]
+            }
+            AttemptedToUseNonStructAsConstructor(node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            "attempted to use a non-struct as a struct constructor here",
+                        )
+                        .with_help(Some("did you mean to use a struct type here?")),
+                ]
+            }
+            DuplicateStructInitField(field_name, first, duplicate) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            first,
+                            format!("`{field_name}` is first initialised here"),
+                        )
+                        .with_label_from(recorder, duplicate, "and initialised again here"),
+                ]
+            }
+            MissingStructInitFields(fields, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(self.as_code())
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!(
+                                "this struct is missing {}",
+                                fields
+                                    .iter()
+                                    .map(|f| format!("`{f}`"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ")
+                            ),
+                        )
+                        .with_help(Some("every field must be given a value")),
+                ]
+            }
         }
     }
 }
@@ -1138,27 +1208,47 @@ impl<'c> TypeckCtxt<'c> {
             .or_else(|| self.tcx.resolve_single_path(name, self.module_id))
     }
 
-    fn resolve_place(&self, place: &AstPlace) -> Result<Option<Res>, TypeError> {
-        match place {
+    fn resolve_place(&mut self, place: &AstPlace) -> Result<Option<Res>, TypeError> {
+        let res = match place {
             AstPlace::Ident(ident) => Ok(self.resolve_local(&ident.text)),
             AstPlace::FieldAccess {
                 base,
                 field,
                 node_id: _node_id,
             } => {
-                let Some(base) = self.resolve_place(base)? else {
+                // TODO: resolve local, get its type, check that it's a struct, then get fields.
+                // new res likely needed (StructLocal or smth)
+                let Some(base_res) = self.resolve_place(base)? else {
                     return Ok(None);
                 };
 
-                Err(TypeError::TypeHasNoField(
-                    self.res_ty(&base).unwrap_or_else(|| {
-                        bug!("unable to get res type when reporting error on field access")
-                    }),
-                    field.text.clone(),
-                    place.node_id(),
-                ))
+                let ty = self.res_ty(&base_res).and_then(|ty| match ty.kind() {
+                    TyKind::Struct(struct_id) => Some(*struct_id),
+                    _ => None,
+                });
+
+                match ty {
+                    Some(struct_id) => Ok(Some(Res::Field {
+                        base: Box::new(base_res),
+                        field: field.text.clone(),
+                        struct_id,
+                    })),
+                    None => Err(TypeError::TypeHasNoField(
+                        self.res_ty(&base_res).unwrap_or_else(|| {
+                            bug!("unable to get res type when reporting error on field access")
+                        }),
+                        field.text.clone(),
+                        place.node_id(),
+                    )),
+                }
             }
+        };
+
+        if let Ok(Some(res)) = &res {
+            self.body.set_node_res(place.node_id(), res.clone());
         }
+
+        res
     }
 
     fn res_ty(&self, res: &Res) -> Option<Ty> {
@@ -1176,6 +1266,24 @@ impl<'c> TypeckCtxt<'c> {
             Res::Enum(enum_id) => Some(self.ty(TyKind::Enum(*enum_id))),
             Res::EnumVariant(enum_variant) => Some(self.ty(TyKind::Enum(enum_variant.enum_id()))),
             Res::Struct(struct_id) => Some(self.ty(TyKind::Struct(*struct_id))),
+            Res::StructField(struct_id, field_name) => {
+                let struct_ = self
+                    .tcx
+                    .structs
+                    .get_struct(*struct_id)
+                    .unwrap_bug("failed to get struct");
+
+                let field = struct_
+                    .get_field(&field_name)
+                    .unwrap_bug("resolved to field on struct that doesn't exist");
+
+                Some(field.ty.clone())
+            }
+            Res::Field {
+                base: _base,
+                field,
+                struct_id,
+            } => self.tcx.struct_field_type(*struct_id, field),
             Res::Module(..) => None,
         }
     }
@@ -1504,11 +1612,24 @@ fn typeck_stmt(tccx: &mut TypeckCtxt, stmt: &ast::AstStmt) -> Result<(), ()> {
                 .reported(tccx)?;
 
             typeck_assignment_local_mut(tccx, &target, ass).reported(tccx)?;
-            tccx.body.set_node_res(ass.node_id, target);
-            let ty = typeck_value_expr(tccx, &ass.expr).reported(tccx)?;
+            let target_ty = tccx
+                .res_ty(&target)
+                .unwrap_or_else(|| bug!("an assignable place has no type"));
+            let ty = tccx
+                .with_inferrable(&target_ty, |tccx| typeck_value_expr(tccx, &ass.expr))
+                .reported(tccx)?;
             if ty.is_fallible() {
                 return Err(TypeError::FallibleTypesNotYetStored(ass.expr.node_id()))
                     .reported(tccx);
+            }
+            if !ty.coerces_to(&target_ty) {
+                return Err(TypeError::IncompatibleTypes(
+                    ty,
+                    target_ty,
+                    ass.expr.node_id(),
+                    ass.name.node_id(),
+                ))
+                .reported(tccx);
             }
         }
         AstStmtKind::Print(stmt) => {
@@ -1564,14 +1685,36 @@ fn typeck_assignment_local_mut(
     target: &Res,
     ass: &ast::AstAssignStmt,
 ) -> Result<(), TypeError> {
-    match target {
+    // A field can only be assigned through `var` fields, all the way back to a
+    // `var` local.
+    let mut root = target;
+    while let Res::Field {
+        base,
+        field,
+        struct_id,
+    } = root
+    {
+        let mutable = tccx
+            .tcx
+            .structs
+            .get_struct(*struct_id)
+            .and_then(|struct_| struct_.get_field(field))
+            .unwrap_bug("resolved to field on struct that doesn't exist")
+            .mutable;
+        if !mutable {
+            return Err(TypeError::NotMutable(ass.node_id, ass.name.to_string()));
+        }
+        root = base;
+    }
+
+    match root {
         Res::Local(local_id) => {
             if !tccx.body.local_mut(*local_id).unwrap_or(false) {
                 return Err(TypeError::NotMutable(ass.node_id, ass.name.to_string()));
             }
         }
         _ => {
-            return Err(TypeError::CannotAssign(ass.node_id, target.clone()));
+            return Err(TypeError::CannotAssign(ass.node_id, root.clone()));
         }
     }
 
@@ -2207,6 +2350,10 @@ fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<Ty, TypeErr
         (None, ast::AstExprKind::Fallthrough(fallthrough_expr)) => {
             typeck_fallthrough(tccx, fallthrough_expr).map(|()| tccx.ty(TyKind::Never))
         }
+        (None, ast::AstExprKind::StructInit(struct_)) => typeck_struct_init_expr(tccx, struct_),
+        (None, ast::AstExprKind::FieldAccess(field_access)) => {
+            typeck_field_access_expr(tccx, field_access)
+        }
     }?;
 
     tccx.body.set_node_ty(expr.node_id(), ty.clone());
@@ -2220,6 +2367,127 @@ where
     F: FnOnce(&mut TypeckCtxt) -> Result<Ty, ()>,
 {
     typeck(tccx).unwrap_or_else(|()| tccx.ty(TyKind::Never))
+}
+
+fn typeck_struct_init_expr(
+    tccx: &mut TypeckCtxt,
+    struct_init_expr: &AstStructInitExpr,
+) -> Result<Ty, TypeError> {
+    let Some(res) = tccx
+        .tcx
+        .resolve_path(struct_init_expr.path.clone(), tccx.module_id)?
+    else {
+        return Err(TypeError::UnresolvableType(
+            struct_init_expr.path.to_string(),
+            struct_init_expr.node_id,
+        ));
+    };
+
+    let Res::Struct(struct_id) = res else {
+        return Err(TypeError::UnresolvableType(
+            struct_init_expr.path.to_string(),
+            struct_init_expr.node_id,
+        ));
+    };
+
+    tccx.body
+        .set_node_res(struct_init_expr.path.node_id(), Res::Struct(struct_id));
+
+    // Fields are checked independently, so one bad field doesn't hide the rest.
+    let mut seen: HashMap<&str, NodeId> = HashMap::new();
+    for field in &struct_init_expr.fields {
+        if let Some(first) = seen.get(field.name.as_str()) {
+            let _ = Err::<(), _>(TypeError::DuplicateStructInitField(
+                field.name.clone(),
+                *first,
+                field.node_id,
+            ))
+            .reported(tccx);
+            continue;
+        }
+        seen.insert(&field.name, field.node_id);
+        let _ = typeck_struct_init_field(tccx, struct_id, field).reported(tccx);
+    }
+
+    let missing = tccx
+        .tcx
+        .structs
+        .get_struct(struct_id)
+        .unwrap_bug("failed to get struct with struct id")
+        .fields
+        .iter()
+        .filter(|field| !seen.contains_key(field.name.as_str()))
+        .map(|field| field.name.clone())
+        .collect::<Vec<_>>();
+    if !missing.is_empty() {
+        return Err(TypeError::MissingStructInitFields(
+            missing,
+            struct_init_expr.node_id,
+        ));
+    }
+
+    Ok(tccx.ty(TyKind::Struct(struct_id)))
+}
+
+fn typeck_field_access_expr(
+    tccx: &mut TypeckCtxt,
+    field_access: &ast::AstFieldAccessExpr,
+) -> Result<Ty, TypeError> {
+    let base_ty = typeck_value_expr(tccx, &field_access.base)?;
+    // The base already reported an error.
+    if *base_ty.kind() == TyKind::Never {
+        return Ok(base_ty);
+    }
+
+    let field_ty = match base_ty.kind() {
+        TyKind::Struct(struct_id) => tccx
+            .tcx
+            .struct_field_type(*struct_id, &field_access.field.text),
+        _ => None,
+    };
+
+    field_ty.ok_or_else(|| {
+        TypeError::TypeHasNoField(
+            base_ty.clone(),
+            field_access.field.text.clone(),
+            field_access.node_id,
+        )
+    })
+}
+
+fn typeck_struct_init_field(
+    tccx: &mut TypeckCtxt,
+    struct_id: StructId,
+    field: &AstStructInitField,
+) -> Result<(), TypeError> {
+    let struct_ = tccx
+        .tcx
+        .structs
+        .get_struct(struct_id)
+        .unwrap_bug("failed to get struct with struct id");
+
+    let field_ty = struct_
+        .get_field(&field.name)
+        .ok_or_else(|| TypeError::StructFieldNotFound(field.name.clone(), field.node_id))?
+        .ty
+        .clone();
+
+    tccx.body.set_node_res(
+        field.node_id,
+        Res::StructField(struct_id, field.name.clone()),
+    );
+
+    let expr_ty = typeck_value_expr(tccx, &field.expr)?;
+    if !expr_ty.coerces_to(&field_ty) {
+        return Err(TypeError::IncompatibleTypes(
+            expr_ty,
+            field_ty,
+            field.expr.node_id(),
+            field.node_id,
+        ));
+    }
+
+    Ok(())
 }
 
 fn typeck_forced_try_expr(
@@ -2515,6 +2783,16 @@ fn typeck_binary_expr(
     }
 
     match &bin_expr.operator {
+        // Enums only compare for equality.
+        op if matches!(left.kind(), TyKind::Enum(..))
+            && !matches!(op, ast::AstBinaryOperator::Eq | ast::AstBinaryOperator::Ne) =>
+        {
+            Err(TypeError::OperatorNotImplementedOnType(
+                left,
+                *op,
+                bin_expr.node_id,
+            ))
+        }
         ast::AstBinaryOperator::Add
         | ast::AstBinaryOperator::Sub
         | ast::AstBinaryOperator::Mul
@@ -2602,6 +2880,8 @@ fn expr_diverges(expr: &ast::AstExpr, loops_with_breaks: &HashSet<NodeId>) -> Di
         AstExprKind::If(s) => if_diverges(s, loops_with_breaks),
         AstExprKind::Loop(l) => loop_diverges(l, loops_with_breaks),
         AstExprKind::Switch(s) => switch_diverges(s, loops_with_breaks),
+        AstExprKind::StructInit(s) => struct_init_diverges(s, loops_with_breaks),
+        AstExprKind::FieldAccess(f) => expr_diverges(&f.base, loops_with_breaks),
 
         // Compiler isn't yet smart enough to check this.
         AstExprKind::While(_)
@@ -2615,6 +2895,19 @@ fn expr_diverges(expr: &ast::AstExpr, loops_with_breaks: &HashSet<NodeId>) -> Di
         | AstExprKind::ForcedTry(_)
         | AstExprKind::TryCatch(_) => Diverges::never(),
     }
+}
+
+fn struct_init_diverges(
+    struct_init: &ast::AstStructInitExpr,
+    loops_with_breaks: &HashSet<NodeId>,
+) -> Diverges {
+    // Fields are evaluated in order, so the first one that diverges does.
+    struct_init
+        .fields
+        .iter()
+        .map(|field| expr_diverges(&field.expr, loops_with_breaks))
+        .find(|diverges| diverges.0)
+        .unwrap_or_else(Diverges::never)
 }
 
 fn switch_diverges(switch_: &ast::AstSwitchStmt, loops_with_breaks: &HashSet<NodeId>) -> Diverges {

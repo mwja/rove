@@ -1,4 +1,4 @@
- use std::collections::HashMap;
+use std::collections::HashMap;
 
 use thiserror::Error;
 
@@ -16,6 +16,7 @@ indexable_id!(pub StructId);
 #[derive(Debug, Clone)]
 pub struct StructField {
     pub name: String,
+    pub mutable: bool,
     pub ty: Ty,
 }
 
@@ -24,6 +25,16 @@ pub struct Struct {
     pub id: StructId,
     pub name: String,
     pub fields: Vec<StructField>,
+}
+
+impl Struct {
+    pub fn get_field(&self, name: &str) -> Option<&StructField> {
+        self.fields.iter().find(|field| field.name == name)
+    }
+
+    pub fn get_field_index(&self, name: &str) -> Option<usize> {
+        self.fields.iter().position(|field| field.name == name)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -130,6 +141,7 @@ pub fn define(tcx: &mut TyCtxt, ast: &ast::AstModule) -> Result<(), Vec<StructEr
 
             fields.push(StructField {
                 name: field.name.clone(),
+                mutable: field.mutable,
                 ty,
             });
         }

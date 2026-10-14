@@ -2,7 +2,6 @@
 
 ![last version](https://img.shields.io/github/v/tag/mwja/rove?sort=semver&label=latest%20version) ![last commit](https://img.shields.io/github/last-commit/mwja/rove) [![tests](https://github.com/mwja/rove/actions/workflows/tests.yml/badge.svg?branch=main)](https://github.com/mwja/rove/actions/workflows/tests.yml)
 
-
 A less ambitious project for a compiled language.
 
 **Why 'Rove'?**
@@ -22,12 +21,14 @@ See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The
 
 ## Steps towards full language-hood
 
-🏷️ *v0.0.1*
+🏷️ _v0.0.1_
+
 - [x] Type checker
 - [x] Functions
 - [x] If/else
 
-🏷️ *v0.0.2* 
+🏷️ _v0.0.2_
+
 - [x] Loops
 - [x] Constraints (guard, require, ensure)
 - [x] Enums
@@ -40,33 +41,38 @@ See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The
 - [x] `guard` inside the function body
   - [x] e.g. `guard x > 0 else { return 0 }`, or `guard x > 0 else ::BiggerThanZero`
 
-🏷️ *v0.0.3* 
+🏷️ _v0.0.3_
 
 - [x] `module X` and `module Y {}`
 - [x] Real booleans
 - [x] Unary operators
 - [x] Fix float division (int/int should produce an int, truncated. not a float)
 
-🏷️ *v0.0.4* 
+🏷️ _v0.0.4_
+
 - [x] `&&` and `||` with shortcircuiting.
 - [x] `use X::*`, `use X::{X, Y}`
 - [x] Make all statements expressions (e.g. `if` and `switch` should return a value)
 
-🏷️ *v0.0.5* 
-- [ ] Structs (with heap alloc)
-    - [ ] Field access
+🏷️ _v0.0.5_
+
+- [x] Structs (with heap alloc)
+  - [x] Field access
 - [ ] ARC memory management
 
-🏷️ *v0.0.6* 
+🏷️ _v0.0.6_
+
 - [ ] Defer/errdefer
 - [ ] Managed/unmanaged strings
 - [ ] Arrays
 
-🏷️ *v0.0.7* 
+🏷️ _v0.0.7_
+
 - [ ] Generics
 - [ ] Custom linking with C libs (with extern names, or no_mangle)
 
-🏷️ *v0.0.8* 
+🏷️ _v0.0.8_
+
 - [ ] `import X`, compiling other libraries into the same binary and a (for now
       unstable) interface to allow linking with other Rove libraries (like
       rmeta)
@@ -127,7 +133,7 @@ the point I need to make one.
 
 ### Danger is highlighted with `!`
 
-Anything that can cause a program to crash must be marked with `!`, such as 
+Anything that can cause a program to crash must be marked with `!`, such as
 `require!`, `ensure!` or otherwise. It's not yet decided if _callees_ must also
 obey this rule (so any function with `require!`/`ensure!` must be called with `!`
 as well). A hypothetical example:

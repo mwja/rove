@@ -1,0 +1,13 @@
+---
+source: tests/snapshots.rs
+assertion_line: 78
+input_file: tests/cases/err_assign_target.rv
+---
+compile error:
+Error: invalid assignment target
+   ╭─[ tests/cases/err_assign_target.rv:4:5 ]
+   │
+ 4 │     (a + 1) = 2;
+   │     ───┬───  
+   │        ╰───── only variables and their fields can be assigned to
+───╯

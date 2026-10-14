@@ -1,6 +1,8 @@
 use cranelift::prelude::Type;
 use std::cmp::max;
 
+use crate::{codegen::repr::ReprCx, structs::Struct};
+
 #[derive(Debug, Clone)]
 pub struct CalculatedField {
     pub offset: u32,
@@ -16,15 +18,21 @@ pub struct StructLayout {
     pub total_align: u32,
 }
 
+const HEADER_SIZE: u32 = 24; // strong,unowned,weak,flags (4×u32) + type_info ptr = 4*4+8
+
 /// Computes a C-repr memory layout for an array of Cranelift Types.
 ///
 /// This could be further optimised (putting smaller aligned types near the
 /// start so it uses less space) but for now I'll stick with C compat and the
 /// defined order.
-pub fn calculate_c_layout(field_types: &[Type]) -> StructLayout {
+///
+/// I need to do better C-interop though, as Rove structs store a header which
+/// offsets the fields by 24 bytes and messes with the alignment. A runtime
+/// interop function could be interesting.
+fn calculate_c_layout(field_types: &[Type]) -> StructLayout {
     let mut fields = Vec::with_capacity(field_types.len());
-    let mut current_offset = 0u32;
-    let mut max_alignment = 1u32;
+    let mut current_offset = HEADER_SIZE;
+    let mut max_alignment = 8u32; // ptr width
 
     for &ty in field_types {
         // 1. In C, the natural alignment of a primitive type equals its byte size.
@@ -62,4 +70,15 @@ pub fn calculate_c_layout(field_types: &[Type]) -> StructLayout {
         total_size,
         total_align: max_alignment,
     }
+}
+
+/// Calculates the layout of the given struct
+pub fn calculate_layout(rcx: &ReprCx, struct_: &Struct) -> StructLayout {
+    let types = struct_
+        .fields
+        .iter()
+        .map(|f| rcx.repr_of(&f.ty).expect_scalar("non scalar types may not be struct members (and it should be impossible to express this)"))
+        .collect::<Vec<_>>();
+
+    calculate_c_layout(&types)
 }

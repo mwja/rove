@@ -1,0 +1,20 @@
+// For now this is an example to make sure behaviour doesn't change, but this is
+// unwanted
+
+// Will likely adjust to copy-on-write of non-mutable bindings but for now this
+// is defacto behaviour.
+
+struct Data {
+  var x: int
+}
+
+func violate_immutability(base: Data) {
+  var mutable = base;
+  mutable.x = 2;
+}
+
+func main() {
+  let data = Data.{x = 1};
+  violate_immutability(data);
+  print data.x; // should be 1, is 2. for now keep defacto at 2.
+}

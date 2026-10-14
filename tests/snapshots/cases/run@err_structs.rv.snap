@@ -1,0 +1,101 @@
+---
+source: tests/snapshots.rs
+assertion_line: 78
+input_file: tests/cases/err_structs.rv
+---
+compile error:
+[1057] Error: missing struct fields: y
+    ╭─[ tests/cases/err_structs.rv:13:19 ]
+    │
+ 13 │     var missing = Point.{ x = 1 };
+    │                   ───────┬───────  
+    │                          ╰───────── this struct is missing `y`
+    │ 
+    │ Help: every field must be given a value
+────╯
+[1056] Error: struct field x is initialised more than once
+    ╭─[ tests/cases/err_structs.rv:14:29 ]
+    │
+ 14 │     var duplicate = Point.{ x = 1, x = 2, y = 3 };
+    │                             ──┬──  ──┬──  
+    │                               ╰─────────── `x` is first initialised here
+    │                                      │    
+    │                                      ╰──── and initialised again here
+────╯
+[1054] Error: struct field z not found
+    ╭─[ tests/cases/err_structs.rv:15:41 ]
+    │
+ 15 │     var unknown = Point.{ x = 1, y = 2, z = 3 };
+    │                                         ──┬──  
+    │                                           ╰──── attempted to access field `z` of a struct here
+    │ 
+    │ Help: this field does not exist on this struct
+────╯
+[1002] Error: types bool and int are incompatible
+    ╭─[ tests/cases/err_structs.rv:16:34 ]
+    │
+ 16 │     var wrong_type = Point.{ x = true, y = 2 };
+    │                              ────┬─┬─  
+    │                                  ╰───── but this value has type int
+    │                                    │   
+    │                                    ╰─── this value has type bool
+────╯
+[1050] Error: fixed.x is not mutable
+    ╭─[ tests/cases/err_structs.rv:19:5 ]
+    │
+ 19 │     fixed.x = 2;
+    │     ─────┬─────  
+    │          ╰─────── attempted to mutate `fixed.x` here
+    │ 
+    │ Help: did you forget to declare it as `var`?
+────╯
+[1050] Error: p.y is not mutable
+    ╭─[ tests/cases/err_structs.rv:22:5 ]
+    │
+ 22 │     p.y = 2;
+    │     ───┬───  
+    │        ╰───── attempted to mutate `p.y` here
+    │ 
+    │ Help: did you forget to declare it as `var`?
+────╯
+[1002] Error: types bool and int are incompatible
+    ╭─[ tests/cases/err_structs.rv:23:11 ]
+    │
+ 23 │     p.x = true;
+    │       ┬   ──┬─  
+    │       ╰───────── but this value has type int
+    │             │   
+    │             ╰─── this value has type bool
+────╯
+[1052] Error: value of type struct(0) has no field z
+    ╭─[ tests/cases/err_structs.rv:24:11 ]
+    │
+ 24 │     print p.z;
+    │           ─┬─  
+    │            ╰─── attempted to access field `z` of type struct(0) here
+────╯
+[1052] Error: value of type int has no field y
+    ╭─[ tests/cases/err_structs.rv:25:11 ]
+    │
+ 25 │     print p.x.y;
+    │           ──┬──  
+    │             ╰──── attempted to access field `y` of type int here
+────╯
+[1002] Error: types bool and int are incompatible
+    ╭─[ tests/cases/err_structs.rv:28:9 ]
+    │
+ 28 │     a = true;
+    │     ┬   ──┬─  
+    │     ╰───────── but this value has type int
+    │           │   
+    │           ╰─── this value has type bool
+────╯
+[1053] Error: operator is not implemented on this type
+    ╭─[ tests/cases/err_structs.rv:30:13 ]
+    │
+ 30 │     let c = Colour::Red + Colour::Blue;
+    │             ─────────────┬────────────  
+    │                          ╰────────────── attempted to perform operator + on type enum_variant(0) here
+    │ 
+    │ Help: this operator is not implemented for this type (and may not be implemented yet)
+────╯

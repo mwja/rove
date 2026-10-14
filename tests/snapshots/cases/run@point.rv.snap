@@ -1,7 +1,12 @@
 ---
 source: tests/snapshots.rs
+assertion_line: 78
 input_file: tests/cases/point.rv
 ---
 exit: Some(0)
 --- stdout
 0
+3
+5
+4
+7

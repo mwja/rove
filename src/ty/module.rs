@@ -10,6 +10,7 @@ use crate::{
     defs::DefId,
     enums::Enums,
     sourcemap::{DiagnoseWith, report::Diagnostic},
+    structs::Structs,
     ty::{Ty, TyCtxt, TyKind, res::Res},
 };
 
@@ -172,6 +173,7 @@ impl ModuleCtxt {
         &mut self,
         root_module: &ast::AstModule,
         def_ids: &HashMap<NodeId, DefId>,
+        structs: &Structs,
         enums: &Enums,
     ) -> Result<(), Vec<ResolverError>> {
         let mut errs = Vec::new();
@@ -225,12 +227,12 @@ impl ModuleCtxt {
 
             for struct_ in &module.structs {
                 let node_id = struct_.node_id;
-                let def_id = def_ids.get(&node_id).copied().unwrap_or_else(|| {
+                let struct_id = structs.resolve_node_id(node_id).unwrap_or_else(|| {
                     bug!("could not get def id for node id on module tree building")
                 });
 
                 let name = &struct_.name;
-                let res = Res::Def(def_id);
+                let res = Res::Struct(struct_id);
 
                 let _ = self
                     .insert_item(module_id, name.to_owned(), res, node_id)
@@ -444,7 +446,9 @@ impl ModuleTree {
                     | Res::Param(..)
                     | Res::Def(..)
                     | Res::Struct(..) // for now, struct's may later have static members
-                    | Res::EnumVariant(..) => {
+                    | Res::EnumVariant(..)
+                    | Res::StructField(..)
+                    | Res::Field { .. } => {
                         Err(ResolverError::HasNoNamespaceMembers(path, *base))
                     }
                     Res::Enum(enum_id) => {

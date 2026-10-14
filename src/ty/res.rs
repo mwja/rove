@@ -3,6 +3,7 @@ use std::fmt::Display;
 use thiserror::Error;
 
 use crate::{
+    UnwrapBug,
     ast::{self, NodeId},
     defs::{DefCtxt, DefError, DefId},
     enums::{EnumId, EnumVariant},
@@ -29,6 +30,15 @@ pub enum Res {
     EnumVariant(EnumVariant),
 
     Struct(StructId),
+    /// Struct field on init (so we know expression resolves to struct field of name X).
+    StructField(StructId, String),
+    /// Struct field access (base, key, struct id/type)
+    // I'm not a fan of using strings here but I think field ids might also be overkill.
+    Field {
+        base: Box<Res>,
+        field: String,
+        struct_id: StructId,
+    },
 
     Module(ModuleId),
 }
@@ -44,7 +54,19 @@ impl Display for Res {
             Res::Enum(id) => write!(f, "enum {}", id),
             Res::EnumVariant(id) => write!(f, "enum variant {}", id),
             Res::Struct(id) => write!(f, "struct {}", id),
+            Res::StructField(id, field) => write!(f, "struct {} field {}", id, field),
             Res::Module(id) => write!(f, "module #{}", id),
+            Res::Field {
+                base,
+                field,
+                struct_id,
+            } => {
+                write!(
+                    f,
+                    "field {} of struct {} (base: {})",
+                    field, struct_id, base
+                )
+            }
         }
     }
 }
@@ -61,7 +83,9 @@ impl Res {
             Res::Enum(..) => "an enum",
             Res::EnumVariant(..) => "an enum variant",
             Res::Struct(..) => "a struct",
+            Res::StructField(..) => "a struct field",
             Res::Module(..) => "a module",
+            Res::Field { .. } => "a struct field",
         }
     }
 }
@@ -84,6 +108,8 @@ pub enum TyResolutionError {
     InvalidNamedType(String, ast::NodeId),
     #[error("unable to resolve type: {0}")]
     TypeError(#[from] TypeError),
+    #[error("no field named {0} on struct {1}")]
+    NoField(String, StructId, NodeId),
 }
 
 impl TyResolutionError {
@@ -91,6 +117,7 @@ impl TyResolutionError {
         match self {
             TyResolutionError::PathNotFound(..) => 5001,
             TyResolutionError::InvalidNamedType(..) => 5002,
+            TyResolutionError::NoField(..) => 5003,
             TyResolutionError::TypeError(err) => err.as_code().unwrap(),
         }
     }
@@ -119,6 +146,17 @@ impl DiagnoseWith<NodeId> for TyResolutionError {
                             recorder,
                             node_id,
                             format!("{} cannot be used as a type", name),
+                        ),
+                ]
+            }
+            TyResolutionError::NoField(field, struct_id, node_id) => {
+                vec![
+                    Diagnostic::new(message)
+                        .with_code(Some(code))
+                        .with_label_from(
+                            recorder,
+                            node_id,
+                            format!("no field named {} on struct {}", field, struct_id),
                         ),
                 ]
             }
@@ -152,10 +190,23 @@ pub fn resolve_type(
                 | Res::Param(..)
                 | Res::Def(..)
                 | Res::EnumVariant(..)
+                | Res::StructField(..)
                 | Res::Module(..) => Err(TyResolutionError::InvalidNamedType(
                     path.to_string(),
                     path.node_id(),
                 )),
+                Res::Field {
+                    base,
+                    field,
+                    struct_id,
+                } => match tcx.struct_field_type(struct_id, &field) {
+                    Some(field_ty) => Ok(field_ty),
+                    None => Err(TyResolutionError::NoField(
+                        field.clone(),
+                        struct_id,
+                        path.node_id(),
+                    )),
+                },
                 Res::Enum(enum_id) => Ok(tcx.ty(TyKind::Enum(enum_id))),
                 Res::Struct(struct_id) => Ok(tcx.ty(TyKind::Struct(struct_id))),
             }

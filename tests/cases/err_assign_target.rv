@@ -1,0 +1,5 @@
+// Only variables and their fields can be assigned to; this is a lowering error.
+func main() {
+    var a = 1;
+    (a + 1) = 2;
+}

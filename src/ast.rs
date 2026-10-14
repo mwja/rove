@@ -728,6 +728,8 @@ impl AstExpr {
             AstExprKind::Literal(lit) => lit.node_id,
             AstExprKind::Binary(bin_expr) => bin_expr.node_id,
             AstExprKind::Ident(ident) => ident.node_id,
+            AstExprKind::StructInit(struct_) => struct_.node_id,
+            AstExprKind::FieldAccess(field_access) => field_access.node_id,
             AstExprKind::Call(call) => call.node_id,
             AstExprKind::Path(field_access) => field_access.node_id,
             AstExprKind::ImplicitPath(implicit_field_access) => implicit_field_access.node_id, // AstExprKind::ForcedTry(forced_try) => forced_try.node_id,
@@ -860,6 +862,8 @@ pub enum AstExprKind {
     Binary(AstBinaryExpr),
     Literal(AstLiteral),
     Ident(AstIdent),
+    StructInit(AstStructInitExpr),
+    FieldAccess(AstFieldAccessExpr),
     Call(AstCallExpr),
     Path(AstPathExpr),
     ImplicitPath(AstImplicitPathExpr),
@@ -875,6 +879,49 @@ pub enum AstExprKind {
     Continue(AstContinueStmt),
     Fallthrough(AstFallthroughStmt),
     Throw(AstThrowStmt),
+}
+
+/// `base.field`, reading a field of a struct value.
+#[derive(Debug, Clone)]
+pub struct AstFieldAccessExpr {
+    pub node_id: NodeId,
+    pub base: Box<AstExpr>,
+    pub field: AstIdent,
+}
+
+#[derive(Debug, Clone)]
+pub struct AstStructInitExpr {
+    pub node_id: NodeId,
+    pub path: AstPath,
+    pub fields: Vec<AstStructInitField>,
+}
+
+impl Display for AstStructInitExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}.{{ {} }}",
+            self.path,
+            self.fields
+                .iter()
+                .map(|field| field.to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct AstStructInitField {
+    pub node_id: NodeId,
+    pub name: String,
+    pub expr: Box<AstExpr>,
+}
+
+impl Display for AstStructInitField {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.name, self.expr)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1016,6 +1063,10 @@ impl Display for AstExprKind {
             AstExprKind::Call(call) => write!(f, "{}", call),
             AstExprKind::Path(field_access) => {
                 write!(f, "{}::{}", field_access.base, field_access.field)
+            }
+            AstExprKind::StructInit(struct_) => write!(f, "{}", struct_),
+            AstExprKind::FieldAccess(field_access) => {
+                write!(f, "{}.{}", field_access.base, field_access.field)
             }
             AstExprKind::ImplicitPath(implicit_field_access) => {
                 write!(f, "::{}", implicit_field_access.path)

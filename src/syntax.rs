@@ -378,34 +378,18 @@ mod grammar {
         pub _e: (),
     }
 
+    // The target is parsed as any expression (and checked to be a place when
+    // lowering), as a separate place rule would conflict with field access
+    // expressions at the start of a statement.
     pub struct AssignStmt {
-        pub name: Spanned<Place>,
+        pub target: Box<Spanned<Expr>>,
         #[rust_sitter::leaf(text = "=")]
         _e: (),
         pub expr: Box<Spanned<Expr>>,
-    }
-
-    pub enum Place {
-        Ident(Spanned<Ident>),
-        FieldAccess {
-            base: Box<Spanned<Place>>,
-            #[rust_sitter::leaf(text = ".")]
-            _dot: (),
-            field: Spanned<Ident>,
-        },
     }
 
     pub struct Decl {
         pub mutability: MutabilityDecl,
-        pub name: Spanned<Ident>,
-        #[rust_sitter::leaf(text = "=")]
-        _e: (),
-        pub expr: Box<Spanned<Expr>>,
-    }
-
-    pub struct VarDecl {
-        #[rust_sitter::leaf(text = "var")]
-        _v: (),
         pub name: Spanned<Ident>,
         #[rust_sitter::leaf(text = "=")]
         _e: (),
@@ -421,6 +405,7 @@ mod grammar {
         Unary(Spanned<UnaryExpr>),
         Binary(Spanned<BinaryExpr>),
         Literal(Spanned<Literal>),
+        StructInit(Spanned<StructInitExpr>),
         Ident(Spanned<Ident>),
         #[rust_sitter::prec_left(99)]
         Path(Spanned<PathExpr>),
@@ -431,6 +416,8 @@ mod grammar {
         ),
         #[rust_sitter::prec_left(99)]
         Call(Spanned<CallExpr>),
+        #[rust_sitter::prec_left(99)]
+        FieldAccess(Spanned<FieldAccessExpr>),
         // TryElse(Spanned<TryElseExpr>),
         ForcedTry(Spanned<ForcedTryExpr>),
         TryCatch(Spanned<TryCatchExpr>),
@@ -444,6 +431,42 @@ mod grammar {
         Break(#[rust_sitter::leaf(text = "break")] Spanned<()>),
         Continue(#[rust_sitter::leaf(text = "continue")] Spanned<()>),
         Fallthrough(#[rust_sitter::leaf(text = "fallthrough")] Spanned<()>),
+    }
+
+    #[rust_sitter::prec_left(99)]
+    pub struct FieldAccessExpr {
+        pub base: Box<Spanned<Expr>>,
+        #[rust_sitter::leaf(text = ".")]
+        _dot: (),
+        pub field: Spanned<Ident>,
+    }
+
+    pub struct StructInitExpr {
+        pub path: Box<Spanned<Path>>,
+        // `.{` rather than `{` so `if x { ... }` isn't ambiguous with struct init.
+        #[rust_sitter::leaf(text = ".{")]
+        _l: (),
+        pub fields: Option<StructInitFieldList>,
+        #[rust_sitter::leaf(text = "}")]
+        _r: (),
+    }
+
+    pub struct StructInitFieldList {
+        pub head: Spanned<StructInitField>,
+        pub tail: Option<StructInitFieldListTail>,
+    }
+
+    pub struct StructInitFieldListTail {
+        #[rust_sitter::leaf(text = ",")]
+        _c: (),
+        pub rest: Option<Box<StructInitFieldList>>,
+    }
+
+    pub struct StructInitField {
+        pub name: Spanned<Ident>,
+        #[rust_sitter::leaf(text = "=")]
+        _c: (),
+        pub expr: Box<Spanned<Expr>>,
     }
 
     #[rust_sitter::prec_left(99)]
@@ -566,7 +589,7 @@ mod grammar {
         LogicalOr {
             left: Box<Spanned<Expr>>,
             #[rust_sitter::leaf(text = "||")]
-            op: (),
+            _op: (),
             right: Box<Spanned<Expr>>,
         },
     }
@@ -677,60 +700,30 @@ trait CommaList: Sized {
     fn split(self) -> (Self::Item, Option<Self>);
 }
 
-impl CommaList for grammar::IdentList {
-    type Item = Spanned<grammar::Ident>;
+macro_rules! impl_comma_list {
+    ($list:ty, $item:ty) => {
+        impl CommaList for $list {
+            type Item = $item;
 
-    fn split(self) -> (Self::Item, Option<Self>) {
-        (
-            self.head,
-            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
-        )
-    }
+            fn split(self) -> (Self::Item, Option<Self>) {
+                (
+                    self.head,
+                    self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
+                )
+            }
+        }
+    };
 }
 
-impl CommaList for grammar::ArgDefList {
-    type Item = Spanned<grammar::ArgDef>;
-
-    fn split(self) -> (Self::Item, Option<Self>) {
-        (
-            self.head,
-            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
-        )
-    }
-}
-
-impl CommaList for grammar::ExprList {
-    type Item = Box<Spanned<grammar::Expr>>;
-
-    fn split(self) -> (Self::Item, Option<Self>) {
-        (
-            self.head,
-            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
-        )
-    }
-}
-
-impl CommaList for grammar::UseTreeList {
-    type Item = Box<Spanned<grammar::UseTree>>;
-
-    fn split(self) -> (Self::Item, Option<Self>) {
-        (
-            self.head,
-            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
-        )
-    }
-}
-
-impl CommaList for grammar::StructFieldList {
-    type Item = Spanned<grammar::StructField>;
-
-    fn split(self) -> (Self::Item, Option<Self>) {
-        (
-            self.head,
-            self.tail.and_then(|tail| tail.rest).map(|rest| *rest),
-        )
-    }
-}
+impl_comma_list!(grammar::StructFieldList, Spanned<grammar::StructField>);
+impl_comma_list!(grammar::IdentList, Spanned<grammar::Ident>);
+impl_comma_list!(grammar::ArgDefList, Spanned<grammar::ArgDef>);
+impl_comma_list!(grammar::ExprList, Box<Spanned<grammar::Expr>>);
+impl_comma_list!(grammar::UseTreeList, Box<Spanned<grammar::UseTree>>);
+impl_comma_list!(
+    grammar::StructInitFieldList,
+    Spanned<grammar::StructInitField>
+);
 
 trait FlattenList {
     type Item;
@@ -770,7 +763,7 @@ pub fn parse(
             ) {
                 match err.reason {
                     rust_sitter::errors::ParseErrorReason::FailedNode(ref errs) => {
-                        if errs.len() > 0 {
+                        if !errs.is_empty() {
                             errs.iter()
                                 .for_each(|err| transform_diagnostic(err, diag, source_file_id));
                         } else {
@@ -949,7 +942,8 @@ impl<'a> ProgramLowerer<'a> {
                 grammar::Def::Use(use_, _) => uses.push(use_),
             }
         }
-        let program = ast::AstModule {
+
+        ast::AstModule {
             node_id: self.next_id_spanned(span),
             name: name.into(),
             mods: modules
@@ -970,9 +964,7 @@ impl<'a> ProgramLowerer<'a> {
                 .map(|use_| self.lower_use_stmt(use_))
                 .collect(),
             is_shell,
-        };
-
-        program
+        }
     }
 
     fn lower_struct_def(&mut self, def: grammar::Def) -> ast::AstStructDef {
@@ -1396,21 +1388,46 @@ impl<'a> ProgramLowerer<'a> {
     }
 
     fn lower_assign_stmt(&mut self, assign: Spanned<grammar::AssignStmt>) -> ast::AstAssignStmt {
+        let node_id = self.next_id_spanned(assign.span);
+        let target = *assign.value.target;
+        let target_span = target.span;
+        let name = self.lower_place(target).unwrap_or_else(|| {
+            self.errors.push(
+                Diagnostic::new("invalid assignment target").with_label(
+                    "only variables and their fields can be assigned to",
+                    Span::from_span(self.source_file_id, target_span),
+                ),
+            );
+            // Lowering fails as a whole once an error is recorded, so this
+            // placeholder is never seen.
+            ast::AstPlace::Ident(ast::AstIdent {
+                node_id: self.next_id_spanned(target_span),
+                text: String::new(),
+            })
+        });
+
         ast::AstAssignStmt {
-            node_id: self.next_id_spanned(assign.span),
-            name: self.lower_place(assign.value.name.value),
+            node_id,
+            name,
             expr: Box::new(self.lower_expr(*assign.value.expr)),
         }
     }
 
-    fn lower_place(&mut self, place: grammar::Place) -> ast::AstPlace {
-        match place {
-            grammar::Place::Ident(ident) => ast::AstPlace::Ident(self.lower_ident(ident)),
-            grammar::Place::FieldAccess { base, _dot, field } => ast::AstPlace::FieldAccess {
-                node_id: self.next_id_spanned(field.span),
-                base: Box::new(self.lower_place(base.value)),
-                field: self.lower_ident(field),
-            },
+    /// Lowers an expression that is the target of an assignment, or `None` if
+    /// it isn't a place.
+    fn lower_place(&mut self, expr: Spanned<grammar::Expr>) -> Option<ast::AstPlace> {
+        match expr.value {
+            grammar::Expr::Ident(ident) => Some(ast::AstPlace::Ident(self.lower_ident(ident))),
+            grammar::Expr::FieldAccess(field_access) => {
+                let grammar::FieldAccessExpr { base, field, .. } = field_access.value;
+                Some(ast::AstPlace::FieldAccess {
+                    node_id: self.next_id_spanned(field.span),
+                    base: Box::new(self.lower_place(*base)?),
+                    field: self.lower_ident(field),
+                })
+            }
+            grammar::Expr::Wrapped(_, expr, _) => self.lower_place(*expr),
+            _ => None,
         }
     }
 
@@ -1444,6 +1461,12 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Expr::Binary(binary) => ast::AstExprKind::Binary(self.lower_binary(binary)),
             grammar::Expr::Literal(literal) => {
                 ast::AstExprKind::Literal(self.lower_literal(literal))
+            }
+            grammar::Expr::StructInit(struct_init) => {
+                ast::AstExprKind::StructInit(self.lower_struct_init(struct_init))
+            }
+            grammar::Expr::FieldAccess(field_access) => {
+                ast::AstExprKind::FieldAccess(self.lower_field_access(field_access))
             }
             grammar::Expr::Ident(ident) => ast::AstExprKind::Ident(self.lower_ident(ident)),
             // we discard a node id here, but that's okay
@@ -1492,6 +1515,45 @@ impl<'a> ProgramLowerer<'a> {
             grammar::Expr::Fallthrough(v) => {
                 ast::AstExprKind::Fallthrough(self.lower_fallthrough_stmt(v))
             }
+        }
+    }
+
+    fn lower_struct_init(
+        &mut self,
+        struct_init: Spanned<grammar::StructInitExpr>,
+    ) -> ast::AstStructInitExpr {
+        ast::AstStructInitExpr {
+            node_id: self.next_id_spanned(struct_init.span),
+            path: self.lower_path(struct_init.value.path.value),
+            fields: struct_init
+                .value
+                .fields
+                .flatten_list()
+                .into_iter()
+                .map(|field| self.lower_struct_init_field(field))
+                .collect(),
+        }
+    }
+
+    fn lower_field_access(
+        &mut self,
+        field_access: Spanned<grammar::FieldAccessExpr>,
+    ) -> ast::AstFieldAccessExpr {
+        ast::AstFieldAccessExpr {
+            node_id: self.next_id_spanned(field_access.span),
+            base: Box::new(self.lower_expr(*field_access.value.base)),
+            field: self.lower_ident(field_access.value.field),
+        }
+    }
+
+    fn lower_struct_init_field(
+        &mut self,
+        field: Spanned<grammar::StructInitField>,
+    ) -> ast::AstStructInitField {
+        ast::AstStructInitField {
+            node_id: self.next_id_spanned(field.span),
+            name: field.value.name.value.text.clone(),
+            expr: Box::new(self.lower_expr(*field.value.expr)),
         }
     }
 

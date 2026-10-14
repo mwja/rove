@@ -28,6 +28,10 @@ impl Ty {
         &self.kind
     }
 
+    pub fn is_struct(&self) -> bool {
+        matches!(*self.kind, TyKind::Struct(_))
+    }
+
     pub fn is_bool(&self) -> bool {
         matches!(*self.kind, TyKind::Bool)
     }
@@ -57,7 +61,10 @@ impl Ty {
     /// check for types that MAY implement operators at the compilation
     /// level. Runtime operators are not yet planned.
     pub fn can_perform_operations(&self) -> bool {
-        matches!(*self.kind, TyKind::Int | TyKind::Float | TyKind::Bool)
+        matches!(
+            *self.kind,
+            TyKind::Int | TyKind::Float | TyKind::Bool | TyKind::Enum(..)
+        )
     }
 
     /// Can a value of this type be used where `expected` is wanted, or is
@@ -173,6 +180,17 @@ impl TyCtxt {
 
     pub fn float_ty(&self) -> Ty {
         self.ty(TyKind::Float)
+    }
+
+    pub fn struct_ty(&self, struct_id: StructId) -> Ty {
+        self.ty(TyKind::Struct(struct_id))
+    }
+
+    pub fn struct_field_type(&self, struct_id: StructId, field: &str) -> Option<Ty> {
+        self.structs
+            .get_struct(struct_id)
+            .and_then(|struct_def| struct_def.get_field(field))
+            .map(|f| f.ty.clone())
     }
 
     pub fn is_entry_point(&self, def_id: DefId) -> bool {

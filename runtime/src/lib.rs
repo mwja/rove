@@ -68,6 +68,44 @@ pub extern "C" fn rt_abort_forced_try(fn_name: *const u8, fn_name_len: u32, line
     std::process::exit(1);
 }
 
+#[repr(C)]
+pub struct TypeInfo {
+    pub size: usize, // total allocation size incl. header
+    pub align: usize,
+    pub deinit: Option<extern "C" fn(*mut u8)>, // generated per struct, None if no ref fields
+    pub name: *const u8,                        // optional: for leak reports
+    pub name_len: usize,
+}
+
+#[repr(C)]
+struct Header {
+    strong: u32,
+    unowned: u32,
+    weak: u32,
+    flags: u32,
+    type_info: *const TypeInfo,
+}
+
+/// Alloc a header of strong, unowned, and weak references. Store flags and tinfo.
+///
+/// This does NOT alloc the data segment
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_alloc(size: usize, type_info: *const TypeInfo) -> *mut u8 {
+    use std::alloc::Layout;
+
+    unsafe {
+        let layout = Layout::from_size_align(size, 16).unwrap();
+        let p = std::alloc::alloc_zeroed(layout); // zeroed: fields start null/0
+        let h = p as *mut Header;
+        (*h).strong = 1; // +1 returned to caller
+        (*h).unowned = 0;
+        (*h).weak = 0;
+        (*h).flags = 0;
+        (*h).type_info = type_info;
+        p
+    }
+}
+
 type RtEntryPoint = unsafe extern "C" fn() -> i64;
 
 #[unsafe(no_mangle)]
