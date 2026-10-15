@@ -174,6 +174,12 @@ impl SourceMap {
         Some(((start_line, start_column), (end_line, end_column)))
     }
 
+    /// The 1-based line the given span starts on.
+    pub fn span_start_line(&self, span: Span) -> Option<usize> {
+        let ((start_line, _), _) = self.span_to_line_and_column(span)?;
+        (start_line != 0).then_some(start_line)
+    }
+
     /// Describe the given span in a string, of format `filename: start_line:start_column-end_line:end_column`
     pub fn describe_span(&self, span: Span) -> Option<String> {
         let file = self.files.get(span.file.0 as usize)?;

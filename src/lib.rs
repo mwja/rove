@@ -122,6 +122,10 @@ pub fn compile(
     let bytes = codegen::generate_object(
         &mut ty_ctxt,
         ast,
+        codegen::SourceInfo {
+            source_map,
+            node_to_span: &node_to_span,
+        },
         Some(codegen::CodegenOptions {
             emit_clif_to: artifact(Emit::Clif, "clif"),
             emit_opt_clif_to: artifact(Emit::OptClif, "opt.clif"),

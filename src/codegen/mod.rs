@@ -32,6 +32,7 @@ use crate::{
     },
     defs::{self, Def, DefKind, FuncSig},
     mangle,
+    sourcemap::{SourceMap, SpanRecorder},
     structs::StructId,
     ty::{
         Ty, TyCtxt, TyKind,
@@ -40,9 +41,26 @@ use crate::{
     },
 };
 
+#[derive(Clone, Copy)]
+pub struct SourceInfo<'s> {
+    pub source_map: &'s SourceMap,
+    pub node_to_span: &'s SpanRecorder<NodeId>,
+}
+
+impl SourceInfo<'_> {
+    /// The 1-based line a node starts on, or 0 if it has no known span.
+    fn line(&self, node_id: NodeId) -> u32 {
+        self.node_to_span
+            .get(&node_id)
+            .and_then(|span| self.source_map.span_start_line(*span))
+            .unwrap_or(0) as u32
+    }
+}
+
 pub struct CompilerCtxt<'c> {
     pub tcx: &'c TyCtxt,
     pub body: &'c BodyInfo,
+    pub source: SourceInfo<'c>,
     def_id_to_function_id: &'c HashMap<defs::DefId, FuncId>,
 }
 
@@ -50,11 +68,13 @@ impl<'c> CompilerCtxt<'c> {
     pub fn new(
         tcx: &'c TyCtxt,
         body: &'c BodyInfo,
+        source: SourceInfo<'c>,
         table: &'c HashMap<defs::DefId, FuncId>,
     ) -> Self {
         Self {
             tcx,
             body,
+            source,
             def_id_to_function_id: table,
         }
     }
@@ -247,6 +267,7 @@ pub struct CodegenOptions {
 pub fn generate_object(
     tcx: &mut TyCtxt,
     ast: ast::AstModule,
+    source: SourceInfo,
     options: Option<CodegenOptions>,
 ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
     let options = options.unwrap_or_default();
@@ -303,6 +324,7 @@ pub fn generate_object(
     define_module(
         tcx,
         ast,
+        source,
         &mut module,
         &mut ctx,
         runtime,
@@ -388,6 +410,7 @@ struct EmitFiles {
 fn define_module(
     tcx: &TyCtxt,
     ast: ast::AstModule,
+    source: SourceInfo,
     module: &mut ObjectModule,
     ctx: &mut cranelift::codegen::Context,
     runtime: Runtime,
@@ -425,6 +448,7 @@ fn define_module(
             tcx.bodies
                 .get(&def_id)
                 .unwrap_or_else(|| bug!("a function def_id has no typechecked body")),
+            source,
             &table,
         );
         ctx.func.signature = func_sig
@@ -526,7 +550,9 @@ fn define_module(
     }
 
     for child in ast.mods {
-        define_module(tcx, child, module, ctx, runtime, rcx, table, func_sig, emit)?;
+        define_module(
+            tcx, child, source, module, ctx, runtime, rcx, table, func_sig, emit,
+        )?;
     }
 
     Ok(())
@@ -1076,7 +1102,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .builder
             .ins()
             .iconst(types::I32, self.fn_name.len() as i64);
-        let line = self.builder.ins().iconst(types::I32, 0);
+        let line = self
+            .builder
+            .ins()
+            .iconst(types::I32, self.cx.source.line(constraint.node_id()) as i64);
         self.builder.ins().call(
             func,
             &[
@@ -2048,7 +2077,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .builder
             .ins()
             .iconst(types::I32, self.fn_name.len() as i64);
-        let line = self.builder.ins().iconst(types::I32, 0);
+        let line = self.builder.ins().iconst(
+            types::I32,
+            self.cx.source.line(forced_try_expr.node_id) as i64,
+        );
         self.builder
             .ins()
             .call(func, &[local_fn_name, fn_name_len, line]);

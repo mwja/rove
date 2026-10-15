@@ -1104,7 +1104,7 @@ impl<'c> TypeckCtxt<'c> {
 
     /// Less boilerplate to do
     ///
-    /// ```no_run
+    /// ```ignore
     /// let idx = tccx.begin_inferrable_ty(Some(ty));
     /// ...
     /// tccx.end_inferrable_ty(idx);

@@ -6,4 +6,4 @@ exit: Some(1)
 --- stdout
 1
 --- stderr
-fatal: require constraint failed on function main: tag=small line=9
+fatal: require constraint failed on function main: tag=small line=6
