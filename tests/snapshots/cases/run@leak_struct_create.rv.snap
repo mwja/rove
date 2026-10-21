@@ -1,6 +1,5 @@
 ---
 source: tests/snapshots.rs
-assertion_line: 88
 input_file: tests/cases/leak_struct_create.rv
 ---
 exit: Some(0)
