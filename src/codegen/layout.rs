@@ -1,7 +1,7 @@
 use cranelift::prelude::Type;
 use std::cmp::max;
 
-use crate::{codegen::repr::ReprCx, structs::Struct};
+use crate::{codegen::repr::ReprCx, structs::Struct, ty::TyKind};
 
 #[derive(Debug, Clone)]
 pub struct CalculatedField {
@@ -9,6 +9,8 @@ pub struct CalculatedField {
     pub size: u32,
     pub align: u32,
     pub ty: Type,
+    /// Is this field a refcounted pointer that also has to be rt_release'd
+    pub managed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -29,12 +31,12 @@ const HEADER_SIZE: u32 = 24; // strong,unowned,weak,flags (4×u32) + type_info p
 /// I need to do better C-interop though, as Rove structs store a header which
 /// offsets the fields by 24 bytes and messes with the alignment. A runtime
 /// interop function could be interesting.
-fn calculate_c_layout(field_types: &[Type]) -> StructLayout {
+fn calculate_c_layout(field_types: &[(Type, bool)]) -> StructLayout {
     let mut fields = Vec::with_capacity(field_types.len());
     let mut current_offset = HEADER_SIZE;
     let mut max_alignment = 8u32; // ptr width
 
-    for &ty in field_types {
+    for &(ty, managed) in field_types {
         // 1. In C, the natural alignment of a primitive type equals its byte size.
         let size = ty.bytes();
         let align = size; // Default natural alignment
@@ -53,6 +55,7 @@ fn calculate_c_layout(field_types: &[Type]) -> StructLayout {
             size,
             align,
             ty,
+            managed,
         });
 
         // 4. Advance past this field's data footprint
@@ -61,7 +64,7 @@ fn calculate_c_layout(field_types: &[Type]) -> StructLayout {
 
     // 5. Apply Trailing Padding: Pad the final struct size to match the widest member.
     let mut total_size = current_offset;
-    if total_size % max_alignment != 0 {
+    if !total_size.is_multiple_of(max_alignment) {
         total_size = (total_size + max_alignment - 1) & !(max_alignment - 1);
     }
 
@@ -77,7 +80,10 @@ pub fn calculate_layout(rcx: &ReprCx, struct_: &Struct) -> StructLayout {
     let types = struct_
         .fields
         .iter()
-        .map(|f| rcx.repr_of(&f.ty).expect_scalar("non scalar types may not be struct members (and it should be impossible to express this)"))
+        .map(|f| {
+            let ty = rcx.repr_of(&f.ty).expect_scalar("...");
+            (ty, matches!(f.ty.kind(), TyKind::Struct(_)))
+        })
         .collect::<Vec<_>>();
 
     calculate_c_layout(&types)

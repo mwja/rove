@@ -1,0 +1,9 @@
+---
+source: tests/snapshots.rs
+assertion_line: 88
+input_file: tests/cases/leak_struct_create.rv
+---
+exit: Some(0)
+--- stdout
+--- stderr
+rove: live objects at exit: 1 (remove debug_leaks from ROVEFLAGS to hide this message)

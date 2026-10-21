@@ -1,0 +1,12 @@
+struct Point {
+    var x: int,
+    let y: int
+}
+
+func main() {
+    // leaks with +1
+    var zero = Point.{
+        x = 0,
+        y = 0
+    };
+}

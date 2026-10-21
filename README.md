@@ -59,6 +59,15 @@ See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The
 - [x] Structs (with heap alloc)
   - [x] Field access
 - [ ] ARC memory management
+  - [x] Leak counter in the runtime (print live objects at exit, used in snapshot tests)
+  - [x] Emit a real `TypeInfo` per struct (size, align, offsets of ref fields, name)
+  - [ ] `rt_retain` / `rt_release` (null-safe, releases ref fields then frees)
+  - [ ] Ownership rules: expressions are +1, reads retain, params are borrowed (+0)
+  - [ ] Release old values on assignment and field assignment (after storing)
+  - [ ] Release discarded expression results and call argument temporaries
+  - [ ] Release locals on scope exit (null-initialise so early exits are safe)
+  - [ ] Cover remaining paths (try/catch bindings, `old(...)`, `result` in `ensure`)
+  - [ ] Optimise: borrow where possible, move on last use, cancel retain/release pairs
 
 🏷️ _v0.0.6_
 

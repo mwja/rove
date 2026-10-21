@@ -9,9 +9,9 @@ use cranelift::{
     codegen::{
         cfg_printer::CFGPrinter,
         ir::{
-            AbiParam, Block, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTable, JumpTableData,
-            MemFlags, MemFlagsData, SigRef, Signature, SourceLoc, StackSlotData, StackSlotKind,
-            TrapCode, Type, UserExternalName, Value,
+            AbiParam, Block, BlockArg, BlockCall, FuncRef, GlobalValue, InstBuilder, JumpTable,
+            JumpTableData, MemFlags, MemFlagsData, SigRef, Signature, SourceLoc, StackSlotData,
+            StackSlotKind, TrapCode, Type, UserExternalName, Value,
             condcodes::{FloatCC, IntCC},
             types,
         },
@@ -19,12 +19,13 @@ use cranelift::{
         settings::{self, Configurable},
     },
     frontend::{FunctionBuilder, FunctionBuilderContext, Variable},
-    module::{DataDescription, FuncId, Linkage, Module, default_libcall_names},
+    module::{DataDescription, DataId, FuncId, Linkage, Module, default_libcall_names},
     object::{ObjectBuilder, ObjectModule},
 };
 use std::{collections::HashMap, error::Error, io::Write as _, path::PathBuf, rc::Rc};
 
 use crate::{
+    UnwrapBug,
     ast::{self, AstDef, AstForcedTryExpr, NodeId},
     codegen::{
         layout::{StructLayout, calculate_layout},
@@ -33,7 +34,7 @@ use crate::{
     defs::{self, Def, DefKind, FuncSig},
     mangle,
     sourcemap::{SourceMap, SpanRecorder},
-    structs::StructId,
+    structs::{Struct, StructId},
     ty::{
         Ty, TyCtxt, TyKind,
         res::{LocalId, OldId, Res},
@@ -148,7 +149,7 @@ struct Runtime {
     /// rt_start(ptr) -> i32
     start: FuncId,
     // for now type info is never passed as I don't currently have rt_release, but once passed it'll be useful
-    /// rt_alloc(size: ptr, tinfo: ptr) -> ptr
+    /// rt_alloc(tinfo: ptr TypeInfo) -> ptr
     alloc: FuncId,
 }
 
@@ -235,9 +236,6 @@ impl Runtime {
             alloc: {
                 let mut alloc_sig = module.make_signature();
 
-                alloc_sig
-                    .params
-                    .push(AbiParam::new(module.target_config().pointer_type()));
                 alloc_sig
                     .params
                     .push(AbiParam::new(module.target_config().pointer_type()));
@@ -510,6 +508,7 @@ fn define_module(
             cached_functions: HashMap::new(),
             cached_signatures: HashMap::new(),
             cached_layouts: HashMap::new(),
+            cached_tinfo: HashMap::new(),
             entry_block: block,
             success_landing_pad,
             failure_landing_pad,
@@ -556,6 +555,14 @@ fn define_module(
     }
 
     Ok(())
+}
+
+fn iter_u32_to_u8(data: impl IntoIterator<Item = u32> + ExactSizeIterator) -> Box<[u8]> {
+    let mut u8_data = Vec::with_capacity(data.len() * 4);
+    for val in data {
+        u8_data.extend_from_slice(&val.to_le_bytes());
+    }
+    u8_data.into_boxed_slice()
 }
 
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
@@ -615,6 +622,7 @@ struct CraneliftCodegen<'a, 'o> {
     cached_functions: HashMap<FuncId, FuncRef>,
     cached_signatures: HashMap<FuncSig, SigRef>,
     cached_layouts: HashMap<StructId, Rc<StructLayout>>,
+    cached_tinfo: HashMap<StructId, DataId>,
     // Used to retrieve parameters from the entry block (hence function)
     entry_block: Block,
     success_landing_pad: Block,
@@ -1909,11 +1917,13 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             });
 
         let layout = calculate_layout(&self.rcx, struct_);
-        let ptr_ty = self.module.target_config().pointer_type();
-        let size = self.builder.ins().iconst(ptr_ty, layout.total_size as i64);
-        let tinfo = self.builder.ins().iconst(ptr_ty, 0); // real TypeInfo when I have rt_release and ARC
+        let tinfo = self.get_cached_tinfo(struct_);
+        let tinfo = self
+            .builder
+            .ins()
+            .symbol_value(self.module.target_config().pointer_type(), tinfo);
         let func = self.get_or_cache_function(self.runtime.alloc);
-        let call = self.builder.ins().call(func, &[size, tinfo]);
+        let call = self.builder.ins().call(func, &[tinfo]);
         let obj = self.builder.inst_results(call)[0];
 
         let vals = struct_init
@@ -1944,6 +1954,82 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         }
 
         Operand::Scalar(obj)
+    }
+
+    /// Lowers tinfo (TypeInfo) for the runtime into a ptr to a data section
+    fn get_cached_tinfo(&mut self, struct_: &Struct) -> GlobalValue {
+        if let Some(tinfo) = self.cached_tinfo.get(&struct_.id) {
+            return self.module.declare_data_in_func(*tinfo, self.builder.func);
+        }
+
+        // Structure is (on 64 bit platforms)
+        // 48..40   ..32      ..24        ..16  ..8.     ..0
+        // +------+-----+----------+-----------+----+--------+
+        // | size |align|ref_offset|ref_off_len|name|name_len|
+        // +------+-----+----------+-----------+----+--------+
+        // usize. usize. *u32.      usize.      *u8. usize
+
+        let layout = self.get_cached_layout(struct_.id);
+        let ptr_ty = self.module.target_config().pointer_type();
+        let ptr_bytes = ptr_ty.bytes() as usize;
+        let usize_le = |v: u64| v.to_le_bytes()[..ptr_bytes].to_vec();
+
+        let ref_offsets: Vec<u32> = layout
+            .fields
+            .iter()
+            .filter(|f| f.managed) // see note 1
+            .map(|f| f.offset)
+            .collect();
+        let ref_offsets_len = ref_offsets.len();
+
+        let name_data = self.define_anon(struct_.name.as_bytes().into(), false, false);
+        let roffset_data = (ref_offsets_len > 0)
+            .then(|| self.define_anon(iter_u32_to_u8(ref_offsets.into_iter()), false, false));
+
+        // size | align | ref_offsets | ref_offsets_len | name | name_len
+        // pointer slots are left as zero then are filed in with the relocations (below)
+        let mut bytes = Vec::with_capacity(ptr_bytes * 6);
+        bytes.extend(usize_le(layout.total_size as u64));
+        bytes.extend(usize_le(layout.total_align as u64));
+        bytes.extend(usize_le(0)); // ref_offsets (reloc, or stays null)
+        bytes.extend(usize_le(ref_offsets_len as u64));
+        bytes.extend(usize_le(0)); // name (reloc)
+        bytes.extend(usize_le(struct_.name.len() as u64));
+
+        let mut desc = DataDescription::new();
+        desc.define(bytes.into_boxed_slice());
+        desc.set_align(ptr_bytes as u64);
+        if let Some(roffset_data) = roffset_data {
+            let gv = desc.import_global_value(roffset_data.into());
+            desc.write_data_addr((ptr_bytes * 2) as u32, gv, 0);
+        }
+        let name_gv = desc.import_global_value(name_data.into());
+        desc.write_data_addr((ptr_bytes * 4) as u32, name_gv, 0);
+
+        let tinfo = self
+            .module
+            .declare_anonymous_data(false, false)
+            .unwrap_bug("unable to declare anonymous data for tinfo");
+        self.module
+            .define_data(tinfo, &desc)
+            .unwrap_bug("unable to define data desc for tinfo");
+
+        self.cached_tinfo.insert(struct_.id, tinfo);
+        self.module.declare_data_in_func(tinfo, self.builder.func)
+    }
+
+    /// Shortcut to define anonymous dta when you don't care about the name.
+    fn define_anon(&mut self, data: Box<[u8]>, writeable: bool, tls: bool) -> DataId {
+        let data_id = self
+            .module
+            .declare_anonymous_data(writeable, tls)
+            .unwrap_or_else(|e| bug!("unable to declare anonymous data: {e}"));
+        let mut data_desc = DataDescription::new();
+        data_desc.define(data);
+        self.module
+            .define_data(data_id, &data_desc)
+            .unwrap_or_else(|e| bug!("unable to define data: {e}"));
+        data_id
     }
 
     /// Lowers a throwing call, splitting its result into (success, error).

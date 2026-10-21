@@ -1,5 +1,11 @@
 //! Minimal runtime helpers for rove until it has its own formatting etc.
 
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// Tracks number of live objects, mainly in debug modes to debug
+/// leaks.
+static LIVE: AtomicUsize = AtomicUsize::new(0);
+
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_println_i64(value: i64) {
     println!("{}", value);
@@ -70,11 +76,14 @@ pub extern "C" fn rt_abort_forced_try(fn_name: *const u8, fn_name_len: u32, line
 
 #[repr(C)]
 pub struct TypeInfo {
-    pub size: usize, // total allocation size incl. header
-    pub align: usize,
-    pub deinit: Option<extern "C" fn(*mut u8)>, // generated per struct, None if no ref fields
-    pub name: *const u8,                        // optional: for leak reports
-    pub name_len: usize,
+    size: usize, // total allocation size incl. header
+    align: usize,
+    // Will have just array of u32s for offsets for now.
+    // deinit: Option<extern "C" fn(*mut u8)>, // generated per struct, None if no ref fields
+    ref_offsets: *const u32, // offsets of fields that are references, voidptr if none.
+    ref_offsets_len: usize,
+    name: *const u8,
+    name_len: usize,
 }
 
 #[repr(C)]
@@ -90,11 +99,14 @@ struct Header {
 ///
 /// This does NOT alloc the data segment
 #[unsafe(no_mangle)]
-pub extern "C" fn rt_alloc(size: usize, type_info: *const TypeInfo) -> *mut u8 {
+pub extern "C" fn rt_alloc(type_info: *const TypeInfo) -> *mut u8 {
     use std::alloc::Layout;
 
+    LIVE.fetch_add(1, Ordering::SeqCst);
+
     unsafe {
-        let layout = Layout::from_size_align(size, 16).unwrap();
+        let ti = &*type_info;
+        let layout = Layout::from_size_align(ti.size, ti.align).unwrap();
         let p = std::alloc::alloc_zeroed(layout); // zeroed: fields start null/0
         let h = p as *mut Header;
         (*h).strong = 1; // +1 returned to caller
@@ -111,6 +123,15 @@ type RtEntryPoint = unsafe extern "C" fn() -> i64;
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_start(entry_point: RtEntryPoint) -> i32 {
     let res = unsafe { entry_point() };
+
+    // assuming it doesn't panic, stderr the live count if ROVE_DEBUG_LEAKS is set
+    if std::env::var("ROVEFLAGS").map_or(false, |v| v.contains("debug_leaks")) {
+        let live = LIVE.load(Ordering::SeqCst);
+        eprintln!(
+            "rove: live objects at exit: {} (remove debug_leaks from ROVEFLAGS to hide this message)",
+            live
+        );
+    }
 
     res as i32
 }

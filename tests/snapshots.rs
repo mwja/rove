@@ -54,7 +54,17 @@ fn render(path: &Path) -> String {
             format!("compile error:\n{}", String::from_utf8(buf).unwrap())
         }
         Ok(Ok(())) => {
-            let output = Command::new(&out).output().unwrap();
+            let mut output_builder = Command::new(&out);
+            if rel
+                .file_stem()
+                .and_then(|f| f.to_str())
+                .unwrap()
+                .starts_with("leak_")
+            {
+                output_builder.env("ROVEFLAGS", "debug_leaks");
+            }
+
+            let output = output_builder.output().unwrap();
             let mut s = format!("exit: {:?}\n", output.status.code());
             write!(s, "--- stdout\n{}", String::from_utf8_lossy(&output.stdout)).unwrap();
             if !output.stderr.is_empty() {
