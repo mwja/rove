@@ -1,0 +1,18 @@
+// old(x) snapshots of a struct are kept alive until the ensure runs, then released.
+// Expected output: 1, 2
+struct Point {
+    var x: int,
+    var y: int
+}
+
+func bump(p: Point) -> int
+    ensure! : ret > old(p).x
+{
+    return p.x + 1;
+}
+
+func main() {
+    let p = Point.{ x = 0, y = 0 };
+    print bump(p);
+    print bump(Point.{ x = 1, y = 1 });
+}

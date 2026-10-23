@@ -1,0 +1,47 @@
+struct Point {
+    var x: int,
+    let y: int
+}
+
+struct Line {
+  var start: Point,
+  var end: Point
+}
+
+
+func main() {
+    // should not leak
+    var line = Line.{
+      start = Point.{
+        x = 0,
+        y = 0
+      },
+      end = Point.{
+        x = 2,
+        y = 2
+      }
+    };
+
+    line.start = Point.{
+      x = 1,
+      y = 1,
+    };
+
+    line = Line.{
+      start = Point.{
+        x = 2,
+        y = 2
+      },
+      end = Point.{
+        x = 0,
+        y = 0
+      }
+    };
+
+    cat(line.start);
+}
+
+
+func cat(pt: Point) -> Point {
+  pt
+}

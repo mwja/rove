@@ -1,0 +1,24 @@
+// Several owners of one object; reassigning one must not free it for the others.
+// Expected output: 1, 1, 2, 1, 1
+struct Point {
+    var x: int,
+    var y: int
+}
+
+func main() {
+    var a = Point.{ x = 1, y = 1 };
+    var b = a;
+    print b.x;
+
+    a = Point.{ x = 2, y = 2 };
+    print b.x;
+    print a.x;
+
+    // self-assignment must not free before retaining
+    b = b;
+    print b.x;
+
+    // reassign to an existing alias
+    a = b;
+    print a.x;
+}

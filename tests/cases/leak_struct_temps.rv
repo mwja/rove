@@ -1,0 +1,36 @@
+// Owned results that are never stored are released at the end of the statement.
+// Expected output: 3, 7, 10, 4
+struct Point {
+    var x: int,
+    var y: int
+}
+
+func make(x: int) -> Point {
+    return Point.{ x = x, y = x };
+}
+
+func sum(a: Point, b: Point) -> int {
+    return a.x + b.x;
+}
+
+func id(p: Point) -> Point {
+    p
+}
+
+func main() {
+    // field read off a temporary
+    print make(3).x;
+
+    // discarded results
+    make(5);
+    id(make(6));
+
+    // temporaries as arguments
+    print sum(make(3), make(4));
+    print sum(make(4), id(make(6)));
+
+    // temporary in a condition
+    if make(1).x == 1 {
+        print 4;
+    }
+}

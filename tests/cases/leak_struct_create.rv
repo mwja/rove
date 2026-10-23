@@ -4,7 +4,7 @@ struct Point {
 }
 
 func main() {
-    // leaks with +1
+    // should not leak
     var zero = Point.{
         x = 0,
         y = 0

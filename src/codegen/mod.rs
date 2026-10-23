@@ -4,6 +4,7 @@
 //! take a ctxt with sidetables from a type pass.
 
 mod layout;
+mod ownership;
 mod repr;
 use cranelift::{
     codegen::{
@@ -22,7 +23,8 @@ use cranelift::{
     module::{DataDescription, DataId, FuncId, Linkage, Module, default_libcall_names},
     object::{ObjectBuilder, ObjectModule},
 };
-use std::{collections::HashMap, error::Error, io::Write as _, path::PathBuf, rc::Rc};
+use ownership::Ownership::{self, *};
+use std::{collections::HashMap, error::Error, io::Write as _, mem, path::PathBuf, rc::Rc};
 
 use crate::{
     UnwrapBug,
@@ -109,6 +111,14 @@ impl Operand {
             other => unreachable!("{what} must be single-slot, got {other:?}"),
         }
     }
+
+    fn owned(self) -> (Self, Ownership) {
+        (self, Owned)
+    }
+
+    fn borrowed(self) -> (Self, Ownership) {
+        (self, Borrowed)
+    }
 }
 
 fn lower_sig(rcx: ReprCx, def_sig: &FuncSig, is_main: bool) -> Signature {
@@ -151,6 +161,10 @@ struct Runtime {
     // for now type info is never passed as I don't currently have rt_release, but once passed it'll be useful
     /// rt_alloc(tinfo: ptr TypeInfo) -> ptr
     alloc: FuncId,
+    /// rt_retain(item: ptr Header) -> ()
+    retain: FuncId,
+    /// rt_release(item: ptr Header) -> ()
+    release: FuncId,
 }
 
 impl Runtime {
@@ -246,6 +260,28 @@ impl Runtime {
 
                 module
                     .declare_function("rt_alloc", Linkage::Import, &alloc_sig)
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
+            },
+            retain: {
+                let mut alloc_sig = module.make_signature();
+
+                alloc_sig
+                    .params
+                    .push(AbiParam::new(module.target_config().pointer_type()));
+
+                module
+                    .declare_function("rt_retain", Linkage::Import, &alloc_sig)
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
+            },
+            release: {
+                let mut alloc_sig = module.make_signature();
+
+                alloc_sig
+                    .params
+                    .push(AbiParam::new(module.target_config().pointer_type()));
+
+                module
+                    .declare_function("rt_release", Linkage::Import, &alloc_sig)
                     .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
             },
         }
@@ -509,6 +545,7 @@ fn define_module(
             cached_signatures: HashMap::new(),
             cached_layouts: HashMap::new(),
             cached_tinfo: HashMap::new(),
+            temps: Vec::new(),
             entry_block: block,
             success_landing_pad,
             failure_landing_pad,
@@ -623,6 +660,8 @@ struct CraneliftCodegen<'a, 'o> {
     cached_signatures: HashMap<FuncSig, SigRef>,
     cached_layouts: HashMap<StructId, Rc<StructLayout>>,
     cached_tinfo: HashMap<StructId, DataId>,
+    // Temporary values to release on statement end (borrowed ones.)
+    temps: Vec<Value>,
     // Used to retrieve parameters from the entry block (hence function)
     entry_block: Block,
     success_landing_pad: Block,
@@ -779,13 +818,16 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         for (kind, block) in &links {
             let target = self.locate_cleanup_target(scope, *kind);
             self.builder.switch_to_block(*block);
-            self.emit_frame_locals_release(scope);
+            // read the exit's params before releasing: use_var in an unsealed
+            // block appends params of its own, which the target doesn't take.
             let args: Vec<BlockArg> = self
                 .builder
                 .block_params(*block)
                 .iter()
                 .map(|v| BlockArg::Value(*v))
                 .collect();
+            self.emit_frame_locals_release(scope);
+
             self.builder.ins().jump(target, &args);
             // no restore — each link is filled before the next switch
         }
@@ -896,6 +938,27 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.builder.switch_to_block(self.success_landing_pad);
         self.lower_constraints_ensure(constraints);
 
+        let values_to_release = self
+            .old_values
+            .iter()
+            .filter_map(|(old_id, operand)| {
+                let ty = self
+                    .cx
+                    .body
+                    .old_ty(*old_id)
+                    .unwrap_bug("old(x) did not have type registered");
+                if ty.is_ref_counted() {
+                    Some(operand.expect_scalar("old(x) may only be a scalar"))
+                } else {
+                    None
+                }
+            })
+            .collect::<Vec<_>>();
+
+        for value in values_to_release {
+            self.emit_release(value);
+        }
+
         // I use current_block here as the `ensure` checks MAY branch to other checks (a series of checks will require new
         // blocks to run brif again), so we might not be in the success_landing_pad.
 
@@ -914,6 +977,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             let ok = self.builder.ins().iconst(err_ty, 0);
             args.push(BlockArg::Value(ok));
         }
+
         self.builder.ins().jump(self.landing_pad, &args);
     }
 
@@ -944,7 +1008,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     ) -> Block {
         let condition = constraint.condition();
         let value = self
-            .lower_expr(condition.clone())
+            .lower_expr_borrowed(condition.clone())
             .expect_scalar("constraint must be boolean");
 
         let block = self
@@ -978,7 +1042,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             unreachable!("only guard constraints are non-aborting");
         };
         let err_value = self
-            .lower_expr(guard.error.clone())
+            .lower_expr_borrowed(guard.error.clone())
             .expect_scalar("only scalars may be thrown");
         self.builder.ins().brif(
             value,
@@ -1001,7 +1065,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     ) -> Block {
         let condition = constraint.condition();
         let value = self
-            .lower_expr(condition.clone())
+            .lower_expr_borrowed(condition.clone())
             .expect_scalar("constraint must be boolean");
 
         let block = self
@@ -1165,7 +1229,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_constraint_call_expr_olds(&mut self, call_expr: &ast::AstCallExpr) {
         match (self.cx.body.node_res(call_expr.node_id), call_expr) {
             (Some(Res::ConstraintOld(old_id)), call_expr) if call_expr.is_constraint_kw_old() => {
-                let value = self.lower_expr(*call_expr.args[0].clone());
+                let value = self.lower_expr_owned(*call_expr.args[0].clone());
                 self.old_values.insert(old_id, value);
             }
             (_, call_expr) => {
@@ -1228,7 +1292,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_stmt(&mut self, stmt: ast::AstStmt) {
         match stmt.kind {
             ast::AstStmtKind::Expr(expr) | ast::AstStmtKind::BlockLike(expr) => {
-                self.lower_expr(expr);
+                // discarded, so an owned result becomes a temp and is released
+                self.lower_expr_borrowed(expr);
             }
             ast::AstStmtKind::Print(print) => self.lower_print(print),
             ast::AstStmtKind::Decl(decl) => self.lower_decl(decl),
@@ -1246,12 +1311,16 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 // use statements are lowered to nothing, they are only used for typeck
             }
         };
+
+        if !self.is_current_block_terminated() {
+            self.flush_temps();
+        }
     }
 
     fn lower_guard_stmt(&mut self, guard_stmt: ast::AstGuardStmt) {
         self.loc(&guard_stmt.node_id);
         let cond = self
-            .lower_expr(*guard_stmt.condition)
+            .lower_expr_borrowed(*guard_stmt.condition)
             .expect_scalar("guard condition must be scalar");
         let else_block = self.builder.create_block();
         let continue_block = self.builder.create_block();
@@ -1273,13 +1342,15 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_throw_stmt(&mut self, throw_stmt: ast::AstThrowStmt) {
-        let err_value = self.lower_expr(*throw_stmt.expr.clone());
+        let err_value = self.lower_expr_borrowed(*throw_stmt.expr.clone());
 
         let dest = self.cleanup_block(
             self.current_scope
                 .unwrap_or_else(|| bug!("throw lowered outside of any scope")),
             ExitKind::Error,
         );
+
+        self.flush_temps();
         self.builder.ins().jump(
             dest,
             &[BlockArg::Value(
@@ -1294,7 +1365,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .body
             .node_ty(switch_stmt.node_id)
             .unwrap_or_else(|| bug!("a switch expression has no type"));
-        let base_value = self.lower_expr(*switch_stmt.expr.clone());
+        let base_value = self.lower_expr_borrowed(*switch_stmt.expr.clone());
 
         let (_, else_, cases) = switch_stmt.consume();
         let (cases, bodies) = cases
@@ -1340,7 +1411,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.builder.ins().jump(block, &[]);
             }
             self.builder.switch_to_block(block);
-            let value = self.lower_expr(*case.expr.clone());
+            let value = self.lower_expr_borrowed(*case.expr.clone());
             // check equality, insert a fake astnode for the condition
             let condition = self.lower_cond_direct(
                 self.cx
@@ -1421,6 +1492,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 .unwrap_or_else(|| bug!("fallthrough lowered outside of any scope")),
             ExitKind::Fallthrough,
         );
+        self.flush_temps();
         self.builder.ins().jump(dest, &[]);
     }
 
@@ -1430,6 +1502,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 .unwrap_or_else(|| bug!("break lowered outside of any scope")),
             ExitKind::Break,
         );
+        self.flush_temps();
         self.builder.ins().jump(dest, &[]);
     }
 
@@ -1530,7 +1603,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         match cond {
             Some(c) => {
                 let v = self
-                    .lower_expr(c)
+                    .lower_expr_borrowed(c)
                     .expect_scalar("loop condition must be scalar"); // outer scope: frame not pushed yet
                 self.builder.ins().brif(v, body_block, &[], exit_block, &[]);
             }
@@ -1564,7 +1637,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let args: Vec<BlockArg> = match (return_.expr, self.chain_repr(ExitKind::Return)) {
             (None, Repr::Empty) => vec![],
             (Some(e), Repr::Scalar(_)) => vec![BlockArg::Value(
-                self.lower_expr(*e)
+                self.lower_expr_owned(*e)
                     .expect_scalar("cannot return pre-made fallible type (yet)"),
             )],
             (e, r) => unreachable!("return arity mismatch: expr={}, repr={r:?}", e.is_some()),
@@ -1574,6 +1647,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 .unwrap_or_else(|| bug!("return lowered outside of any scope")),
             ExitKind::Return,
         );
+        self.flush_temps();
         self.builder.ins().jump(target, &args);
     }
 
@@ -1608,16 +1682,39 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 .builder
                 .declare_var(self.rcx.repr_of(&ty).expect_scalar("local variable"));
             self.insert(Res::Local(local_id), variable);
+
+            if ty.is_ref_counted() {
+                let value = self
+                    .builder
+                    .ins()
+                    .iconst(self.module.target_config().pointer_type(), 0);
+                self.builder.def_var(variable, value);
+            }
         }
     }
 
     fn emit_frame_locals_release(&mut self, scope_id: ScopeId) {
-        for _local_id in self.frame_locals(scope_id).into_iter() {
-            // in the future, work with the reference counts to release locals
+        for local_id in self.frame_locals(scope_id).into_iter() {
+            let ty = self
+                .cx
+                .body
+                .local_ty(local_id)
+                .unwrap_or_else(|| bug!("a frame local has no type"));
+
+            if ty.is_ref_counted() {
+                let var = self.locals[&local_id];
+                let val = self.builder.use_var(var);
+                self.emit_release(val);
+            }
         }
     }
 
-    /// Blocks need to be cleaned up in certain ways,
+    fn flush_temps(&mut self) {
+        let temps = mem::take(&mut self.temps);
+        for temp in temps {
+            self.emit_release(temp);
+        }
+    }
 
     /// Returns the block's value, which is its tail (if any).
     fn lower_block_stmt(&mut self, block: ast::AstBlockStmt) -> Operand {
@@ -1636,7 +1733,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         for stmt in block.stmts {
             match stmt.kind {
                 // typeck only permits a tail as the last statement.
-                ast::AstStmtKind::ImplicitReturn(expr) => value = self.lower_expr(expr),
+                // owned so it outlives this frame's locals being released.
+                ast::AstStmtKind::ImplicitReturn(expr) => value = self.lower_expr_owned(expr),
                 kind => self.lower_stmt(ast::AstStmt { kind }),
             }
         }
@@ -1673,7 +1771,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             None
         };
         let cond = self
-            .lower_expr(*if_expr.cond)
+            .lower_expr_borrowed(*if_expr.cond)
             .expect_scalar("cannot return pre-made fallible type (yet)");
         // Without an else the if is void, so the merge block takes no value.
         self.builder.ins().brif(
@@ -1734,8 +1832,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     fn lower_assign(&mut self, assign: ast::AstAssignStmt) {
         self.loc(&assign.node_id);
 
+        let assign_expr_node_id = assign.expr.node_id();
+
         let value = self
-            .lower_expr(*assign.expr)
+            .lower_expr_owned(*assign.expr)
             .expect_scalar("cannot store fallible types in variables (yet)");
 
         let res = self
@@ -1764,10 +1864,20 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     fn lower_simple_assign(&mut self, res: Res, value: Value) {
-        let target = self
-            .lookup_local(&res)
-            .unwrap_or_else(|| bug!("a place does not resolve to a local variable"));
+        let Res::Local(local_id) = res else {
+            unreachable!()
+        };
+        let ty = self
+            .cx
+            .body
+            .local_ty(local_id)
+            .unwrap_bug("local has no type");
+        let target = self.locals[&local_id];
+        let old = ty.is_ref_counted().then(|| self.builder.use_var(target));
         self.builder.def_var(target, value);
+        if let Some(old) = old {
+            self.emit_release(old);
+        }
     }
 
     fn lower_field_assign(&mut self, base: Res, field: &str, struct_id: StructId, value: Value) {
@@ -1792,12 +1902,24 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             );
         });
 
-        self.builder.ins().store(
-            MemFlagsData::new(),
-            value,
-            base.expect_scalar("must be scalar to store into field"),
-            f.offset as i32,
-        );
+        let base = base.expect_scalar("must be scalar to store into field");
+
+        // read the old value before overwriting, if it's managed.
+        let old = f.managed.then(|| {
+            self.builder
+                .ins()
+                .load(f.ty, MemFlagsData::new(), base, f.offset as i32)
+        });
+
+        // Store the new value in the field
+        self.builder
+            .ins()
+            .store(MemFlagsData::new(), value, base, f.offset as i32);
+
+        // Release the old value.
+        if let Some(old) = old {
+            self.emit_release(old);
+        }
     }
 
     fn lower_decl(&mut self, decl: ast::AstDecl) {
@@ -1818,7 +1940,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             unreachable!();
         };
         let value = self
-            .lower_expr(*let_decl.expr)
+            .lower_expr_owned(*let_decl.expr)
             .expect_scalar("cannot store fallible types in variables (yet)");
         // for now we only have i64s... so no need to check
         let variable = self
@@ -1831,61 +1953,92 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         self.insert(Res::Local(local_id), variable);
     }
 
-    fn lower_expr(&mut self, expr: ast::AstExpr) -> Operand {
+    fn lower_expr(&mut self, expr: ast::AstExpr) -> (Operand, Ownership) {
         self.loc(&expr.node_id());
 
         match expr.kind {
-            ast::AstExprKind::Literal(_) => Operand::Scalar(self.lower_lit(expr)),
+            ast::AstExprKind::Literal(_) => Operand::Scalar(self.lower_lit(expr)).borrowed(),
             ast::AstExprKind::Unary(unary_expr) => {
-                Operand::Scalar(self.lower_unary_expr(unary_expr))
+                Operand::Scalar(self.lower_unary_expr(unary_expr)).borrowed()
             }
-            ast::AstExprKind::Binary(_) => Operand::Scalar(self.lower_bin_expr(expr)),
-            ast::AstExprKind::Ident(ident) => self.lower_ident(ident),
+            ast::AstExprKind::Binary(_) => Operand::Scalar(self.lower_bin_expr(expr)).borrowed(),
+            ast::AstExprKind::Ident(ident) => self.lower_ident(ident).borrowed(),
             ast::AstExprKind::Call(call_expr) => match self.cx.body.node_res(call_expr.node_id) {
-                Some(res @ Res::ConstraintOld(_)) => self.lower_value_res(res),
+                Some(res @ Res::ConstraintOld(_)) => self.lower_value_res(res).borrowed(),
                 _ => self.lower_call(call_expr),
             },
-            ast::AstExprKind::Path(path_expr) => self.lower_path(path_expr),
+            ast::AstExprKind::Path(path_expr) => self.lower_path(path_expr).borrowed(),
             ast::AstExprKind::ImplicitPath(implicit_path_expr) => {
-                self.lower_implicit_path(implicit_path_expr)
+                self.lower_implicit_path(implicit_path_expr).borrowed()
             }
             ast::AstExprKind::ForcedTry(forced_try_expr) => self.lower_forced_try(forced_try_expr),
             ast::AstExprKind::TryCatch(try_catch_expr) => self.lower_try_catch(try_catch_expr),
-            ast::AstExprKind::Block(block) => self.lower_block_stmt(block),
-            ast::AstExprKind::If(if_expr) => self.lower_if(if_expr),
-            ast::AstExprKind::Switch(switch_expr) => self.lower_switch_stmt(switch_expr),
+            ast::AstExprKind::Block(block) => self.lower_block_stmt(block).owned(),
+            // every branch yields a block tail, which is owned
+            ast::AstExprKind::If(if_expr) => self.lower_if(if_expr).owned(),
+            ast::AstExprKind::Switch(switch_expr) => self.lower_switch_stmt(switch_expr).owned(),
             ast::AstExprKind::Loop(loop_expr) => {
                 self.lower_gen_loop(loop_expr.body, None);
-                Operand::Empty
+                Operand::Empty.borrowed()
             }
             ast::AstExprKind::While(while_expr) => {
                 self.lower_gen_loop(while_expr.body, Some(*while_expr.cond));
-                Operand::Empty
+                Operand::Empty.borrowed()
             }
             // Anything that goes away is never (typeck)
             ast::AstExprKind::Return(return_expr) => {
                 self.lower_return_stmt(return_expr);
-                Operand::Empty
+                Operand::Empty.borrowed()
             }
             ast::AstExprKind::Throw(throw_expr) => {
                 self.lower_throw_stmt(throw_expr);
-                Operand::Empty
+                Operand::Empty.borrowed()
             }
             ast::AstExprKind::Break(_) => {
                 self.lower_break_stmt();
-                Operand::Empty
+                Operand::Empty.borrowed()
             }
             ast::AstExprKind::Continue(_) => {
                 self.lower_continue_stmt();
-                Operand::Empty
+                Operand::Empty.borrowed()
             }
             ast::AstExprKind::Fallthrough(_) => {
                 self.lower_fallthrough_stmt();
-                Operand::Empty
+                Operand::Empty.borrowed()
             }
             ast::AstExprKind::StructInit(struct_init) => self.lower_struct_init(struct_init),
-            ast::AstExprKind::FieldAccess(field_access) => self.lower_field_access(field_access),
+            ast::AstExprKind::FieldAccess(field_access) => {
+                self.lower_field_access(field_access).borrowed()
+            }
         }
+    }
+
+    fn lower_expr_borrowed(&mut self, expr: ast::AstExpr) -> Operand {
+        let node_id = expr.node_id();
+        let (value, own) = self.lower_expr(expr);
+        self.as_borrowed(
+            value,
+            own,
+            &self
+                .cx
+                .body
+                .node_ty(node_id)
+                .unwrap_bug("Expect expr to have type."),
+        )
+    }
+
+    fn lower_expr_owned(&mut self, expr: ast::AstExpr) -> Operand {
+        let node_id = expr.node_id();
+        let (value, own) = self.lower_expr(expr);
+        self.as_owned(
+            value,
+            own,
+            &self
+                .cx
+                .body
+                .node_ty(node_id)
+                .unwrap_bug("Expect expr to have type."),
+        )
     }
 
     fn lower_field_access(&mut self, field_access: ast::AstFieldAccessExpr) -> Operand {
@@ -1898,11 +2051,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             bug!("a field access base is not a struct");
         };
 
-        let base = self.lower_expr(*field_access.base);
+        let base = self.lower_expr_borrowed(*field_access.base);
         self.lower_field_value_access(base, field_access.field.text, struct_id)
     }
 
-    fn lower_struct_init(&mut self, struct_init: ast::AstStructInitExpr) -> Operand {
+    fn lower_struct_init(&mut self, struct_init: ast::AstStructInitExpr) -> (Operand, Ownership) {
         let Some(Res::Struct(struct_id)) = self.cx.body.node_res(struct_init.path.node_id()) else {
             bug!("a struct init expression has no resolution (or its resolution is not a struct)");
         };
@@ -1941,7 +2094,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                             struct_.name
                         );
                     });
-                let v = self.lower_expr(*field.expr);
+                let v = self.lower_expr_owned(*field.expr);
                 (idx, v.expect_scalar("struct fields must be scalar"))
             })
             .collect::<Vec<_>>();
@@ -1953,7 +2106,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 .store(MemFlagsData::trusted(), v, obj, f.offset as i32);
         }
 
-        Operand::Scalar(obj)
+        Operand::Scalar(obj).owned()
     }
 
     /// Lowers tinfo (TypeInfo) for the runtime into a ptr to a data section
@@ -2033,16 +2186,19 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
     }
 
     /// Lowers a throwing call, splitting its result into (success, error).
-    fn lower_handled_call(&mut self, call_expr: ast::AstCallExpr) -> (Operand, Value) {
+    fn lower_handled_call(&mut self, call_expr: ast::AstCallExpr) -> ((Operand, Ownership), Value) {
         match self.lower_call(call_expr) {
-            Operand::Pair(success_val, error_val) => (Operand::Scalar(success_val), error_val),
-            Operand::Scalar(error_val) => (Operand::Empty, error_val),
-            Operand::Empty => bug!("a handled call expression has no error slot"),
+            (Operand::Pair(success_val, error_val), own) => {
+                ((Operand::Scalar(success_val), own), error_val)
+            }
+            (Operand::Scalar(error_val), own) => ((Operand::Empty, own), error_val),
+            (Operand::Empty, _own) => bug!("a handled call expression has no error slot"),
         }
     }
 
-    fn lower_try_catch(&mut self, try_catch_expr: ast::AstTryCatchExpr) -> Operand {
-        let (success, error_val) = self.lower_handled_call(*try_catch_expr.call_expr);
+    fn lower_try_catch(&mut self, try_catch_expr: ast::AstTryCatchExpr) -> (Operand, Ownership) {
+        let ((success, success_own), error_val) =
+            self.lower_handled_call(*try_catch_expr.call_expr);
         self.loc(&try_catch_expr.node_id);
 
         let ty = self
@@ -2097,14 +2253,17 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
         self.builder.switch_to_block(merge_block);
         self.builder.seal_block(merge_block);
-        match self.builder.block_params(merge_block) {
-            [] => Operand::Empty,
-            [v] => Operand::Scalar(*v),
-            _ => unreachable!("try/catch values are single-slot"),
-        }
+        (
+            match self.builder.block_params(merge_block) {
+                [] => Operand::Empty,
+                [v] => Operand::Scalar(*v),
+                _ => unreachable!("try/catch values are single-slot"),
+            },
+            success_own,
+        )
     }
 
-    fn lower_forced_try(&mut self, forced_try_expr: AstForcedTryExpr) -> Operand {
+    fn lower_forced_try(&mut self, forced_try_expr: AstForcedTryExpr) -> (Operand, Ownership) {
         let (success, error_val) = self.lower_handled_call(*forced_try_expr.call_expr.clone());
 
         self.loc(&forced_try_expr.node_id);
@@ -2301,7 +2460,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         }
     }
 
-    fn lower_call(&mut self, expr: ast::AstCallExpr) -> Operand {
+    fn lower_call(&mut self, expr: ast::AstCallExpr) -> (Operand, Ownership) {
         // Get callee
         let expr_ty = self
             .cx
@@ -2321,7 +2480,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .args
             .into_iter()
             .map(|arg| {
-                self.lower_expr(*arg)
+                self.lower_expr_borrowed(*arg)
                     .expect_scalar("cannot yet pass fallible type as parameter")
             })
             .collect::<Vec<_>>();
@@ -2332,7 +2491,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 self.builder.ins().call(func_ref, &args)
             }
             None => {
-                let callee = self.lower_expr(*expr.callee);
+                let callee = self.lower_expr_borrowed(*expr.callee);
                 let sig = self.lower_sig_cached(callee_sig.clone());
 
                 self.builder.ins().call_indirect(
@@ -2349,6 +2508,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             Repr::Scalar(_) => Operand::Scalar(results[0]),
             Repr::Pair(..) => Operand::Pair(results[0], results[1]),
         }
+        .owned()
     }
 
     /// Checks if the given ident is a direct function reference and returns
@@ -2388,7 +2548,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         res_ty: Ty,
         circuit: ShortCircuit,
     ) -> Value {
-        let left = self.lower_expr(x);
+        let left = self.lower_expr_borrowed(x);
 
         let merge_block = self.builder.create_block();
         let merge_param_val = self.builder.append_block_param(
@@ -2425,7 +2585,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         };
 
         self.builder.switch_to_block(check_right_block);
-        let right = self.lower_expr(y);
+        let right = self.lower_expr_borrowed(y);
         self.builder.ins().jump(
             merge_block,
             &[BlockArg::Value(right.expect_scalar(
@@ -2469,10 +2629,10 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     .node_ty(x.node_id())
                     .unwrap_or_else(|| bug!("operand of condition has no type"));
                 let x = self
-                    .lower_expr(x)
+                    .lower_expr_borrowed(x)
                     .expect_scalar("operand of condition must be a scalar");
                 let y = self
-                    .lower_expr(y)
+                    .lower_expr_borrowed(y)
                     .expect_scalar("operand of condition must be a scalar");
                 self.lower_cond_direct(x_ty, x, y, res_ty, operator)
             }
@@ -2605,7 +2765,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
 
     fn lower_unary_expr(&mut self, unary_expr: ast::AstUnaryExpr) -> Value {
         let x = self
-            .lower_expr(*unary_expr.expr)
+            .lower_expr_borrowed(*unary_expr.expr)
             .expect_scalar("cannot perform comparisons or manipulations on a fallible type");
         let res_ty = self
             .cx
@@ -2701,7 +2861,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             .node_ty(print.expr.node_id())
             .unwrap_or_else(|| bug!("a print expression has no type"));
         let x = self
-            .lower_expr(*print.expr)
+            .lower_expr_borrowed(*print.expr)
             .expect_scalar("cannot print fallible type");
         // enum values are stored as index + 1 (0 is reserved for "no error"),
         // but print the variant's index.
@@ -2719,5 +2879,30 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             TyKind::Struct(_) => unreachable!(),
         });
         let _call = self.builder.ins().call(printf_ref, &[x]);
+    }
+
+    fn emit_retain(&mut self, v: Value) {
+        let func_ref = self.get_or_cache_function(self.runtime.retain);
+        self.builder.ins().call(func_ref, &[v]);
+    }
+
+    fn emit_release(&mut self, v: Value) {
+        let func_ref = self.get_or_cache_function(self.runtime.release);
+        self.builder.ins().call(func_ref, &[v]);
+    }
+
+    fn as_owned(&mut self, v: Operand, own: Ownership, ty: &Ty) -> Operand {
+        if ty.is_ref_counted() && own == Borrowed {
+            self.emit_retain(v.expect_scalar("can't ref count non-scalar"));
+        }
+        v
+    }
+
+    fn as_borrowed(&mut self, v: Operand, own: Ownership, ty: &Ty) -> Operand {
+        if ty.is_ref_counted() && own == Owned {
+            self.temps
+                .push(v.expect_scalar("can't ref count non-scalar"));
+        }
+        v
     }
 }

@@ -1,0 +1,52 @@
+// return, break and continue must release locals of every scope they leave.
+// Expected output: 5, 3, 4, 9
+struct Point {
+    var x: int,
+    var y: int
+}
+
+func early(n: int) -> int {
+    let p = Point.{ x = n, y = n };
+    if n > 3 {
+        let q = Point.{ x = 1, y = 1 };
+        return p.x;
+    }
+    return 0;
+}
+
+func early_struct(n: int) -> Point {
+    let p = Point.{ x = n, y = n };
+    if n > 0 {
+        let q = Point.{ x = 0, y = 0 };
+        return p;
+    }
+    return Point.{ x = 0, y = 0 };
+}
+
+func main() {
+    print early(5);
+    print early_struct(3).x;
+
+    var i = 0;
+    loop {
+        let p = Point.{ x = i, y = i };
+        i = i + 1;
+        if p.x == 4 {
+            print p.x;
+            break;
+        }
+    }
+
+    var total = 0;
+    var j = 0;
+    while j < 4 {
+        let p = Point.{ x = j, y = j };
+        j = j + 1;
+        if p.x == 1 {
+            continue;
+        }
+        total = total + p.x;
+    }
+    // 0 + 2 + 3 + an extra +4 from the loop above
+    print total + 4;
+}

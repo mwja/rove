@@ -72,6 +72,11 @@ impl Ty {
     pub fn coerces_to(&self, expected: &Ty) -> bool {
         self == expected || matches!(*self.kind, TyKind::Never)
     }
+
+    /// Is this refcounted as does it need rt_retain?
+    pub fn is_ref_counted(&self) -> bool {
+        matches!(*self.kind, TyKind::Struct(_))
+    }
 }
 
 impl Display for Ty {

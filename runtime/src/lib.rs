@@ -1,6 +1,9 @@
 //! Minimal runtime helpers for rove until it has its own formatting etc.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    alloc::Layout,
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 /// Tracks number of live objects, mainly in debug modes to debug
 /// leaks.
@@ -87,7 +90,7 @@ pub struct TypeInfo {
 }
 
 #[repr(C)]
-struct Header {
+pub struct Header {
     strong: u32,
     unowned: u32,
     weak: u32,
@@ -100,8 +103,6 @@ struct Header {
 /// This does NOT alloc the data segment
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_alloc(type_info: *const TypeInfo) -> *mut u8 {
-    use std::alloc::Layout;
-
     LIVE.fetch_add(1, Ordering::SeqCst);
 
     unsafe {
@@ -115,6 +116,45 @@ pub extern "C" fn rt_alloc(type_info: *const TypeInfo) -> *mut u8 {
         (*h).flags = 0;
         (*h).type_info = type_info;
         p
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_retain(item_with_header: *const Header) {
+    if !item_with_header.is_null() {
+        unsafe {
+            let ih = item_with_header as *mut Header;
+            (*ih).strong += 1;
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_release(item_with_header: *const Header) {
+    if item_with_header.is_null() {
+        return;
+    }
+    let ih = item_with_header as *mut Header;
+
+    unsafe {
+        debug_assert!((*ih).strong > 0);
+        (*ih).strong -= 1;
+        if (*ih).strong == 0 {
+            let ti = (*ih).type_info;
+            debug_assert!(!ti.is_null());
+
+            for idx in 0..(*ti).ref_offsets_len {
+                let off = *(*ti).ref_offsets.add(idx);
+                // the as *mut u8 cast here is because otherwise it would add by the size of the Header. but the offset
+                // is stored in bytes.
+                let child = *((ih as *mut u8).add(off as usize) as *const *mut Header);
+                // Release a referenced ref-counted value too
+                rt_release(child);
+            }
+            let layout = Layout::from_size_align((*ti).size, (*ti).align).unwrap();
+            std::alloc::dealloc(ih as *mut u8, layout);
+            LIVE.fetch_sub(1, Ordering::SeqCst);
+        }
     }
 }
 

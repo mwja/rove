@@ -1,0 +1,47 @@
+// Nested structs: field reassignment, moving a child between fields, and a
+// parent being freed releases its children.
+// Expected output: 2, 2, 5, 9, 9
+struct Point {
+    var x: int,
+    var y: int
+}
+
+struct Line {
+    var start: Point,
+    var end: Point
+}
+
+struct Shape {
+    var main: Line,
+    var extra: Point
+}
+
+func main() {
+    var line = Line.{
+        start = Point.{ x = 1, y = 1 },
+        end = Point.{ x = 2, y = 2 }
+    };
+
+    // both fields share one child, then one is overwritten
+    line.start = line.end;
+    print line.start.x;
+    line.end = Point.{ x = 3, y = 3 };
+    print line.start.x;
+
+    // child outlives its parent
+    let kept = line.start;
+    line = Line.{
+        start = Point.{ x = 5, y = 5 },
+        end = Point.{ x = 6, y = 6 }
+    };
+    print line.start.x;
+
+    // three levels deep
+    var shape = Shape.{
+        main = line,
+        extra = kept
+    };
+    shape.main.start.x = 9;
+    print shape.main.start.x;
+    print line.start.x;
+}

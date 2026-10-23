@@ -1,0 +1,31 @@
+// Throwing out of a function and catching must release struct locals.
+// Expected output: 0, 4, 1
+enum Fail {
+    Bad
+}
+
+struct Point {
+    var x: int,
+    var y: int
+}
+
+func risky(n: int) throws Fail -> int {
+    let p = Point.{ x = n, y = n };
+    if n == 0 {
+        throw ::Bad;
+    }
+    return p.x;
+}
+
+func risky_struct(n: int) throws Fail -> Point
+    guard n > 0 else ::Bad
+{
+    return Point.{ x = n, y = n };
+}
+
+func main() {
+    print try risky(0) catch { 0 };
+    print try risky(4) catch { 0 };
+    let p = try risky_struct(1) catch { Point.{ x = 0, y = 0 } };
+    print p.x;
+}
