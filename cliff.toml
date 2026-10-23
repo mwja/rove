@@ -49,6 +49,9 @@ require_conventional = false
 split_commits = false
 # An array of regex based parsers to modify commit messages prior to further processing.
 commit_preprocessors = [
+    # Join a summary that wraps onto line 2 back into one line, otherwise it
+    # isn't a valid conventional commit and gets filtered out.
+    { pattern = '\A([^\n]+)\n([^\n]+)', replace = "${1} ${2}" },
     # Replace issue numbers with link templates to be updated in `changelog.postprocessors`.
     #{ pattern = '\((\w+\s)?#([0-9]+)\)', replace = "([#${2}](<REPO>/issues/${2}))"},
     # Check spelling of the commit message using https://github.com/crate-ci/typos.
@@ -70,6 +73,8 @@ commit_parsers = [
     { message = "^style", group = "<!-- 5 -->🎨 Styling" },
     { message = "^test", group = "<!-- 6 -->🧪 Testing" },
     { message = "^chore\\(release\\): prepare for", skip = true },
+    # cargo-release's own release commit
+    { message = "^chore: Release", skip = true },
     { message = "^chore\\(deps.*\\)", skip = true },
     { message = "^chore\\(pr\\)", skip = true },
     { message = "^chore\\(pull\\)", skip = true },
