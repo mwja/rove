@@ -1,0 +1,32 @@
+#!/bin/sh
+# Reject commits that aren't Conventional Commits, so git-cliff doesn't
+# silently drop them from the changelog.
+
+msg_file="$1"
+
+# Drop the `git commit -v` diff and comment lines, like git does.
+msg=$(sed -e '/^# -* >8 -*$/,$d' -e '/^#/d' "$msg_file")
+
+header=$(printf '%s\n' "$msg" | sed -n '1p')
+second=$(printf '%s\n' "$msg" | sed -n '2p')
+
+# Let git's own generated messages through.
+case "$header" in
+    Merge\ *|Revert\ *|fixup!\ *|squash!\ *|amend!\ *) exit 0 ;;
+esac
+
+types='feat|ft|fix|docs?|perf|refactor|style|test|chore|ci|build|revert'
+
+if ! printf '%s\n' "$header" | grep -Eq "^($types)(\([^()]+\))?!?: .+"; then
+    echo "commit-msg: not a conventional commit:" >&2
+    echo "    $header" >&2
+    echo "expected: <type>(<scope>): <description>" >&2
+    echo "types: $types" >&2
+    exit 1
+fi
+
+if [ -n "$second" ]; then
+    echo "commit-msg: the summary must be one line, followed by a blank line." >&2
+    echo "git-cliff skips commits whose summary wraps onto line 2." >&2
+    exit 1
+fi
