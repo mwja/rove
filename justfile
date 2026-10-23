@@ -45,8 +45,11 @@ remove-hook:
 
 ## Release stuff
 
+# staged so cargo-release's release commit (and so the tag) includes it, even
+# the first time when it's still untracked
 changelog version:
     git-cliff --output CHANGELOG.md --tag {{ version }}
+    git add CHANGELOG.md
 
 version level:
     cargo release --sign-tag --no-publish --no-push --execute {{ level }}
