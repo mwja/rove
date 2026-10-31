@@ -321,7 +321,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..)
-                | TyKind::Struct(..) => {
+                | TyKind::Struct(..)
+                | TyKind::Str => {
                     bug!(
                         "tried to negate a non-numeric type at codegen (typeck failed to check it)"
                     )
@@ -343,7 +344,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..)
-                | TyKind::Struct(..) => {
+                | TyKind::Struct(..)
+                | TyKind::Str => {
                     bug!(
                         "tried to do logical or bitwise not on type at codegen (typeck failed to check it)"
                     )
@@ -381,12 +383,25 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 .builder
                 .ins()
                 .iconst(repr, if lit.value.as_bool() { 1 } else { 0 }),
+            TyKind::Str => {
+                let ast::AstLiteralKind::Str(text) = lit.value else {
+                    bug!("a str literal has a non-str value")
+                };
+                // Stored as [len: u64 LE][bytes...]; the str is a pointer to this.
+                let mut bytes = Vec::with_capacity(8 + text.len());
+                bytes.extend((text.len() as u64).to_le_bytes());
+                bytes.extend(text.as_bytes());
+                let data_id = self.define_anon(bytes.into_boxed_slice(), false, false);
+                let gv = self.module.declare_data_in_func(data_id, self.builder.func);
+                self.builder.ins().symbol_value(repr, gv)
+            }
             TyKind::Enum(..)
             | TyKind::FullFallible(..)
             | TyKind::Func(..)
             | TyKind::Never
             | TyKind::Void
-            | TyKind::Struct(..) => {
+            | TyKind::Struct(..)
+            | TyKind::Str => {
                 bug!("attempted to lower literal of type")
             }
         }

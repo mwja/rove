@@ -10,6 +10,8 @@ pub(super) struct Runtime {
     pub(super) println_f64: FuncId,
     /// rt_println_bool(value:i8) -> ()
     pub(super) println_bool: FuncId,
+    /// rt_println_str(value:ptr) -> ()
+    pub(super) println_str: FuncId,
     /// rt_abort_constraint(kind:u8, tag:*u8, tag_len:u32, fn_name:*u8, fn_name_len:u32, line:u32) -> !
     pub(super) abort_constraint: FuncId,
     /// rt_abort_forced_try(fn_name:*u8, fn_name_len:u32, line:u32) -> !
@@ -59,6 +61,17 @@ impl Runtime {
 
                 module
                     .declare_function("rt_println_bool", Linkage::Import, &printf_sig)
+                    .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
+            },
+            println_str: {
+                let mut printf_sig = module.make_signature();
+
+                printf_sig
+                    .params
+                    .push(AbiParam::new(module.target_config().pointer_type()));
+
+                module
+                    .declare_function("rt_println_str", Linkage::Import, &printf_sig)
                     .unwrap_or_else(|e| bug!("unable to declare runtime function: {e}"))
             },
             abort_constraint: {

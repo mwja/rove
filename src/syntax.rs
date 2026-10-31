@@ -625,6 +625,13 @@ mod grammar {
             f64,
         ),
         Bool(BoolLiteral),
+        Str(
+            #[rust_sitter::leaf(
+              pattern = r#""([^"\\\n]|\\.)*""#,
+              transform = |v| v.to_string()
+            )]
+            String,
+        ),
     }
 
     pub enum BoolLiteral {
@@ -1732,7 +1739,39 @@ impl<'a> ProgramLowerer<'a> {
             }
             grammar::Literal::Float(value) => ast::AstLiteralKind::Float(value),
             grammar::Literal::Bool(value) => ast::AstLiteralKind::Bool(value.into()),
+            grammar::Literal::Str(text) => ast::AstLiteralKind::Str(self.unescape_str(&text, span)),
         }
+    }
+
+    /// Strips the surrounding quotes of a string literal and resolves its escapes.
+    fn unescape_str(&mut self, text: &str, span: (usize, usize)) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut chars = text[1..text.len() - 1].chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some('0') => out.push('\0'),
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                other => {
+                    self.errors
+                        .push(Diagnostic::new("unknown escape in string literal").with_label(
+                            format!(
+                                "\\{} is not a valid escape",
+                                other.map(String::from).unwrap_or_default()
+                            ),
+                            Span::from_span(self.source_file_id, span),
+                        ));
+                }
+            }
+        }
+        out
     }
 
     fn lower_print_stmt(&mut self, stmt: Spanned<grammar::PrintStmt>) -> ast::AstPrintStmt {

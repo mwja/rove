@@ -107,6 +107,8 @@ pub enum TyKind {
     Enum(EnumId),
     /// Struct
     Struct(StructId),
+    /// Unmanaged, immutable string (a literal in the data section)
+    Str,
 }
 
 impl From<Ty> for Rc<TyKind> {
@@ -136,6 +138,7 @@ impl Display for TyKind {
             TyKind::FullFallible(ty, throws_ty) => write!(f, "{} (throws {})", ty, throws_ty),
             TyKind::Enum(enum_id) => write!(f, "enum_variant({})", enum_id),
             TyKind::Struct(struct_id) => write!(f, "struct({})", struct_id),
+            TyKind::Str => write!(f, "str"),
         }
     }
 }

@@ -580,7 +580,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             TyKind::Void | TyKind::Never => unreachable!(),
             TyKind::Func(_) => unreachable!(),
             TyKind::FullFallible(_, _) => unreachable!(),
-            TyKind::Bool => self.runtime.println_f64,
+            TyKind::Bool => self.runtime.println_bool,
+            TyKind::Str => self.runtime.println_str,
             TyKind::Struct(_) => unreachable!(),
         });
         let _call = self.builder.ins().call(printf_ref, &[x]);

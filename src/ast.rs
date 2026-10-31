@@ -1183,6 +1183,7 @@ pub enum AstLiteralKind {
     Int(i64),
     Float(f64),
     Bool(bool),
+    Str(String),
 }
 
 impl AstLiteralKind {
@@ -1191,6 +1192,7 @@ impl AstLiteralKind {
             AstLiteralKind::Int(value) => *value,
             AstLiteralKind::Bool(_) => bug!("Expected int literal, found bool"),
             AstLiteralKind::Float(_) => bug!("Expected int literal, found float"),
+            AstLiteralKind::Str(_) => bug!("Expected int literal, found str"),
         }
     }
 
@@ -1199,6 +1201,7 @@ impl AstLiteralKind {
             AstLiteralKind::Int(value) => *value as f64,
             AstLiteralKind::Bool(_) => bug!("Expected float literal, found bool"),
             AstLiteralKind::Float(value) => *value,
+            AstLiteralKind::Str(_) => bug!("Expected float literal, found str"),
         }
     }
 
@@ -1207,6 +1210,7 @@ impl AstLiteralKind {
             AstLiteralKind::Int(_) => bug!("Expected bool literal, found int"),
             AstLiteralKind::Bool(value) => *value,
             AstLiteralKind::Float(_) => bug!("Expected bool literal, found float"),
+            AstLiteralKind::Str(_) => bug!("Expected bool literal, found str"),
         }
     }
 }
@@ -1217,6 +1221,7 @@ impl Display for AstLiteralKind {
             AstLiteralKind::Int(value) => write!(f, "{}", value),
             AstLiteralKind::Float(value) => write!(f, "{:?}", value),
             AstLiteralKind::Bool(value) => write!(f, "{}", value),
+            AstLiteralKind::Str(value) => write!(f, "{:?}", value),
         }
     }
 }

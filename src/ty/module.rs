@@ -489,7 +489,8 @@ impl ModuleTree {
             | TyKind::Never
             | TyKind::Bool
             | TyKind::Func(..)
-            | TyKind::Struct(..) => return Err(ResolverError::CannotImplyTy(expected, path)),
+            | TyKind::Struct(..)
+            | TyKind::Str => return Err(ResolverError::CannotImplyTy(expected, path)),
         };
 
         match base {

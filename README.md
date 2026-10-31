@@ -19,6 +19,14 @@ and my first failed attempt at a language was called Otter).
 
 See [EXAMPLES.md](./EXAMPLES.md) for runnable examples (at time of writing). The language is informally design-by-contract and allows preconditions and postconditions to be defined in function headers. It is meant to be readable (inspired by Swift on some of its syntax). Once the language is stabilised, I will make a full guide and begin dog-fooding it by rewriting the compiler in Rove itself.
 
+## Hello, World!
+
+```swift
+func main() {
+  print "Hello, World"
+}
+```
+
 ## Steps towards full language-hood
 
 🏷️ _v0.0.1_

@@ -32,6 +32,7 @@ pub(super) fn typeck_expr(tccx: &mut TypeckCtxt, expr: &ast::AstExpr) -> Result<
             ast::AstLiteralKind::Int(_) => Ok(tccx.ty(TyKind::Int)),
             ast::AstLiteralKind::Float(_) => Ok(tccx.ty(TyKind::Float)),
             ast::AstLiteralKind::Bool(_) => Ok(tccx.ty(TyKind::Bool)),
+            ast::AstLiteralKind::Str(_) => Ok(tccx.ty(TyKind::Str)),
         },
 
         (None, ast::AstExprKind::Unary(un_expr)) => typeck_unary_expr(tccx, &un_expr),

@@ -121,7 +121,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..)
-                | TyKind::Struct(..) => {
+                | TyKind::Struct(..)
+                | TyKind::Str => {
                     unreachable!()
                 }
             },
@@ -134,7 +135,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..)
-                | TyKind::Struct(..) => {
+                | TyKind::Struct(..)
+                | TyKind::Str => {
                     unreachable!()
                 }
             },
@@ -147,7 +149,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..)
-                | TyKind::Struct(..) => {
+                | TyKind::Struct(..)
+                | TyKind::Str => {
                     unreachable!()
                 }
             },
@@ -160,7 +163,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::Func(_)
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..)
-                | TyKind::Struct(..) => {
+                | TyKind::Struct(..)
+                | TyKind::Str => {
                     unreachable!()
                 }
             },
@@ -214,7 +218,7 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                     TyKind::Func(_) => unreachable!(),
                     TyKind::Void | TyKind::Never => unreachable!(),
                     TyKind::FullFallible(_, _) => unreachable!(),
-                    TyKind::Struct(..) => unreachable!(),
+                    TyKind::Struct(..) | TyKind::Str => unreachable!(),
                 }
             }
             ast::AstBinaryOperator::LAnd | ast::AstBinaryOperator::LOr => {

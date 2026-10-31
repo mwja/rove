@@ -24,6 +24,17 @@ pub extern "C" fn rt_println_bool(value: bool) {
     println!("{:?}", value);
 }
 
+/// Prints a `str`: a pointer to `[len: u64][bytes...]` in the data section.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_println_str(value: *const u64) {
+    let s = unsafe {
+        let len = *value as usize;
+        let slice = std::slice::from_raw_parts(value.add(1) as *const u8, len);
+        String::from_utf8_lossy(slice)
+    };
+    println!("{}", s);
+}
+
 #[repr(u8)]
 pub enum Constraint {
     Require = 0,

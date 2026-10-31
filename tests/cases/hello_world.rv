@@ -1,0 +1,6 @@
+// String literals (unmanaged `str`, stored in the data section).
+// Expected output: Hello World, then a line with a quote and a tab.
+func main() {
+    print "Hello World";
+    print "escapes: \"quoted\"\ttab";
+}
