@@ -1,6 +1,15 @@
 // String literals (unmanaged `str`, stored in the data section).
 // Expected output: Hello World, then a line with a quote and a tab.
+
+func hello(name: str) {
+    let s = string_from("Hello, ");
+    string_push(s, name);
+    string_push(s, "!");
+    print s;
+}
+
 func main() {
     print "Hello World";
+    hello("John Doe");
     print "escapes: \"quoted\"\ttab";
 }

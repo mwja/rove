@@ -5,4 +5,5 @@ input_file: tests/cases/hello_world.rv
 exit: Some(0)
 --- stdout
 Hello World
+Hello, John Doe!
 escapes: "quoted"	tab

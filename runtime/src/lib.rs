@@ -238,7 +238,10 @@ unsafe fn string_bytes<'a>(s: *const StringObj) -> &'a [u8] {
 
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_println_string(value: *const StringObj) {
-    println!("{}", String::from_utf8_lossy(unsafe { string_bytes(value) }));
+    println!(
+        "{}",
+        String::from_utf8_lossy(unsafe { string_bytes(value) })
+    );
 }
 
 #[unsafe(no_mangle)]
@@ -266,11 +269,13 @@ pub extern "C" fn rt_string_clone(s: *const StringObj) -> *mut StringObj {
     out
 }
 
+/// Push a str onto a string
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_string_push(s: *mut StringObj, x: *const u64) {
     unsafe { with_buf(s, |v| v.extend_from_slice(str_bytes(x))) };
 }
 
+/// Push a string onto a string
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_string_extend(s: *mut StringObj, x: *const StringObj) {
     // copy first: `x` may be `s` itself, whose buffer can move as it grows.
