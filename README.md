@@ -79,7 +79,7 @@ func main() {
 🏷️ _v0.0.6_
 
 - [ ] Defer/errdefer
-- [ ] Managed/unmanaged strings
+- [x] Managed/unmanaged strings
 - [ ] Arrays
 - [ ] Optimise ARC: borrow where possible, move on last use, cancel retain/release pairs
 

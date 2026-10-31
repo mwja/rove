@@ -1,0 +1,11 @@
+// String type errors: str and string don't mix, and have no operators.
+func takes_string(s: string) -> int {
+    string_len(s)
+}
+
+func main() {
+    print takes_string("not managed");
+    print "a" + "b";
+    var s = string_new();
+    s = "unmanaged";
+}

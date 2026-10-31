@@ -40,6 +40,22 @@ pub fn generate_object(
 
     compile_module(tcx, &ast, &mut module, rcx, &mut table, &mut func_sig)?;
 
+    // Builtins are implemented by the runtime, so are only imported.
+    for builtin in tcx.builtins.values() {
+        let Some(Def {
+            kind: DefKind::Function(sig),
+        }) = tcx.defs.def(builtin.def_id)
+        else {
+            bug!("a builtin has no function def");
+        };
+        let id = module.declare_function(
+            builtin.symbol,
+            Linkage::Import,
+            &lower_sig(rcx, sig, false),
+        )?;
+        table.insert(builtin.def_id, id);
+    }
+
     let emit_clif_file = match &options.emit_clif_to {
         Some(path) => Some(
             std::fs::File::create(path)

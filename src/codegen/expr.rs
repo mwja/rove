@@ -322,7 +322,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..)
                 | TyKind::Struct(..)
-                | TyKind::Str => {
+                | TyKind::Str
+                | TyKind::String => {
                     bug!(
                         "tried to negate a non-numeric type at codegen (typeck failed to check it)"
                     )
@@ -345,7 +346,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
                 | TyKind::FullFallible(_, _)
                 | TyKind::Enum(..)
                 | TyKind::Struct(..)
-                | TyKind::Str => {
+                | TyKind::Str
+                | TyKind::String => {
                     bug!(
                         "tried to do logical or bitwise not on type at codegen (typeck failed to check it)"
                     )
@@ -401,7 +403,8 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
             | TyKind::Never
             | TyKind::Void
             | TyKind::Struct(..)
-            | TyKind::Str => {
+            | TyKind::Str
+            | TyKind::String => {
                 bug!("attempted to lower literal of type")
             }
         }

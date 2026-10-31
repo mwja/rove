@@ -10,11 +10,11 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         }
 
         // Structure is (on 64 bit platforms)
-        // 48..40   ..32      ..24        ..16  ..8.     ..0
-        // +------+-----+----------+-----------+----+--------+
-        // | size |align|ref_offset|ref_off_len|name|name_len|
-        // +------+-----+----------+-----------+----+--------+
-        // usize. usize. *u32.      usize.      *u8. usize
+        // 0..    8..   16..       24..        32.. 40..     48..56
+        // +------+-----+----------+-----------+----+--------+----+
+        // | size |align|ref_offset|ref_off_len|name|name_len|drop|
+        // +------+-----+----------+-----------+----+--------+----+
+        // usize. usize. *u32.      usize.      *u8. usize.   fn ptr (null for structs)
 
         let layout = self.get_cached_layout(struct_.id);
         let ptr_ty = self.module.target_config().pointer_type();
@@ -33,15 +33,16 @@ impl<'a, 'o> CraneliftCodegen<'a, 'o> {
         let roffset_data = (ref_offsets_len > 0)
             .then(|| self.define_anon(iter_u32_to_u8(ref_offsets.into_iter()), false, false));
 
-        // size | align | ref_offsets | ref_offsets_len | name | name_len
+        // size | align | ref_offsets | ref_offsets_len | name | name_len | drop
         // pointer slots are left as zero then are filed in with the relocations (below)
-        let mut bytes = Vec::with_capacity(ptr_bytes * 6);
+        let mut bytes = Vec::with_capacity(ptr_bytes * 7);
         bytes.extend(usize_le(layout.total_size as u64));
         bytes.extend(usize_le(layout.total_align as u64));
         bytes.extend(usize_le(0)); // ref_offsets (reloc, or stays null)
         bytes.extend(usize_le(ref_offsets_len as u64));
         bytes.extend(usize_le(0)); // name (reloc)
         bytes.extend(usize_le(struct_.name.len() as u64));
+        bytes.extend(usize_le(0)); // drop (structs need none, their ref fields are released by offset)
 
         let mut desc = DataDescription::new();
         desc.define(bytes.into_boxed_slice());

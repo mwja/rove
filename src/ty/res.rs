@@ -175,6 +175,8 @@ pub fn resolve_type(
         ast::AstType::Int => Ok(tcx.int_ty()),
         ast::AstType::Void => Ok(tcx.void_ty()),
         ast::AstType::Bool => Ok(tcx.bool_ty()),
+        ast::AstType::Str => Ok(tcx.ty(TyKind::Str)),
+        ast::AstType::String => Ok(tcx.ty(TyKind::String)),
         ast::AstType::Path(path) => {
             let Some(res) = tcx.resolve_path(path.clone(), mx.module_id())? else {
                 return Err(TyResolutionError::PathNotFound(

@@ -1,7 +1,13 @@
-use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::{BTreeMap, HashMap},
+    fmt::Display,
+    rc::Rc,
+};
 
 use crate::{
     arena::Store,
+    builtins::Builtin,
     ast::{AstImplicitPathExpr, AstPath, AstPathExpr, NodeId},
     defs::{DefId, Defs, FuncSig},
     enums::{EnumId, Enums},
@@ -75,7 +81,7 @@ impl Ty {
 
     /// Is this refcounted as does it need rt_retain?
     pub fn is_ref_counted(&self) -> bool {
-        matches!(*self.kind, TyKind::Struct(_))
+        matches!(*self.kind, TyKind::Struct(_) | TyKind::String)
     }
 }
 
@@ -109,6 +115,8 @@ pub enum TyKind {
     Struct(StructId),
     /// Unmanaged, immutable string (a literal in the data section)
     Str,
+    /// Managed, growable, ref counted string on the heap
+    String,
 }
 
 impl From<Ty> for Rc<TyKind> {
@@ -139,6 +147,7 @@ impl Display for TyKind {
             TyKind::Enum(enum_id) => write!(f, "enum_variant({})", enum_id),
             TyKind::Struct(struct_id) => write!(f, "struct({})", struct_id),
             TyKind::Str => write!(f, "str"),
+            TyKind::String => write!(f, "string"),
         }
     }
 }
@@ -154,6 +163,8 @@ pub struct TyCtxt {
     pub structs: Structs,
     pub mcx: ModuleCtxt,
     pub entry_point: Option<DefId>,
+    /// Builtin functions by name, in scope everywhere (see `builtins`).
+    pub builtins: BTreeMap<&'static str, Builtin>,
 }
 
 impl TyCtxt {
@@ -255,6 +266,7 @@ impl TyCtxt {
             structs: Structs::default(),
             mcx: ModuleCtxt::default(),
             entry_point: None,
+            builtins: BTreeMap::new(),
         }
     }
 

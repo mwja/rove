@@ -1,0 +1,61 @@
+// Managed strings: building, growing, aliasing, cloning, struct fields,
+// passing to and returning from functions. Nothing should leak.
+// Expected output: hello, 5, 11, hello world, 11, hello world!, hello world!,
+// hello world, abab, 4, greeting: hi there, hi there, 3
+struct Named {
+    var name: string,
+    let id: int
+}
+
+func greet(who: str) -> string {
+    let s = string_from("greeting: ");
+    string_push(s, who);
+    s
+}
+
+func shout(s: string) -> string {
+    let out = string_clone(s);
+    string_push(out, "!");
+    out
+}
+
+func main() {
+    print "hello";
+    print str_len("hello");
+    print str_len("hello world");
+
+    var s = string_new();
+    string_push(s, "hello");
+    string_push(s, " world");
+    print s;
+    print string_len(s);
+
+    // aliases share one string
+    let alias = s;
+    let loud = shout(alias);
+    print loud;
+    string_push(alias, "!");
+    print s;
+
+    // clones don't
+    let copy = string_clone(s);
+    s = string_from("hello world");
+    print s;
+
+    // extending with itself
+    let ab = string_from("ab");
+    string_extend(ab, ab);
+    print ab;
+    print string_len(ab);
+
+    // returned from a function, discarded results
+    print greet("hi there");
+    string_from("discarded");
+    shout(copy);
+
+    // in a struct field, overwritten then freed with the struct
+    var n = Named.{ name = string_from("x"), id = 3 };
+    n.name = string_from("hi there");
+    print n.name;
+    print n.id;
+}

@@ -1,0 +1,21 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/leak_strings.rv
+---
+exit: Some(0)
+--- stdout
+hello
+5
+11
+hello world
+11
+hello world!
+hello world!
+hello world
+abab
+4
+greeting: hi there
+hi there
+3
+--- stderr
+rove: live objects at exit: 0 (remove debug_leaks from ROVEFLAGS to hide this message)

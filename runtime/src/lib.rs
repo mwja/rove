@@ -2,6 +2,7 @@
 
 use std::{
     alloc::Layout,
+    mem::ManuallyDrop,
     sync::atomic::{AtomicUsize, Ordering},
 };
 
@@ -27,12 +28,7 @@ pub extern "C" fn rt_println_bool(value: bool) {
 /// Prints a `str`: a pointer to `[len: u64][bytes...]` in the data section.
 #[unsafe(no_mangle)]
 pub extern "C" fn rt_println_str(value: *const u64) {
-    let s = unsafe {
-        let len = *value as usize;
-        let slice = std::slice::from_raw_parts(value.add(1) as *const u8, len);
-        String::from_utf8_lossy(slice)
-    };
-    println!("{}", s);
+    println!("{}", String::from_utf8_lossy(unsafe { str_bytes(value) }));
 }
 
 #[repr(u8)]
@@ -98,7 +94,13 @@ pub struct TypeInfo {
     ref_offsets_len: usize,
     name: *const u8,
     name_len: usize,
+    /// Frees anything the object owns outside of its allocation (e.g. a
+    /// string's buffer). Called before the object itself is freed.
+    drop: Option<extern "C" fn(*mut Header)>,
 }
+
+// Only ever read, and the pointers point at static data.
+unsafe impl Sync for TypeInfo {}
 
 #[repr(C)]
 pub struct Header {
@@ -162,11 +164,123 @@ pub extern "C" fn rt_release(item_with_header: *const Header) {
                 // Release a referenced ref-counted value too
                 rt_release(child);
             }
+            if let Some(drop) = (*ti).drop {
+                drop(ih);
+            }
             let layout = Layout::from_size_align((*ti).size, (*ti).align).unwrap();
             std::alloc::dealloc(ih as *mut u8, layout);
             LIVE.fetch_sub(1, Ordering::SeqCst);
         }
     }
+}
+
+/// Reads a `str`: a pointer to `[len: u64][bytes...]` in the data section.
+unsafe fn str_bytes<'a>(s: *const u64) -> &'a [u8] {
+    unsafe { std::slice::from_raw_parts(s.add(1) as *const u8, *s as usize) }
+}
+
+/// A managed `string`: a ref counted object whose bytes live in a separate,
+/// growable buffer so the object itself never moves.
+#[repr(C)]
+pub struct StringObj {
+    header: Header,
+    buf: *mut u8,
+    len: usize,
+    cap: usize,
+}
+
+static STRING_TINFO: TypeInfo = TypeInfo {
+    size: size_of::<StringObj>(),
+    align: align_of::<StringObj>(),
+    ref_offsets: std::ptr::null(),
+    ref_offsets_len: 0,
+    name: b"string".as_ptr(),
+    name_len: 6,
+    drop: Some(string_drop),
+};
+
+extern "C" fn string_drop(h: *mut Header) {
+    let s = h as *mut StringObj;
+    unsafe {
+        if !(*s).buf.is_null() {
+            drop(Vec::from_raw_parts((*s).buf, (*s).len, (*s).cap));
+        }
+    }
+}
+
+/// Runs `f` with the string's buffer as a `Vec`, storing it back afterwards.
+unsafe fn with_buf<R>(s: *mut StringObj, f: impl FnOnce(&mut Vec<u8>) -> R) -> R {
+    unsafe {
+        let s = &mut *s;
+        let mut v = if s.buf.is_null() {
+            Vec::new()
+        } else {
+            Vec::from_raw_parts(s.buf, s.len, s.cap)
+        };
+        let r = f(&mut v);
+        let mut v = ManuallyDrop::new(v);
+        s.buf = v.as_mut_ptr();
+        s.len = v.len();
+        s.cap = v.capacity();
+        r
+    }
+}
+
+unsafe fn string_bytes<'a>(s: *const StringObj) -> &'a [u8] {
+    unsafe {
+        if (*s).buf.is_null() {
+            &[]
+        } else {
+            std::slice::from_raw_parts((*s).buf, (*s).len)
+        }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_println_string(value: *const StringObj) {
+    println!("{}", String::from_utf8_lossy(unsafe { string_bytes(value) }));
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_str_len(s: *const u64) -> i64 {
+    unsafe { *s as i64 }
+}
+
+/// Returns a new string at +1.
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_string_new() -> *mut StringObj {
+    rt_alloc(&STRING_TINFO) as *mut StringObj // zeroed: empty with a null buffer
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_string_from(s: *const u64) -> *mut StringObj {
+    let out = rt_string_new();
+    unsafe { with_buf(out, |v| v.extend_from_slice(str_bytes(s))) };
+    out
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_string_clone(s: *const StringObj) -> *mut StringObj {
+    let out = rt_string_new();
+    unsafe { with_buf(out, |v| v.extend_from_slice(string_bytes(s))) };
+    out
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_string_push(s: *mut StringObj, x: *const u64) {
+    unsafe { with_buf(s, |v| v.extend_from_slice(str_bytes(x))) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_string_extend(s: *mut StringObj, x: *const StringObj) {
+    // copy first: `x` may be `s` itself, whose buffer can move as it grows.
+    let bytes = unsafe { string_bytes(x) }.to_vec();
+    unsafe { with_buf(s, |v| v.extend_from_slice(&bytes)) };
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rt_string_len(s: *const StringObj) -> i64 {
+    unsafe { (*s).len as i64 }
 }
 
 type RtEntryPoint = unsafe extern "C" fn() -> i64;

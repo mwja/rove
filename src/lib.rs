@@ -12,6 +12,7 @@ mod bug;
 
 mod arena;
 mod ast;
+mod builtins;
 mod codegen;
 mod defs;
 mod enums;
@@ -103,6 +104,9 @@ pub fn compile(
     // Now define the defs with their param types.
     defs::define(&mut ty_ctxt, dcx, &ast)
         .map_err(|errs| errs.diagnose_many_with(&mut node_to_span))?;
+
+    // Builtins come after the program's defs (see `builtins::register`).
+    builtins::register(&mut ty_ctxt);
 
     // Typeck everything now we have all details
     ty_ctxt.bodies = ty::typeck::typeck_ast(&mut ty_ctxt, &ast)

@@ -1,0 +1,30 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_strings.rv
+---
+compile error:
+[1009] Error: incorrect argument type (expected string for argument 0, got str)
+   ╭─[ tests/cases/err_strings.rv:7:24 ]
+   │
+ 7 │     print takes_string("not managed");
+   │                        ──────┬──────  
+   │                              ╰──────── incorrect argument of type str passed here
+───╯
+[1053] Error: operator is not implemented on this type
+   ╭─[ tests/cases/err_strings.rv:8:11 ]
+   │
+ 8 │     print "a" + "b";
+   │           ────┬────  
+   │               ╰────── attempted to perform operator + on type str here
+   │ 
+   │ Help: this operator is not implemented for this type (and may not be implemented yet)
+───╯
+[1002] Error: types str and string are incompatible
+    ╭─[ tests/cases/err_strings.rv:10:9 ]
+    │
+ 10 │     s = "unmanaged";
+    │     ┬   ─────┬─────  
+    │     ╰──────────────── but this value has type string
+    │              │       
+    │              ╰─────── this value has type str
+────╯

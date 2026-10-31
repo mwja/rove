@@ -1,0 +1,12 @@
+---
+source: tests/snapshots.rs
+input_file: tests/cases/err_string_escape.rv
+---
+compile error:
+Error: unknown escape in string literal
+   ╭─[ tests/cases/err_string_escape.rv:3:11 ]
+   │
+ 3 │     print "bad /q";
+   │           ────┬───  
+   │               ╰───── /q is not a valid escape
+───╯

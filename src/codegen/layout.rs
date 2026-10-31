@@ -1,7 +1,7 @@
 use cranelift::prelude::Type;
 use std::cmp::max;
 
-use crate::{codegen::repr::ReprCx, structs::Struct, ty::TyKind};
+use crate::{codegen::repr::ReprCx, structs::Struct};
 
 #[derive(Debug, Clone)]
 pub struct CalculatedField {
@@ -82,7 +82,7 @@ pub fn calculate_layout(rcx: &ReprCx, struct_: &Struct) -> StructLayout {
         .iter()
         .map(|f| {
             let ty = rcx.repr_of(&f.ty).expect_scalar("...");
-            (ty, matches!(f.ty.kind(), TyKind::Struct(_)))
+            (ty, f.ty.is_ref_counted())
         })
         .collect::<Vec<_>>();
 

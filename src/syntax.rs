@@ -26,6 +26,10 @@ mod grammar {
         Void,
         #[rust_sitter::leaf(text = "bool")]
         Bool,
+        #[rust_sitter::leaf(text = "str")]
+        Str,
+        #[rust_sitter::leaf(text = "string")]
+        String,
         Path(Box<Spanned<Path>>),
     }
 
@@ -1099,6 +1103,8 @@ impl<'a> ProgramLowerer<'a> {
             Some(grammar::Type::Int) => ast::AstType::Int,
             Some(grammar::Type::Void) => ast::AstType::Void,
             Some(grammar::Type::Bool) => ast::AstType::Bool,
+            Some(grammar::Type::Str) => ast::AstType::Str,
+            Some(grammar::Type::String) => ast::AstType::String,
             Some(grammar::Type::Path(path)) => ast::AstType::Path(self.lower_path(path.value)),
             None => ast::AstType::Void,
         }

@@ -80,7 +80,7 @@ impl ReprCx {
             TyKind::Enum(_) => Repr::Scalar(types::I64),
             TyKind::Struct(_) => Repr::Scalar(self.ptr()), // for now structs are always pointers on the heap.
             TyKind::Bool => Repr::Scalar(types::I8),
-            TyKind::Str => Repr::Scalar(self.ptr()),
+            TyKind::Str | TyKind::String => Repr::Scalar(self.ptr()),
             TyKind::FullFallible(ty, throws_ty) => self.fn_return_repr(ty, Some(throws_ty)),
         }
     }
@@ -97,7 +97,7 @@ impl ReprCx {
             TyKind::Struct(_) => Repr::Scalar(self.ptr()),
             TyKind::Enum(_) => Repr::Scalar(types::I64),
             TyKind::Bool => Repr::Scalar(types::I8),
-            TyKind::Str => Repr::Scalar(self.ptr()),
+            TyKind::Str | TyKind::String => Repr::Scalar(self.ptr()),
             TyKind::FullFallible(ty, _) => self.repr_of(ty),
         }
     }

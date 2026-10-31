@@ -355,6 +355,7 @@ impl<'c> TypeckCtxt<'c> {
                 s.get(name).cloned()
             })
             .or_else(|| self.tcx.resolve_single_path(name, self.module_id))
+            .or_else(|| self.tcx.builtins.get(name).map(|b| Res::Def(b.def_id)))
     }
 
     fn resolve_place(&mut self, place: &AstPlace) -> Result<Option<Res>, TypeError> {

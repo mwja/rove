@@ -1,0 +1,4 @@
+// Unknown escapes in string literals are rejected.
+func main() {
+    print "bad \q";
+}

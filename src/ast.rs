@@ -85,6 +85,8 @@ pub enum AstType {
     Float,
     Void,
     Bool,
+    Str,
+    String,
     Path(AstPath),
 }
 
@@ -98,6 +100,8 @@ impl Display for AstType {
                 AstType::Float => "float".to_owned(),
                 AstType::Void => "void".to_owned(),
                 AstType::Bool => "bool".to_owned(),
+                AstType::Str => "str".to_owned(),
+                AstType::String => "string".to_owned(),
                 AstType::Path(path) => path.to_string(),
             }
         )
